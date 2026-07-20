@@ -228,6 +228,7 @@ func (s Subscription[Message]) IsNone() bool {
 	}
 }
 
+// String returns a diagnostic description of the subscription shape
 func (s Subscription[Message]) String() string {
 	switch s.kind {
 	case subscriptionNone:

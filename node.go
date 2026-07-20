@@ -257,11 +257,17 @@ func StyledTextInput[Message any](
 }
 
 // ScrollViewport returns a clipped viewport with runtime-owned cell offset
+//
+// The supplied child tree is fully constructed and measured, and render-tree
+// traversal is not virtualized.
 func ScrollViewport[Message any](id NodeID, child Node[Message]) Node[Message] {
 	return ScrollViewportWithOptions(id, child, DefaultScrollViewportOptions[Message]())
 }
 
 // ScrollViewportWithOptions returns a clipped viewport with configured behavior
+//
+// The supplied child tree is fully constructed and measured, and render-tree
+// traversal is not virtualized.
 func ScrollViewportWithOptions[Message any](
 	id NodeID,
 	child Node[Message],

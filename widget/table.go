@@ -109,7 +109,9 @@ func (t Table[Message]) ColumnAlignment(column int, alignment tui.HorizontalAlig
 // Viewport keeps the header fixed and wraps data rows in a Core ScrollViewport
 //
 // viewportID must be distinct from the table root and row IDs. Applications
-// may control its retained offset through Runtime.SetScrollOffset.
+// may control its retained offset through Runtime.SetScrollOffset. The
+// viewport does not virtualize rows; pass a bounded row set for large
+// collections.
 func (t Table[Message]) Viewport(viewportID tui.NodeID, bodyHeight tui.Length) Table[Message] {
 	t.viewportID = viewportID
 	t.viewportHeight = bodyHeight

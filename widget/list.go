@@ -118,7 +118,9 @@ func (l List[Message]) Paginate(page, pageSize int) List[Message] {
 // Viewport wraps the list in a Core ScrollViewport using a sizing rule
 //
 // viewportID must be distinct from the list root and item IDs. Applications
-// may control its retained offset through Runtime.SetScrollOffset.
+// may control its retained offset through Runtime.SetScrollOffset. This does
+// not limit item construction; use Window or Paginate before Viewport for
+// large collections.
 func (l List[Message]) Viewport(viewportID tui.NodeID, height tui.Length) List[Message] {
 	l.viewportID = viewportID
 	l.viewportHeight = height

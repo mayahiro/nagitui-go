@@ -10,7 +10,7 @@ lint:
 	GOTOOLCHAIN=local go vet ./...
 
 format:
-	GOWORK=off GOTOOLCHAIN=local go -C tools tool goimports -local github.com/mayahiro/nagitui-go -w ..
+	find . -type f -name '*.go' -not -path './.git/*' -exec gofmt -w {} +
 
 format-check:
 	@unformatted="$$(find . -type f -name '*.go' -not -path './.git/*' -exec gofmt -l {} +)"; test -z "$$unformatted" || { printf '%s\n' "$$unformatted"; exit 1; }
