@@ -1,0 +1,86 @@
+//go:build linux || darwin
+
+package ttyunix
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+	"unsafe"
+)
+
+type unixBackend struct{}
+
+type windowSize struct {
+	rows, columns    uint16
+	xPixels, yPixels uint16
+}
+
+type signalResizeWatcher struct {
+	channel chan os.Signal
+}
+
+func (unixBackend) startResizeWatcher() (resizeWatcher, error) {
+	watcher := &signalResizeWatcher{channel: make(chan os.Signal, 1)}
+	signal.Notify(watcher.channel, syscall.SIGWINCH)
+	return watcher, nil
+}
+
+func (watcher *signalResizeWatcher) changed() bool {
+	changed := false
+	for {
+		select {
+		case <-watcher.channel:
+			changed = true
+		default:
+			return changed
+		}
+	}
+}
+
+func (watcher *signalResizeWatcher) close() {
+	signal.Stop(watcher.channel)
+}
+
+func (unixBackend) read(fd int, buffer []byte) (int, error) {
+	return syscall.Read(fd, buffer)
+}
+
+func (unixBackend) write(fd int, buffer []byte) (int, error) {
+	return syscall.Write(fd, buffer)
+}
+
+func (unixBackend) size(fd int) (columns, rows uint16, err error) {
+	size := windowSize{}
+	_, _, callErr := syscall.Syscall(
+		syscall.SYS_IOCTL,
+		uintptr(fd),
+		uintptr(syscall.TIOCGWINSZ),
+		uintptr(unsafe.Pointer(&size)),
+	)
+	if callErr != 0 {
+		return 0, 0, callErr
+	}
+	if size.columns == 0 || size.rows == 0 {
+		return 0, 0, errors.New("terminal reported a zero-sized window")
+	}
+	return size.columns, size.rows, nil
+}
+
+func selectTimeout(timeout time.Duration) *syscall.Timeval {
+	if timeout < 0 {
+		return nil
+	}
+	timeval := syscall.NsecToTimeval(timeout.Nanoseconds())
+	return &timeval
+}
+
+func validateSelectFD(fd int, capacity int) error {
+	if fd < 0 || fd >= capacity {
+		return fmt.Errorf("terminal descriptor %d exceeds select capacity %d", fd, capacity)
+	}
+	return nil
+}
