@@ -61,6 +61,11 @@ type scrollInteraction struct {
 	initialized  bool
 }
 
+type preparedScroll struct {
+	state        ScrollState
+	followingEnd bool
+}
+
 // InteractionState is runtime-owned UI continuity keyed by stable Node IDs
 type InteractionState struct {
 	focused        NodeID
@@ -142,6 +147,19 @@ func (s *InteractionState) requestScroll(id NodeID, requested ScrollOffset) (Scr
 	return scroll.state, scroll.state != previous, true
 }
 
+func (s *InteractionState) previewScroll(
+	id NodeID,
+	maximum ScrollOffset,
+	axis ScrollAxis,
+	stickToEnd bool,
+) ScrollState {
+	scroll := scrollInteraction{}
+	if current := s.scrolls[id]; current != nil {
+		scroll = *current
+	}
+	return resolvePreparedScroll(scroll, maximum, axis, stickToEnd).state
+}
+
 func (s *InteractionState) prepareScroll(
 	id NodeID,
 	maximum ScrollOffset,
@@ -153,6 +171,22 @@ func (s *InteractionState) prepareScroll(
 		scroll = &scrollInteraction{}
 		s.scrolls[id] = scroll
 	}
+	prepared := resolvePreparedScroll(*scroll, maximum, axis, stickToEnd)
+	scroll.hasRequest = false
+	scroll.axis = axis
+	scroll.stickToEnd = stickToEnd
+	scroll.state = prepared.state
+	scroll.followingEnd = prepared.followingEnd
+	scroll.initialized = true
+	return scroll.state
+}
+
+func resolvePreparedScroll(
+	scroll scrollInteraction,
+	maximum ScrollOffset,
+	axis ScrollAxis,
+	stickToEnd bool,
+) preparedScroll {
 	wasInitialized := scroll.initialized
 	wasSticking := scroll.stickToEnd
 	followExistingEnd := wasInitialized && stickToEnd && (scroll.followingEnd || (!wasSticking && scroll.state.AtEnd))
@@ -163,23 +197,19 @@ func (s *InteractionState) prepareScroll(
 	} else if (!wasInitialized && stickToEnd) || followExistingEnd {
 		requested = maximum
 	}
-	hadRequest := scroll.hasRequest
-	scroll.hasRequest = false
-	scroll.axis = axis
-	scroll.stickToEnd = stickToEnd
-	scroll.state = resolveScrollState(axis, maximum, requested)
-	switch {
-	case !stickToEnd:
-		scroll.followingEnd = false
-	case hadRequest:
-		scroll.followingEnd = scroll.state.AtEnd
-	case !wasInitialized:
-		scroll.followingEnd = true
-	default:
-		scroll.followingEnd = followExistingEnd
+	state := resolveScrollState(axis, maximum, requested)
+	followingEnd := false
+	if stickToEnd {
+		switch {
+		case scroll.hasRequest:
+			followingEnd = state.AtEnd
+		case !wasInitialized:
+			followingEnd = true
+		default:
+			followingEnd = followExistingEnd
+		}
 	}
-	scroll.initialized = true
-	return scroll.state
+	return preparedScroll{state: state, followingEnd: followingEnd}
 }
 
 func (s *InteractionState) reconcile(active map[NodeID]struct{}, previous, current []NodeID) {

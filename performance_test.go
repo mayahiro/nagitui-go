@@ -11,6 +11,10 @@ type eagerViewportBenchmarkApp struct{}
 
 type virtualViewportBenchmarkApp struct{}
 
+type growingVirtualViewportBenchmarkApp struct {
+	contentHeight uint32
+}
+
 type identifiedVirtualViewportBenchmarkApp struct {
 	rowIDs []NodeID
 }
@@ -101,6 +105,55 @@ func BenchmarkScrollViewportVirtual100K(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
+		runtime.RequestFrame()
+		if _, err := runtime.RenderIfDirty(); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func (*growingVirtualViewportBenchmarkApp) Init() Effect[struct{}] {
+	return NoneEffect[struct{}]()
+}
+
+func (*growingVirtualViewportBenchmarkApp) Update(struct{}) Effect[struct{}] {
+	return NoneEffect[struct{}]()
+}
+
+func (*growingVirtualViewportBenchmarkApp) Subscriptions() Subscription[struct{}] {
+	return NoneSubscription[struct{}]()
+}
+
+func (a *growingVirtualViewportBenchmarkApp) View(ViewContext) Node[struct{}] {
+	return VirtualScrollViewportWithOptions(
+		"viewport",
+		Size{Width: 80, Height: a.contentHeight},
+		ScrollViewportOptions[struct{}]{Axis: ScrollAxisVertical, StickToEnd: true},
+		func(viewport VirtualViewport) VirtualFragment[struct{}] {
+			rows := make([]Node[struct{}], viewport.Size.Height)
+			for index := range rows {
+				rows[index] = Text[struct{}]("row")
+			}
+			return NewVirtualFragment(
+				ScrollOffset{Y: viewport.Offset.Y},
+				Column(rows...),
+			)
+		},
+	)
+}
+
+func BenchmarkScrollViewportVirtualStickToEndGrowth100K(b *testing.B) {
+	app := &growingVirtualViewportBenchmarkApp{contentHeight: benchmarkRows}
+	runtime, err := NewRuntime[struct{}](app, Size{Width: 80, Height: 24})
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(runtime.Close)
+	warmViewportBenchmark(b, runtime)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		app.contentHeight++
 		runtime.RequestFrame()
 		if _, err := runtime.RenderIfDirty(); err != nil {
 			b.Fatal(err)

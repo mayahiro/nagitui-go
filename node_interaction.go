@@ -137,13 +137,19 @@ func (n *Node[Message]) buildIndex(
 		childRect := scrollChildRect(rect, n.child, interaction.ScrollOffset(n.id), n.scroll.Axis)
 		return n.child.buildIndex(childRect, clip.Intersection(rect), childParent, hasChildParent, false, interaction, tree)
 	case nodeVirtualScrollViewport:
+		state := interaction.previewScroll(
+			n.id,
+			virtualScrollMaximum(n.payload.virtualSize, rect, n.scroll.Axis),
+			n.scroll.Axis,
+			n.scroll.StickToEnd,
+		)
 		fragment, ok := ensureVirtualFragment(
 			n.payload.virtualSize,
 			n.scroll.Axis,
 			n.payload.virtualBuilder,
 			&n.payload.virtualCache,
 			rect,
-			interaction.ScrollOffset(n.id),
+			state.Offset,
 		)
 		if !ok {
 			return nil
@@ -184,10 +190,9 @@ func (n *Node[Message]) prepareAt(rect Rect, interaction *InteractionState) {
 		n.child.prepareAt(scrollChildRect(rect, n.child, state.Offset, n.scroll.Axis), interaction)
 		return
 	case nodeVirtualScrollViewport:
-		content := resolvedVirtualContentSize(n.payload.virtualSize, rect.Size(), n.scroll.Axis)
 		state := interaction.prepareScroll(
 			n.id,
-			ScrollOffset{X: content.Width - rect.Width, Y: content.Height - rect.Height},
+			virtualScrollMaximum(n.payload.virtualSize, rect, n.scroll.Axis),
 			n.scroll.Axis,
 			n.scroll.StickToEnd,
 		)

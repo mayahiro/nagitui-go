@@ -325,6 +325,14 @@ func resolvedVirtualContentSize(declared, viewport Size, _ ScrollAxis) Size {
 	}
 }
 
+func virtualScrollMaximum(declared Size, viewport Rect, axis ScrollAxis) ScrollOffset {
+	content := resolvedVirtualContentSize(declared, viewport.Size(), axis)
+	return ScrollOffset{
+		X: content.Width - viewport.Width,
+		Y: content.Height - viewport.Height,
+	}
+}
+
 func virtualContentEmpty(content Size, axis ScrollAxis) bool {
 	switch axis {
 	case ScrollAxisBoth:

@@ -768,6 +768,98 @@ func TestVirtualScrollViewportBoundsConstructionToVisibleRows(t *testing.T) {
 	}
 }
 
+type growingVirtualScrollApp struct {
+	contentHeight uint32
+	builds        atomic.Int64
+	rows          atomic.Int64
+}
+
+func (*growingVirtualScrollApp) Init() Effect[struct{}] { return NoneEffect[struct{}]() }
+func (*growingVirtualScrollApp) Subscriptions() Subscription[struct{}] {
+	return NoneSubscription[struct{}]()
+}
+func (*growingVirtualScrollApp) Update(struct{}) Effect[struct{}] {
+	return NoneEffect[struct{}]()
+}
+func (a *growingVirtualScrollApp) View(ViewContext) Node[struct{}] {
+	return VirtualScrollViewportWithOptions(
+		"growing-virtual-scroll",
+		Size{Width: 3, Height: a.contentHeight},
+		ScrollViewportOptions[struct{}]{Axis: ScrollAxisVertical, StickToEnd: true},
+		func(viewport VirtualViewport) VirtualFragment[struct{}] {
+			a.builds.Add(1)
+			a.rows.Add(int64(viewport.Size.Height))
+			rows := make([]Node[struct{}], viewport.Size.Height)
+			for index := range rows {
+				row := viewport.Offset.Y + uint32(index)
+				rows[index] = Text[struct{}](strconv.FormatUint(uint64(row), 10))
+			}
+			return NewVirtualFragment(ScrollOffset{Y: viewport.Offset.Y}, Column(rows...))
+		},
+	)
+}
+
+func TestVirtualScrollViewportBuildsOnceWhenFollowingGrowingEnd(t *testing.T) {
+	app := &growingVirtualScrollApp{contentHeight: 4}
+	runtime, err := NewRuntimeWithClock[struct{}](
+		app,
+		NewRuntimeConfig(Size{Width: 3, Height: 2}),
+		NewVirtualClock(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+
+	initial, err := runtime.RenderIfDirty()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if app.builds.Load() != 1 || app.rows.Load() != 2 {
+		t.Fatalf("initial construction = %d builds, %d rows", app.builds.Load(), app.rows.Load())
+	}
+	assertNodeCell(t, initial.Surface(), 0, 0, "2")
+	assertNodeCell(t, initial.Surface(), 0, 1, "3")
+
+	app.contentHeight = 5
+	runtime.RequestFrame()
+	grown, err := runtime.RenderIfDirty()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if app.builds.Load() != 2 || app.rows.Load() != 4 {
+		t.Fatalf("growth construction = %d builds, %d rows", app.builds.Load(), app.rows.Load())
+	}
+	assertNodeCell(t, grown.Surface(), 0, 0, "3")
+	assertNodeCell(t, grown.Surface(), 0, 1, "4")
+	state, ok := runtime.Interaction().ScrollState("growing-virtual-scroll")
+	if !ok || state.Offset != (ScrollOffset{Y: 3}) || state.Maximum != (ScrollOffset{Y: 3}) || !state.AtEnd {
+		t.Fatalf("grown scroll state = %+v, present = %t", state, ok)
+	}
+
+	if !runtime.SetScrollOffset("growing-virtual-scroll", ScrollOffset{Y: 1}) {
+		t.Fatal("SetScrollOffset returned false")
+	}
+	if _, err := runtime.RenderIfDirty(); err != nil {
+		t.Fatal(err)
+	}
+	app.contentHeight = 6
+	runtime.RequestFrame()
+	away, err := runtime.RenderIfDirty()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if app.builds.Load() != 4 || app.rows.Load() != 8 {
+		t.Fatalf("away construction = %d builds, %d rows", app.builds.Load(), app.rows.Load())
+	}
+	assertNodeCell(t, away.Surface(), 0, 0, "1")
+	assertNodeCell(t, away.Surface(), 0, 1, "2")
+	state, ok = runtime.Interaction().ScrollState("growing-virtual-scroll")
+	if !ok || state.Offset != (ScrollOffset{Y: 1}) || state.Maximum != (ScrollOffset{Y: 4}) || state.AtEnd {
+		t.Fatalf("away scroll state = %+v, present = %t", state, ok)
+	}
+}
+
 type overscannedScrollApp struct{}
 
 func (*overscannedScrollApp) Init() Effect[struct{}] { return NoneEffect[struct{}]() }
