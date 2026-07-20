@@ -221,6 +221,43 @@ func TestReliableSubscriptionBlocksAtCapacityAndWakesOnStop(t *testing.T) {
 	}
 }
 
+func TestStreamSubscriptionSendNotifiesRuntimeWake(t *testing.T) {
+	started := make(chan SubscriptionSink[string], 1)
+	notified := make(chan struct{}, 1)
+	supervisor := newSubscriptionSupervisor[string](2)
+	supervisor.wake = func() {
+		select {
+		case notified <- struct{}{}:
+		default:
+		}
+	}
+	t.Cleanup(supervisor.close)
+	_, err := supervisor.reconcile(
+		StreamSubscription("logs", ReliableDelivery(), func(ctx context.Context, sink SubscriptionSink[string]) {
+			started <- sink
+			<-ctx.Done()
+		}),
+		0,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink := waitSubscriptionSink(t, started)
+	if !sink.Send("line") {
+		t.Fatal("stream send failed")
+	}
+
+	select {
+	case <-notified:
+	case <-time.After(time.Second):
+		t.Fatal("stream send did not notify runtime wake")
+	}
+	supervisor.poll(0)
+	if actual := joinSubscriptionMessages(supervisor.takeReady(1)); actual != "line" {
+		t.Fatalf("messages = %q, want line", actual)
+	}
+}
+
 func TestLatestSubscriptionBurstRemainsBounded(t *testing.T) {
 	started := make(chan SubscriptionSink[string], 1)
 	supervisor := newSubscriptionSupervisor[string](2)

@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
@@ -20,29 +22,50 @@ type windowSize struct {
 }
 
 type signalResizeWatcher struct {
-	channel chan os.Signal
+	channel  chan os.Signal
+	stop     chan struct{}
+	finished chan struct{}
+	pending  atomic.Bool
+	once     sync.Once
 }
 
-func (unixBackend) startResizeWatcher() (resizeWatcher, error) {
-	watcher := &signalResizeWatcher{channel: make(chan os.Signal, 1)}
+type waitResult struct {
+	input bool
+	wake  bool
+}
+
+func (unixBackend) startResizeWatcher(notify func()) (resizeWatcher, error) {
+	watcher := &signalResizeWatcher{
+		channel:  make(chan os.Signal, 1),
+		stop:     make(chan struct{}),
+		finished: make(chan struct{}),
+	}
 	signal.Notify(watcher.channel, syscall.SIGWINCH)
+	go func() {
+		defer close(watcher.finished)
+		for {
+			select {
+			case <-watcher.channel:
+				watcher.pending.Store(true)
+				notify()
+			case <-watcher.stop:
+				return
+			}
+		}
+	}()
 	return watcher, nil
 }
 
 func (watcher *signalResizeWatcher) changed() bool {
-	changed := false
-	for {
-		select {
-		case <-watcher.channel:
-			changed = true
-		default:
-			return changed
-		}
-	}
+	return watcher.pending.Swap(false)
 }
 
 func (watcher *signalResizeWatcher) close() {
-	signal.Stop(watcher.channel)
+	watcher.once.Do(func() {
+		signal.Stop(watcher.channel)
+		close(watcher.stop)
+		<-watcher.finished
+	})
 }
 
 func (unixBackend) read(fd int, buffer []byte) (int, error) {
@@ -70,8 +93,8 @@ func (unixBackend) size(fd int) (columns, rows uint16, err error) {
 	return size.columns, size.rows, nil
 }
 
-func selectTimeout(timeout time.Duration) *syscall.Timeval {
-	if timeout < 0 {
+func selectTimeout(timeout time.Duration, hasTimeout bool) *syscall.Timeval {
+	if !hasTimeout {
 		return nil
 	}
 	timeval := syscall.NsecToTimeval(timeout.Nanoseconds())

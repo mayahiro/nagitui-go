@@ -10,6 +10,8 @@ import (
 	"github.com/mayahiro/nagitui-go/internal/ttyunix"
 )
 
+const defaultMinimumFrameInterval = (time.Second + 119) / 120
+
 // TerminalOptions contains settings for RunTerminal
 type TerminalOptions struct {
 	// Capabilities contains optional output encoder capabilities
@@ -22,27 +24,27 @@ type TerminalOptions struct {
 	FocusFirst bool
 	// EscapeTimeout disambiguates a lone ESC from an escape sequence
 	EscapeTimeout time.Duration
-	// MaximumIdleWait limits waits before checking resize and scheduler state
-	MaximumIdleWait time.Duration
 	// QueueCapacity is the maximum number of waiting application messages
 	QueueCapacity int
 	// TaskLimit is the maximum number of effect tasks executing concurrently
 	TaskLimit int
 	// SubscriptionCapacity is the maximum pending values retained per source
 	SubscriptionCapacity int
-	// MinimumFrameInterval limits non-urgent rendering; zero disables the limit
+	// MinimumFrameInterval limits non-urgent rendering; the default is 120 FPS
+	// and zero disables the limit
 	MinimumFrameInterval time.Duration
 }
 
-// DefaultTerminalOptions returns conservative terminal loop settings
+// DefaultTerminalOptions returns event-driven settings with bounded queues and
+// non-urgent rendering limited to 120 FPS
 func DefaultTerminalOptions() TerminalOptions {
 	return TerminalOptions{
 		Capabilities:         vt.BaselineCapabilities(),
 		EscapeTimeout:        25 * time.Millisecond,
-		MaximumIdleWait:      50 * time.Millisecond,
 		QueueCapacity:        DefaultQueueCapacity,
 		TaskLimit:            DefaultTaskLimit,
 		SubscriptionCapacity: DefaultSubscriptionCapacity,
+		MinimumFrameInterval: defaultMinimumFrameInterval,
 	}
 }
 
@@ -90,16 +92,46 @@ func RunTerminalContext[Message any](
 		config.TaskLimit = options.TaskLimit
 		config.SubscriptionCapacity = options.SubscriptionCapacity
 		config.MinimumFrameInterval = options.MinimumFrameInterval
-		runtime, err := NewRuntimeWithClock(app, config, clock)
+		runtime, err := newRuntimeWithClockAndWake(app, config, clock, session.Notify)
 		if err != nil {
 			return err
 		}
 		defer runtime.Close()
+		stopContextWake := context.AfterFunc(ctx, session.Notify)
+		defer stopContextWake()
 		focusFirst := options.FocusFirst
 		decoder := NewTimedInputDecoder(clock, options.EscapeTimeout)
 		input := make([]byte, 8_192)
 
+		if session.TakeResize() {
+			columns, rows, err = session.Size()
+			if err != nil {
+				return err
+			}
+			runtime.Resize(Size{Width: uint32(columns), Height: uint32(rows)})
+		}
+		if _, err := runtime.ProcessPending(); err != nil {
+			return err
+		}
+		if focusFirst {
+			focusFirst = false
+			if _, err := runtime.focusFirst(); err != nil {
+				return err
+			}
+		}
+		if err := writeTerminalFrame(session, runtime, options.Capabilities); err != nil {
+			return err
+		}
+		if runtime.ExitRequested() {
+			return nil
+		}
+
 		for {
+			timeout, hasTimeout := terminalWaitDuration(decoder, runtime)
+			readable, err := session.Wait(timeout, hasTimeout)
+			if err != nil {
+				return err
+			}
 			if err := ctx.Err(); err != nil {
 				return err
 			}
@@ -109,45 +141,6 @@ func RunTerminalContext[Message any](
 					return err
 				}
 				runtime.Resize(Size{Width: uint32(columns), Height: uint32(rows)})
-			}
-			if _, err := runtime.ProcessPending(); err != nil {
-				return err
-			}
-			if focusFirst {
-				focusFirst = false
-				if _, err := runtime.focusFirst(); err != nil {
-					return err
-				}
-			}
-			if err := writeTerminalFrame(session, runtime, options.Capabilities); err != nil {
-				return err
-			}
-			if runtime.ExitRequested() {
-				break
-			}
-
-			timeout := options.MaximumIdleWait
-			if deadline, ok := decoder.TimeUntilDeadline(); ok {
-				timeout = min(timeout, deadline)
-			}
-			if deadline, ok := runtime.TimeUntilEffectDeadline(); ok {
-				timeout = min(timeout, deadline)
-			}
-			if deadline, ok := runtime.TimeUntilSubscriptionDeadline(); ok {
-				timeout = min(timeout, deadline)
-			}
-			if deadline, ok := runtime.TimeUntilFrameDeadline(); ok {
-				timeout = min(timeout, deadline)
-			}
-			if timeout < 0 {
-				timeout = 0
-			}
-			readable, err := session.WaitReadable(timeout)
-			if err != nil {
-				return err
-			}
-			if err := ctx.Err(); err != nil {
-				return err
 			}
 			var events []vt.Event
 			if readable {
@@ -200,6 +193,36 @@ func RunTerminalContext[Message any](
 		}
 		return nil
 	})
+}
+
+type terminalDeadlineSource interface {
+	TimeUntilDeadline() (time.Duration, bool)
+}
+
+type runtimeDeadlineSource interface {
+	TimeUntilEffectDeadline() (time.Duration, bool)
+	TimeUntilSubscriptionDeadline() (time.Duration, bool)
+	TimeUntilFrameDeadline() (time.Duration, bool)
+}
+
+func terminalWaitDuration(decoder terminalDeadlineSource, runtime runtimeDeadlineSource) (time.Duration, bool) {
+	timeout := time.Duration(0)
+	hasTimeout := false
+	include := func(deadline time.Duration, ok bool) {
+		if !ok {
+			return
+		}
+		deadline = max(deadline, 0)
+		if !hasTimeout || deadline < timeout {
+			timeout = deadline
+			hasTimeout = true
+		}
+	}
+	include(decoder.TimeUntilDeadline())
+	include(runtime.TimeUntilEffectDeadline())
+	include(runtime.TimeUntilSubscriptionDeadline())
+	include(runtime.TimeUntilFrameDeadline())
+	return timeout, hasTimeout
 }
 
 func writeTerminalFrame[Message any](session *ttyunix.Session, runtime *Runtime[Message], capabilities vt.Capabilities) error {

@@ -92,6 +92,32 @@ func TestAfterEffectTreatsNegativeDelayAsZero(t *testing.T) {
 	}
 }
 
+func TestEffectCompletionNotifiesRuntimeWake(t *testing.T) {
+	notified := make(chan struct{}, 1)
+	supervisor := newEffectSupervisor[string](1)
+	supervisor.wake = func() {
+		select {
+		case notified <- struct{}{}:
+		default:
+		}
+	}
+	defer supervisor.close()
+	task, control := controlledEffectTask()
+	supervisor.schedule(RunEffect(task), 0)
+	waitEffectTaskStarted(t, control)
+	completeEffectTask(t, control, "done")
+
+	select {
+	case <-notified:
+	case <-time.After(time.Second):
+		t.Fatal("effect completion did not notify runtime wake")
+	}
+	supervisor.poll(0)
+	if messages := supervisor.takeReady(1); len(messages) != 1 || messages[0] != "done" {
+		t.Fatalf("messages = %v, want [done]", messages)
+	}
+}
+
 func pollEffectSupervisorUntil(
 	t *testing.T,
 	supervisor *effectSupervisor[string],

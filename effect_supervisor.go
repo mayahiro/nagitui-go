@@ -113,6 +113,7 @@ type runtimeCommand struct {
 
 type effectSupervisor[Message any] struct {
 	taskLimit        int
+	wake             runtimeWake
 	outcomes         chan effectTaskOutcome[Message]
 	tasks            map[uint64]*effectTaskState[Message]
 	pending          []uint64
@@ -360,9 +361,11 @@ func (s *effectSupervisor[Message]) spawnAvailable(_ Timestamp) {
 		task := state.task
 		ctx := state.context
 		outcomes := s.outcomes
+		wake := s.wake
 		go func() {
 			message, panicked := runEffectTask(task, ctx)
 			outcomes <- effectTaskOutcome[Message]{id: id, message: message, panicked: panicked}
+			wake.notify()
 		}()
 	}
 }

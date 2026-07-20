@@ -262,6 +262,7 @@ type subscriptionInbox[Message any] struct {
 	policy      DeliveryPolicy
 	sequence    *atomic.Uint64
 	diagnostics *subscriptionAtomicDiagnostics
+	wake        runtimeWake
 }
 
 func newSubscriptionInbox[Message any](
@@ -269,6 +270,7 @@ func newSubscriptionInbox[Message any](
 	policy DeliveryPolicy,
 	sequence *atomic.Uint64,
 	diagnostics *subscriptionAtomicDiagnostics,
+	wake runtimeWake,
 ) *subscriptionInbox[Message] {
 	inbox := &subscriptionInbox[Message]{
 		done:        make(chan struct{}),
@@ -277,6 +279,7 @@ func newSubscriptionInbox[Message any](
 		policy:      policy,
 		sequence:    sequence,
 		diagnostics: diagnostics,
+		wake:        wake,
 	}
 	inbox.changed = sync.NewCond(&inbox.mu)
 	return inbox
@@ -284,8 +287,8 @@ func newSubscriptionInbox[Message any](
 
 func (i *subscriptionInbox[Message]) send(message Message) bool {
 	i.mu.Lock()
-	defer i.mu.Unlock()
 	if i.stopped {
+		i.mu.Unlock()
 		return false
 	}
 	if i.policy.kind == deliveryLatest {
@@ -299,6 +302,7 @@ func (i *subscriptionInbox[Message]) send(message Message) bool {
 			i.changed.Wait()
 		}
 		if i.stopped {
+			i.mu.Unlock()
 			return false
 		}
 	}
@@ -307,6 +311,8 @@ func (i *subscriptionInbox[Message]) send(message Message) bool {
 		message:  message,
 	})
 	i.changed.Broadcast()
+	i.mu.Unlock()
+	i.wake.notify()
 	return true
 }
 

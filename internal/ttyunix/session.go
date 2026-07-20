@@ -33,10 +33,10 @@ type resizeWatcher interface {
 type terminalBackend interface {
 	getState(fd int) (terminalState, error)
 	setState(fd int, state *terminalState) error
-	startResizeWatcher() (resizeWatcher, error)
+	startResizeWatcher(notify func()) (resizeWatcher, error)
 	read(fd int, buffer []byte) (int, error)
 	write(fd int, buffer []byte) (int, error)
-	waitReadable(fd int, timeout time.Duration) (bool, error)
+	wait(inputFD, wakeFD int, timeout time.Duration, hasTimeout bool) (waitResult, error)
 	size(fd int) (columns, rows uint16, err error)
 }
 
@@ -49,6 +49,7 @@ type Session struct {
 	originalState    terminalState
 	hasOriginalState bool
 	watcher          resizeWatcher
+	wake             *wakePipe
 	lifecycleStarted bool
 	initialResize    bool
 	ownsProcess      bool
@@ -84,8 +85,15 @@ func startSession(backend terminalBackend, inputFD, outputFD int, options Option
 		return nil, fmt.Errorf("enable terminal raw mode: %w", err)
 	}
 
-	watcher, err := backend.startResizeWatcher()
+	wake, err := newWakePipe()
 	if err != nil {
+		_ = backend.setState(inputFD, &originalState)
+		return nil, fmt.Errorf("create runtime wake pipe: %w", err)
+	}
+
+	watcher, err := backend.startResizeWatcher(wake.notify)
+	if err != nil {
+		wake.close()
 		_ = backend.setState(inputFD, &originalState)
 		return nil, fmt.Errorf("install SIGWINCH watcher: %w", err)
 	}
@@ -97,6 +105,7 @@ func startSession(backend terminalBackend, inputFD, outputFD int, options Option
 		originalState:    originalState,
 		hasOriginalState: true,
 		watcher:          watcher,
+		wake:             wake,
 		lifecycleStarted: true,
 		initialResize:    true,
 	}
@@ -184,13 +193,26 @@ func (s *Session) WriteOperations(operations []vt.TerminalOp, capabilities vt.Ca
 	return s.Write(vt.Encode(operations, capabilities))
 }
 
-// WaitReadable waits up to timeout for terminal input.
-func (s *Session) WaitReadable(timeout time.Duration) (bool, error) {
-	ready, err := s.backend.waitReadable(s.inputFD, timeout)
+// Wait blocks until terminal input, a runtime notification, or an optional
+// deadline is ready. It reports whether terminal input can be read.
+func (s *Session) Wait(timeout time.Duration, hasTimeout bool) (bool, error) {
+	ready, err := s.backend.wait(s.inputFD, s.wake.readFD, timeout, hasTimeout)
 	if err != nil {
 		return false, fmt.Errorf("poll terminal input: %w", err)
 	}
-	return ready, nil
+	if ready.wake {
+		if err := s.wake.acknowledge(); err != nil {
+			return false, fmt.Errorf("acknowledge runtime wake-up: %w", err)
+		}
+	}
+	return ready.input, nil
+}
+
+// Notify wakes a blocked terminal loop after asynchronous runtime work.
+func (s *Session) Notify() {
+	if s.wake != nil {
+		s.wake.notify()
+	}
 }
 
 // Size returns terminal columns and rows.
@@ -239,6 +261,9 @@ func (s *Session) Close() error {
 	if s.watcher != nil {
 		s.watcher.close()
 		s.watcher = nil
+	}
+	if s.wake != nil {
+		s.wake.close()
 	}
 	if s.ownsProcess {
 		s.ownsProcess = false

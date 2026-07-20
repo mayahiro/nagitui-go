@@ -122,6 +122,15 @@ func NewRuntime[Message any](app App[Message], size Size) (*Runtime[Message], er
 
 // NewRuntimeWithClock returns a runtime using explicit settings and clock
 func NewRuntimeWithClock[Message any](app App[Message], config RuntimeConfig, clock Clock) (*Runtime[Message], error) {
+	return newRuntimeWithClockAndWake(app, config, clock, nil)
+}
+
+func newRuntimeWithClockAndWake[Message any](
+	app App[Message],
+	config RuntimeConfig,
+	clock Clock,
+	wake runtimeWake,
+) (*Runtime[Message], error) {
 	if config.QueueCapacity <= 0 {
 		return nil, ErrZeroQueueCapacity
 	}
@@ -143,8 +152,10 @@ func NewRuntimeWithClock[Message any](app App[Message], config RuntimeConfig, cl
 	startup := app.Init()
 	declaredSubscriptions := app.Subscriptions()
 	effects := newEffectSupervisor[Message](config.TaskLimit)
+	effects.wake = wake
 	effects.schedule(startup, clock.Now())
 	subscriptions := newSubscriptionSupervisor[Message](config.SubscriptionCapacity)
+	subscriptions.wake = wake
 	if _, err := subscriptions.reconcile(declaredSubscriptions, clock.Now()); err != nil {
 		effects.close()
 		return nil, err

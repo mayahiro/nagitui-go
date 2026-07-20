@@ -92,6 +92,7 @@ type activeSubscription[Message any] struct {
 
 type subscriptionSupervisor[Message any] struct {
 	inboxCapacity    int
+	wake             runtimeWake
 	active           map[SubscriptionKey]*activeSubscription[Message]
 	order            []SubscriptionKey
 	generations      map[SubscriptionKey]uint64
@@ -285,7 +286,13 @@ func (s *subscriptionSupervisor[Message]) startSource(
 	}
 	s.generations[source.key] = generation
 	s.starts++
-	inbox := newSubscriptionInbox[Message](s.inboxCapacity, source.policy, &s.sequence, &s.atomicDiagnostic)
+	inbox := newSubscriptionInbox[Message](
+		s.inboxCapacity,
+		source.policy,
+		&s.sequence,
+		&s.atomicDiagnostic,
+		s.wake,
+	)
 	active := &activeSubscription[Message]{
 		tag:         subscriptionTag{key: source.key, generation: generation},
 		fingerprint: fingerprint,

@@ -36,17 +36,25 @@ func ioctlTerminalState(fd int, request uintptr, state *terminalState) error {
 	return nil
 }
 
-func (unixBackend) waitReadable(fd int, timeout time.Duration) (bool, error) {
+func (unixBackend) wait(inputFD, wakeFD int, timeout time.Duration, hasTimeout bool) (waitResult, error) {
 	var readSet syscall.FdSet
-	if err := validateSelectFD(fd, len(readSet.Bits)*32); err != nil {
-		return false, err
+	capacity := len(readSet.Bits) * 32
+	if err := validateSelectFD(inputFD, capacity); err != nil {
+		return waitResult{}, err
 	}
-	readSet.Bits[fd/32] |= int32(1) << uint(fd%32)
-	if err := syscall.Select(fd+1, &readSet, nil, nil, selectTimeout(timeout)); err != nil {
+	if err := validateSelectFD(wakeFD, capacity); err != nil {
+		return waitResult{}, err
+	}
+	readSet.Bits[inputFD/32] |= int32(1) << uint(inputFD%32)
+	readSet.Bits[wakeFD/32] |= int32(1) << uint(wakeFD%32)
+	if err := syscall.Select(max(inputFD, wakeFD)+1, &readSet, nil, nil, selectTimeout(timeout, hasTimeout)); err != nil {
 		if errors.Is(err, syscall.EINTR) {
-			return false, nil
+			return waitResult{}, nil
 		}
-		return false, err
+		return waitResult{}, err
 	}
-	return readSet.Bits[fd/32]&(int32(1)<<uint(fd%32)) != 0, nil
+	return waitResult{
+		input: readSet.Bits[inputFD/32]&(int32(1)<<uint(inputFD%32)) != 0,
+		wake:  readSet.Bits[wakeFD/32]&(int32(1)<<uint(wakeFD%32)) != 0,
+	}, nil
 }

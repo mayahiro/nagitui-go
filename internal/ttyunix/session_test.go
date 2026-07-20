@@ -57,7 +57,7 @@ func fmtStateCall(fd int, flags any) string {
 	return fmt.Sprintf("set:%d:%d", fd, flags)
 }
 
-func (backend *fakeBackend) startResizeWatcher() (resizeWatcher, error) {
+func (backend *fakeBackend) startResizeWatcher(_ func()) (resizeWatcher, error) {
 	backend.calls = append(backend.calls, "signal:on")
 	return backend.watcher, nil
 }
@@ -76,8 +76,8 @@ func (backend *fakeBackend) write(_ int, buffer []byte) (int, error) {
 	return len(buffer), nil
 }
 
-func (backend *fakeBackend) waitReadable(_ int, _ time.Duration) (bool, error) {
-	return true, nil
+func (backend *fakeBackend) wait(_, _ int, _ time.Duration, _ bool) (waitResult, error) {
+	return waitResult{input: true}, nil
 }
 
 func (backend *fakeBackend) size(_ int) (uint16, uint16, error) {
@@ -172,8 +172,8 @@ func TestIOResizeAndSizeAreForwarded(t *testing.T) {
 	if read, err := session.Read(buffer); err != nil || read != 5 || string(buffer[:read]) != "input" {
 		t.Fatalf("Read = %d, %q, %v", read, buffer[:read], err)
 	}
-	if ready, err := session.WaitReadable(0); err != nil || !ready {
-		t.Fatalf("WaitReadable = %t, %v", ready, err)
+	if ready, err := session.Wait(0, true); err != nil || !ready {
+		t.Fatalf("Wait = %t, %v", ready, err)
 	}
 	if columns, rows, err := session.Size(); err != nil || columns != 80 || rows != 24 {
 		t.Fatalf("Size = %d, %d, %v", columns, rows, err)
