@@ -22,9 +22,9 @@ func (n Node[Message]) render(target *surface.Surface, rect, clip Rect, interact
 	case nodeTextInput:
 		renderTextInput(target, rect, clip, n.id, n.content, n.placeholder, n.style, n.placeholderStyle, interaction)
 	case nodeRow:
-		renderLinear(target, rect, clip, n.children, true, interaction)
+		renderLinear(target, rect, clip, n.children, n.resolvedLinearLayout(rect, true), interaction)
 	case nodeColumn:
-		renderLinear(target, rect, clip, n.children, false, interaction)
+		renderLinear(target, rect, clip, n.children, n.resolvedLinearLayout(rect, false), interaction)
 	case nodeStack:
 		for _, child := range n.children {
 			child.render(target, rect, clip, interaction)
@@ -85,18 +85,66 @@ func mergeNodeStyle(target *surface.Surface, rect Rect, overlay vt.Style) {
 	}
 }
 
-func renderLinear[Message any](target *surface.Surface, rect, clip Rect, children []Node[Message], horizontal bool, interaction *InteractionState) {
-	for index, childRect := range linearRects(children, rect, horizontal) {
+func renderLinear[Message any](target *surface.Surface, rect, clip Rect, children []Node[Message], layout *linearLayout, interaction *InteractionState) {
+	var offset uint32
+	for index := range children {
+		childRect := layout.childRect(rect, layout.horizontal, index, offset)
 		children[index].render(target, childRect, clip, interaction)
+		offset = saturatingAdd32(offset, layout.allocation(index))
 	}
 }
 
-func linearRects[Message any](children []Node[Message], rect Rect, horizontal bool) []Rect {
+const inlineLinearChildren = 32
+
+type linearLayout struct {
+	inline     [inlineLinearChildren]uint32
+	overflow   []uint32
+	horizontal bool
+}
+
+type linearLayoutCache struct {
+	valid  bool
+	rect   Rect
+	layout linearLayout
+}
+
+func (n Node[Message]) resolvedLinearLayout(rect Rect, horizontal bool) *linearLayout {
+	if n.linearCache == nil {
+		layout := resolveLinearLayout(n.children, rect, horizontal)
+		return &layout
+	}
+	if n.linearCache.valid && n.linearCache.rect == rect && n.linearCache.layout.horizontal == horizontal {
+		return &n.linearCache.layout
+	}
+	n.linearCache.valid = true
+	n.linearCache.rect = rect
+	n.linearCache.layout = resolveLinearLayout(n.children, rect, horizontal)
+	return &n.linearCache.layout
+}
+
+func resolveLinearLayout[Message any](children []Node[Message], rect Rect, horizontal bool) linearLayout {
 	available := rect.Height
 	if horizontal {
 		available = rect.Width
 	}
+	layout := linearLayout{horizontal: horizontal}
+	if len(children) <= inlineLinearChildren {
+		var tracks [inlineLinearChildren]layoutTrack
+		var minimums [inlineLinearChildren]uint32
+		fillLinearTracks(children, rect, horizontal, tracks[:len(children)])
+		allocateInto(available, tracks[:len(children)], layout.inline[:len(children)], minimums[:len(children)])
+		return layout
+	}
+
 	tracks := make([]layoutTrack, len(children))
+	minimums := make([]uint32, len(children))
+	layout.overflow = make([]uint32, len(children))
+	fillLinearTracks(children, rect, horizontal, tracks)
+	allocateInto(available, tracks, layout.overflow, minimums)
+	return layout
+}
+
+func fillLinearTracks[Message any](children []Node[Message], rect Rect, horizontal bool, tracks []layoutTrack) {
 	for index, child := range children {
 		measured := child.measure(boundedConstraints(rect.Size()))
 		desired := measured.Height
@@ -108,34 +156,37 @@ func linearRects[Message any](children []Node[Message], rect Rect, horizontal bo
 		}
 		tracks[index] = layoutTrack{length: child.length, desired: desired}
 	}
-	allocations := allocate(available, tracks)
-	rects := make([]Rect, len(children))
-	var offset uint32
-	for index := range children {
-		var childRect Rect
-		if horizontal {
-			childRect = horizontalRect(rect, offset, allocations[index])
-		} else {
-			childRect = verticalRect(rect, offset, allocations[index])
-		}
-		rects[index] = childRect
-		offset = saturatingAdd32(offset, allocations[index])
+}
+
+func (l *linearLayout) allocation(index int) uint32 {
+	if l.overflow != nil {
+		return l.overflow[index]
 	}
-	return rects
+	return l.inline[index]
+}
+
+func (l *linearLayout) childRect(parent Rect, horizontal bool, index int, offset uint32) Rect {
+	allocated := l.allocation(index)
+	if horizontal {
+		return horizontalRect(parent, offset, allocated)
+	}
+	return verticalRect(parent, offset, allocated)
 }
 
 func renderText(target *surface.Surface, rect, clip Rect, content string, style vt.Style) {
 	if rect.Empty() {
 		return
 	}
-	lines := celltext.Wrap(content, int(rect.Width), celltext.ModernWidth())
-	for lineIndex, line := range lines {
-		if uint32(lineIndex) >= rect.Height {
+	lines := celltext.IterateWrappedLines(content, int(rect.Width), celltext.ModernWidth())
+	for lineIndex := uint32(0); lineIndex < rect.Height; lineIndex++ {
+		line, ok := lines.Next()
+		if !ok {
 			break
 		}
-		y := saturatingCoordinate(rect.Y, uint32(lineIndex))
+		y := saturatingCoordinate(rect.Y, lineIndex)
 		x := int64(rect.X)
-		for _, grapheme := range celltext.Graphemes(line) {
+		graphemes := celltext.IterateGraphemes(line.Text)
+		for grapheme, ok := graphemes.Next(); ok; grapheme, ok = graphemes.Next() {
 			span := int64(max(celltext.GraphemeWidth(grapheme.Text, celltext.ModernWidth()), 1))
 			end := x + span
 			if containsRenderUnit(clip, x, int64(y), end) {
@@ -201,7 +252,8 @@ func renderTextInput(
 func renderSingleLine(target *surface.Surface, rect, clip Rect, content string, style vt.Style) {
 	x := int64(rect.X)
 	right := int64(rect.X) + int64(rect.Width)
-	for _, grapheme := range celltext.Graphemes(content) {
+	graphemes := celltext.IterateGraphemes(content)
+	for grapheme, ok := graphemes.Next(); ok; grapheme, ok = graphemes.Next() {
 		span := int64(max(celltext.GraphemeWidth(grapheme.Text, celltext.ModernWidth()), 1))
 		end := x + span
 		if end > right {

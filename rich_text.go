@@ -107,7 +107,8 @@ func layoutTextSpans(spans []TextSpan, maxWidth uint32, bounded bool, mode WrapM
 func textSpanUnits(spans []TextSpan) []paragraphUnit {
 	units := make([]paragraphUnit, 0)
 	for _, span := range spans {
-		for _, grapheme := range celltext.Graphemes(span.Text) {
+		graphemes := celltext.IterateGraphemes(span.Text)
+		for grapheme, ok := graphemes.Next(); ok; grapheme, ok = graphemes.Next() {
 			if grapheme.Text == "\r" || grapheme.Text == "\n" || grapheme.Text == "\r\n" {
 				units = append(units, paragraphUnit{breakLine: true})
 				continue

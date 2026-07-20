@@ -156,6 +156,27 @@ func newTreeIndex() treeIndex {
 	return treeIndex{byID: make(map[NodeID]int), active: make(map[NodeID]struct{})}
 }
 
+func (t *treeIndex) reset() {
+	clear(t.records)
+	clear(t.focusOrder)
+	t.records = t.records[:0]
+	t.focusOrder = t.focusOrder[:0]
+	if t.byID == nil {
+		t.byID = make(map[NodeID]int)
+	} else {
+		clear(t.byID)
+	}
+	if t.active == nil {
+		t.active = make(map[NodeID]struct{})
+	} else {
+		clear(t.active)
+	}
+	t.root = ""
+	t.hasRoot = false
+	t.activeModal = ""
+	t.hasModal = false
+}
+
 func (t *treeIndex) register(record nodeRecord, root bool) error {
 	if _, duplicate := t.byID[record.id]; duplicate {
 		return &DuplicateNodeIDError{ID: record.id}
@@ -229,7 +250,7 @@ func (t *treeIndex) hitTest(point Point) (NodeID, bool) {
 
 func (t *treeIndex) focusScope() []NodeID {
 	if !t.hasModal {
-		return append([]NodeID(nil), t.focusOrder...)
+		return t.focusOrder
 	}
 	focus := make([]NodeID, 0, len(t.focusOrder))
 	for _, id := range t.focusOrder {

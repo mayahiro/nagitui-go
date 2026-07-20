@@ -195,11 +195,12 @@ func chartScale(value, minimum, maximum int32, cells int) int {
 }
 
 func chartMarker(marker string) string {
-	graphemes := celltext.Graphemes(marker)
-	if len(graphemes) == 0 || celltext.GraphemeWidth(graphemes[0].Text, celltext.ModernWidth()) != 1 {
+	graphemes := celltext.IterateGraphemes(marker)
+	grapheme, ok := graphemes.Next()
+	if !ok || celltext.GraphemeWidth(grapheme.Text, celltext.ModernWidth()) != 1 {
 		return "•"
 	}
-	return graphemes[0].Text
+	return grapheme.Text
 }
 
 type chartCellPoint struct {

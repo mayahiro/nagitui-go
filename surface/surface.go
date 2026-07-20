@@ -164,7 +164,8 @@ func (s *Surface) Write(x, y int32, content string, style vt.Style, profile cell
 		return
 	}
 	column := int64(x)
-	for _, grapheme := range celltext.Graphemes(content) {
+	graphemes := celltext.IterateGraphemes(content)
+	for grapheme, ok := graphemes.Next(); ok; grapheme, ok = graphemes.Next() {
 		if column >= int64(s.width) {
 			break
 		}
@@ -255,8 +256,8 @@ func (s *Surface) ChangedRuns(previous *Surface) []ChangedRun {
 
 	width := int(s.width)
 	var runs []ChangedRun
+	changed := make([]bool, width)
 	for row := 0; row < int(s.height); row++ {
-		changed := make([]bool, width)
 		for column := range width {
 			index := s.index(column, row)
 			changed[column] = s.cells[index] != previous.cells[index]

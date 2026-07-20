@@ -57,11 +57,12 @@ type Cell struct {
 // A zero-width cluster becomes a one-cell U+FFFD replacement. Invalid UTF-8 is
 // normalized by the text package before cluster validation.
 func NewCell(grapheme string, style vt.Style, profile celltext.WidthProfile) (Cell, error) {
-	clusters := celltext.Graphemes(grapheme)
-	if len(clusters) != 1 {
+	clusters := celltext.IterateGraphemes(grapheme)
+	cluster, ok := clusters.Next()
+	if _, extra := clusters.Next(); !ok || extra {
 		return Cell{}, ErrExpectedSingleGrapheme
 	}
-	return cellFromCluster(clusters[0].Text, style, profile), nil
+	return cellFromCluster(cluster.Text, style, profile), nil
 }
 
 // BlankCell returns an opaque one-cell blank using style

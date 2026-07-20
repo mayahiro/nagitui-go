@@ -95,6 +95,7 @@ type Runtime[Message any] struct {
 	interaction          *InteractionState
 	viewTree             *Node[Message]
 	treeIndex            treeIndex
+	nextTreeIndex        treeIndex
 	effects              *effectSupervisor[Message]
 	subscriptions        *subscriptionSupervisor[Message]
 	subscriptionsDirty   bool
@@ -159,6 +160,7 @@ func NewRuntimeWithClock[Message any](app App[Message], config RuntimeConfig, cl
 		minimumFrameInterval: config.MinimumFrameInterval,
 		interaction:          NewInteractionState(),
 		treeIndex:            newTreeIndex(),
+		nextTreeIndex:        newTreeIndex(),
 		effects:              effects,
 		subscriptions:        subscriptions,
 	}
@@ -769,9 +771,9 @@ func (r *Runtime[Message]) reconcileSubscriptions() error {
 	return nil
 }
 
-func (r *Runtime[Message]) ensureFocusedVisible(view *Node[Message], index treeIndex) (treeIndex, error) {
+func (r *Runtime[Message]) ensureFocusedVisible(view *Node[Message], index *treeIndex) error {
 	if !r.interaction.hasFocus {
-		return index, nil
+		return nil
 	}
 	focused := r.interaction.focused
 	route := index.route(focused, true)
@@ -811,13 +813,11 @@ func (r *Runtime[Message]) ensureFocusedVisible(view *Node[Message], index treeI
 		}
 		r.interaction.requestScroll(id, next)
 		view.prepareInteraction(r.size, r.interaction)
-		var err error
-		index, err = view.buildTreeIndex(r.size, r.interaction)
-		if err != nil {
-			return treeIndex{}, err
+		if err := view.buildTreeIndex(r.size, r.interaction, index); err != nil {
+			return err
 		}
 	}
-	return index, nil
+	return nil
 }
 
 func (r *Runtime[Message]) ensureTree() error {
@@ -825,27 +825,25 @@ func (r *Runtime[Message]) ensureTree() error {
 		return nil
 	}
 	view := r.app.View(ViewContext{Size: r.size})
-	initial, err := view.buildTreeIndex(r.size, r.interaction)
-	if err != nil {
+	index := &r.nextTreeIndex
+	if err := view.buildTreeIndex(r.size, r.interaction, index); err != nil {
 		return err
 	}
-	r.interaction.reconcile(initial.active, nil, initial.focusScope())
-	if r.interaction.hasCapture && !initial.allowsInteraction(r.interaction.pointerCapture) {
+	r.interaction.reconcile(index.active, nil, index.focusScope())
+	if r.interaction.hasCapture && !index.allowsInteraction(r.interaction.pointerCapture) {
 		r.interaction.pointerCapture = ""
 		r.interaction.hasCapture = false
 	}
-	r.applyPendingInteraction(initial)
+	r.applyPendingInteraction(*index)
 	view.prepareInteraction(r.size, r.interaction)
-	index, err := view.buildTreeIndex(r.size, r.interaction)
-	if err != nil {
+	if err := view.buildTreeIndex(r.size, r.interaction, index); err != nil {
 		return err
 	}
-	index, err = r.ensureFocusedVisible(&view, index)
-	if err != nil {
+	if err := r.ensureFocusedVisible(&view, index); err != nil {
 		return err
 	}
 	r.viewTree = &view
-	r.treeIndex = index
+	r.treeIndex, r.nextTreeIndex = r.nextTreeIndex, r.treeIndex
 	return nil
 }
 
@@ -862,23 +860,21 @@ func (r *Runtime[Message]) RenderIfDirty() (*Frame, error) {
 		return nil, nil
 	}
 	view := r.app.View(ViewContext{Size: r.size})
-	initial, err := view.buildTreeIndex(r.size, r.interaction)
-	if err != nil {
+	index := &r.nextTreeIndex
+	if err := view.buildTreeIndex(r.size, r.interaction, index); err != nil {
 		return nil, err
 	}
-	r.interaction.reconcile(initial.active, r.treeIndex.focusScope(), initial.focusScope())
-	if r.interaction.hasCapture && !initial.allowsInteraction(r.interaction.pointerCapture) {
+	r.interaction.reconcile(index.active, r.treeIndex.focusScope(), index.focusScope())
+	if r.interaction.hasCapture && !index.allowsInteraction(r.interaction.pointerCapture) {
 		r.interaction.pointerCapture = ""
 		r.interaction.hasCapture = false
 	}
-	r.applyPendingInteraction(initial)
+	r.applyPendingInteraction(*index)
 	view.prepareInteraction(r.size, r.interaction)
-	index, err := view.buildTreeIndex(r.size, r.interaction)
-	if err != nil {
+	if err := view.buildTreeIndex(r.size, r.interaction, index); err != nil {
 		return nil, err
 	}
-	index, err = r.ensureFocusedVisible(&view, index)
-	if err != nil {
+	if err := r.ensureFocusedVisible(&view, index); err != nil {
 		return nil, err
 	}
 	current, err := surface.New(r.size.Width, r.size.Height)
@@ -891,7 +887,7 @@ func (r *Runtime[Message]) RenderIfDirty() (*Frame, error) {
 	// can also serve as the next diff baseline without duplicating its cells.
 	r.previousSurface = current
 	r.viewTree = &view
-	r.treeIndex = index
+	r.treeIndex, r.nextTreeIndex = r.nextTreeIndex, r.treeIndex
 	r.dirty = false
 	r.urgentFrame = false
 	r.lastFrame = now

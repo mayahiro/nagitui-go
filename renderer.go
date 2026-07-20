@@ -6,10 +6,8 @@ import (
 )
 
 func rendererOperations(previous, current *surface.Surface) []vt.TerminalOp {
-	operations := []vt.TerminalOp{
-		vt.BeginSynchronizedUpdate(),
-		vt.HideCursor(),
-	}
+	operations := make([]vt.TerminalOp, 0, 8)
+	operations = append(operations, vt.BeginSynchronizedUpdate(), vt.HideCursor())
 
 	var runs []surface.ChangedRun
 	if previous == nil {

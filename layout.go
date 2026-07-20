@@ -86,13 +86,18 @@ type layoutTrack struct {
 }
 
 func allocate(available uint32, tracks []layoutTrack) []uint32 {
-	allocations := make([]uint32, 0, len(tracks))
-	minimums := make([]uint32, 0, len(tracks))
+	allocations := make([]uint32, len(tracks))
+	minimums := make([]uint32, len(tracks))
+	allocateInto(available, tracks, allocations, minimums)
+	return allocations
+}
+
+func allocateInto(available uint32, tracks []layoutTrack, allocations, minimums []uint32) {
 	var total uint64
-	for _, track := range tracks {
+	for index, track := range tracks {
 		base, minimum := trackBaseAndMinimum(available, track)
-		allocations = append(allocations, base)
-		minimums = append(minimums, min(minimum, base))
+		allocations[index] = base
+		minimums[index] = min(minimum, base)
 		total = saturatingAdd64(total, uint64(base))
 	}
 
@@ -105,7 +110,6 @@ func allocate(available uint32, tracks []layoutTrack) []uint32 {
 		used += uint64(allocation)
 	}
 	distributeFlex(allocations, tracks, uint64(available)-used)
-	return allocations
 }
 
 func trackBaseAndMinimum(available uint32, track layoutTrack) (uint32, uint32) {

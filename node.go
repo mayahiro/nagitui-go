@@ -117,6 +117,7 @@ type Node[Message any] struct {
 	title            string
 	panel            PanelOptions
 	children         []Node[Message]
+	linearCache      *linearLayoutCache
 	child            *Node[Message]
 	insets           Insets
 	horizontal       HorizontalAlignment
@@ -223,18 +224,27 @@ func Gap[Message any](cells uint32) Node[Message] {
 }
 
 // Row returns a horizontal container
+//
+// The returned node retains the supplied variadic slice. Callers must not
+// mutate that slice after construction.
 func Row[Message any](children ...Node[Message]) Node[Message] {
-	return Node[Message]{kind: nodeRow, children: append([]Node[Message](nil), children...)}
+	return Node[Message]{kind: nodeRow, children: children, linearCache: &linearLayoutCache{}}
 }
 
 // Column returns a vertical container
+//
+// The returned node retains the supplied variadic slice. Callers must not
+// mutate that slice after construction.
 func Column[Message any](children ...Node[Message]) Node[Message] {
-	return Node[Message]{kind: nodeColumn, children: append([]Node[Message](nil), children...)}
+	return Node[Message]{kind: nodeColumn, children: children, linearCache: &linearLayoutCache{}}
 }
 
 // Stack returns a front-to-back overlay container
+//
+// The returned node retains the supplied variadic slice. Callers must not
+// mutate that slice after construction.
 func Stack[Message any](children ...Node[Message]) Node[Message] {
-	return Node[Message]{kind: nodeStack, children: append([]Node[Message](nil), children...)}
+	return Node[Message]{kind: nodeStack, children: children}
 }
 
 // Padding wraps a child in fixed padding
@@ -489,33 +499,17 @@ func (n Node[Message]) measure(constraints layoutConstraints) Size {
 }
 
 func measureText(content string, constraints layoutConstraints) Size {
-	var lines []string
+	maxCells := math.MaxInt
 	if constraints.width.bounded {
-		lines = celltext.Wrap(content, int(constraints.width.value), celltext.ModernWidth())
-	} else {
-		lines = naturalTextLines(content)
+		maxCells = int(constraints.width.value)
 	}
-	var width int
-	for _, line := range lines {
-		width = max(width, celltext.Width(line, celltext.ModernWidth()))
+	lines := celltext.IterateWrappedLines(content, maxCells, celltext.ModernWidth())
+	width, height := 0, 0
+	for line, ok := lines.Next(); ok; line, ok = lines.Next() {
+		width = max(width, line.Width)
+		height++
 	}
-	return Size{Width: intToUint32(width), Height: intToUint32(len(lines))}
-}
-
-func naturalTextLines(content string) []string {
-	content = celltext.NormalizeUTF8(content)
-	if content == "" {
-		return []string{""}
-	}
-	lines := make([]string, 0, 1)
-	start := 0
-	for _, grapheme := range celltext.Graphemes(content) {
-		if grapheme.Text == "\r" || grapheme.Text == "\n" || grapheme.Text == "\r\n" {
-			lines = append(lines, content[start:grapheme.Start])
-			start = grapheme.End
-		}
-	}
-	return append(lines, content[start:])
+	return Size{Width: intToUint32(width), Height: intToUint32(height)}
 }
 
 func measureLinear[Message any](children []Node[Message], constraints layoutConstraints, horizontal bool) Size {

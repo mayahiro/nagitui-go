@@ -2,13 +2,10 @@ package tui
 
 import "github.com/mayahiro/nagi-go/vt"
 
-func (n *Node[Message]) buildTreeIndex(size Size, interaction *InteractionState) (treeIndex, error) {
+func (n *Node[Message]) buildTreeIndex(size Size, interaction *InteractionState, index *treeIndex) error {
 	bounds := Rect{Width: size.Width, Height: size.Height}
-	index := newTreeIndex()
-	if err := n.buildIndex(bounds, bounds, "", false, true, interaction, &index); err != nil {
-		return treeIndex{}, err
-	}
-	return index, nil
+	index.reset()
+	return n.buildIndex(bounds, bounds, "", false, true, interaction, index)
 }
 
 func (n *Node[Message]) prepareInteraction(size Size, interaction *InteractionState) {
@@ -111,10 +108,15 @@ func (n *Node[Message]) buildIndex(
 	case nodeText, nodeRichText, nodeSurface, nodeSpacer, nodeGap, nodeTextInput:
 		return nil
 	case nodeRow, nodeColumn:
-		for childIndex, childRect := range linearRects(n.children, rect, n.kind == nodeRow) {
+		horizontal := n.kind == nodeRow
+		layout := n.resolvedLinearLayout(rect, horizontal)
+		var offset uint32
+		for childIndex := range n.children {
+			childRect := layout.childRect(rect, horizontal, childIndex, offset)
 			if err := n.children[childIndex].buildIndex(childRect, clip, childParent, hasChildParent, false, interaction, tree); err != nil {
 				return err
 			}
+			offset = saturatingAdd32(offset, layout.allocation(childIndex))
 		}
 	case nodeStack:
 		for child := range n.children {
@@ -204,8 +206,13 @@ func (n *Node[Message]) prepareAt(rect Rect, interaction *InteractionState) {
 
 	switch n.kind {
 	case nodeRow, nodeColumn:
-		for index, childRect := range linearRects(n.children, rect, n.kind == nodeRow) {
+		horizontal := n.kind == nodeRow
+		layout := n.resolvedLinearLayout(rect, horizontal)
+		var offset uint32
+		for index := range n.children {
+			childRect := layout.childRect(rect, horizontal, index, offset)
 			n.children[index].prepareAt(childRect, interaction)
+			offset = saturatingAdd32(offset, layout.allocation(index))
 		}
 	case nodeStack:
 		for index := range n.children {

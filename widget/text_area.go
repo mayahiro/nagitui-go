@@ -297,7 +297,8 @@ func textAreaVisibleStart(line string, offset int) int {
 		return 0
 	}
 	cells := 0
-	for _, grapheme := range celltext.Graphemes(line) {
+	graphemes := celltext.IterateGraphemes(line)
+	for grapheme, ok := graphemes.Next(); ok; grapheme, ok = graphemes.Next() {
 		if cells >= offset {
 			return grapheme.Start
 		}
@@ -550,7 +551,8 @@ func currentTextAreaLine(value string, cursor int) textAreaRange {
 func textAreaLineRanges(value string) []textAreaRange {
 	lines := make([]textAreaRange, 0, 1)
 	start := 0
-	for _, grapheme := range celltext.Graphemes(value) {
+	graphemes := celltext.IterateGraphemes(value)
+	for grapheme, ok := graphemes.Next(); ok; grapheme, ok = graphemes.Next() {
 		if grapheme.Text == "\r" || grapheme.Text == "\n" || grapheme.Text == "\r\n" {
 			lines = append(lines, textAreaRange{start: start, end: grapheme.Start})
 			start = grapheme.End
