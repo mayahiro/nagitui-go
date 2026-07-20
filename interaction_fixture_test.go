@@ -141,6 +141,95 @@ func TestScrollClampingMatchesSharedFixtures(t *testing.T) {
 	}
 }
 
+func TestVirtualScrollRequestsMatchSharedFixtures(t *testing.T) {
+	records := interactionRecords(
+		t,
+		"interaction/virtual-scroll.txt",
+		"virtual-scroll-request",
+		"axis",
+		"content-width",
+		"content-height",
+		"viewport-width",
+		"viewport-height",
+		"request-x",
+		"request-y",
+		"expected-build",
+		"expected-x",
+		"expected-y",
+		"expected-width",
+		"expected-height",
+		"expected-content-width",
+		"expected-content-height",
+	)
+	for _, record := range records {
+		t.Run(record.ID, func(t *testing.T) {
+			axis, validAxis := map[string]ScrollAxis{
+				"both":       ScrollAxisBoth,
+				"vertical":   ScrollAxisVertical,
+				"horizontal": ScrollAxisHorizontal,
+			}[record.Field("axis")]
+			if !validAxis {
+				t.Fatalf("invalid axis %q", record.Field("axis"))
+			}
+			declared := Size{
+				Width:  fixtureUint32(t, record.Field("content-width")),
+				Height: fixtureUint32(t, record.Field("content-height")),
+			}
+			viewport := Rect{
+				Width:  fixtureUint32(t, record.Field("viewport-width")),
+				Height: fixtureUint32(t, record.Field("viewport-height")),
+			}
+			requested := ScrollOffset{
+				X: fixtureUint32(t, record.Field("request-x")),
+				Y: fixtureUint32(t, record.Field("request-y")),
+			}
+			expectedBuild := fixtureUint32(t, record.Field("expected-build")) == 1
+			expected := VirtualViewport{
+				Offset: ScrollOffset{
+					X: fixtureUint32(t, record.Field("expected-x")),
+					Y: fixtureUint32(t, record.Field("expected-y")),
+				},
+				Size: Size{
+					Width:  fixtureUint32(t, record.Field("expected-width")),
+					Height: fixtureUint32(t, record.Field("expected-height")),
+				},
+				ContentSize: Size{
+					Width:  fixtureUint32(t, record.Field("expected-content-width")),
+					Height: fixtureUint32(t, record.Field("expected-content-height")),
+				},
+			}
+			cache := virtualCacheState[struct{}]{}
+			builds := 0
+			builder := func(request VirtualViewport) VirtualFragment[struct{}] {
+				builds++
+				return NewVirtualFragment(request.Offset, Column[struct{}]())
+			}
+
+			first, ok := ensureVirtualFragment(declared, axis, builder, &cache, viewport, requested)
+			if ok != expectedBuild {
+				t.Fatalf("first build = %t, want %t", ok, expectedBuild)
+			}
+			if ok && first.request != expected {
+				t.Fatalf("first request = %+v, want %+v", first.request, expected)
+			}
+			second, ok := ensureVirtualFragment(declared, axis, builder, &cache, viewport, requested)
+			if ok != expectedBuild {
+				t.Fatalf("second build = %t, want %t", ok, expectedBuild)
+			}
+			if ok && second.request != expected {
+				t.Fatalf("second request = %+v, want %+v", second.request, expected)
+			}
+			expectedBuilds := 0
+			if expectedBuild {
+				expectedBuilds = 1
+			}
+			if builds != expectedBuilds {
+				t.Fatalf("builds = %d, want %d", builds, expectedBuilds)
+			}
+		})
+	}
+}
+
 func TestTextInputEditsMatchSharedFixtures(t *testing.T) {
 	records := interactionRecords(
 		t,

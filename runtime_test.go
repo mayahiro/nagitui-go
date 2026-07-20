@@ -676,6 +676,203 @@ func TestRuntimeScrollViewportClampsAndClips(t *testing.T) {
 	}
 }
 
+type virtualScrollApp struct {
+	builds atomic.Int64
+	rows   atomic.Int64
+}
+
+func (*virtualScrollApp) Init() Effect[struct{}] { return NoneEffect[struct{}]() }
+func (*virtualScrollApp) Subscriptions() Subscription[struct{}] {
+	return NoneSubscription[struct{}]()
+}
+func (*virtualScrollApp) Update(struct{}) Effect[struct{}] { return NoneEffect[struct{}]() }
+func (a *virtualScrollApp) View(_ ViewContext) Node[struct{}] {
+	return VirtualScrollViewportWithOptions(
+		"virtual-scroll",
+		Size{Width: 3, Height: 1_000_000},
+		ScrollViewportOptions[struct{}]{Axis: ScrollAxisVertical},
+		func(viewport VirtualViewport) VirtualFragment[struct{}] {
+			a.builds.Add(1)
+			a.rows.Add(int64(viewport.Size.Height))
+			rows := make([]Node[struct{}], viewport.Size.Height)
+			for index := range rows {
+				row := viewport.Offset.Y + uint32(index)
+				rows[index] = Text[struct{}](strconv.Itoa(int(row % 10))).
+					WithID(NewNodeID("row-" + strconv.FormatUint(uint64(row), 10)))
+			}
+			return NewVirtualFragment(ScrollOffset{Y: viewport.Offset.Y}, Column(rows...))
+		},
+	)
+}
+
+func TestVirtualScrollViewportBoundsConstructionToVisibleRows(t *testing.T) {
+	app := &virtualScrollApp{}
+	runtime, err := NewRuntimeWithClock[struct{}](
+		app,
+		NewRuntimeConfig(Size{Width: 3, Height: 2}),
+		NewVirtualClock(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+
+	first, err := runtime.RenderIfDirty()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if app.builds.Load() != 1 || app.rows.Load() != 2 {
+		t.Fatalf("initial construction = %d builds, %d rows", app.builds.Load(), app.rows.Load())
+	}
+	if len(runtime.treeIndex.records) != 3 {
+		t.Fatalf("initial tree records = %d", len(runtime.treeIndex.records))
+	}
+	firstSurface := first.Surface()
+	assertNodeCell(t, firstSurface, 0, 0, "0")
+	assertNodeCell(t, firstSurface, 0, 1, "1")
+
+	if !runtime.SetScrollOffset("virtual-scroll", ScrollOffset{Y: ^uint32(0)}) {
+		t.Fatal("SetScrollOffset returned false")
+	}
+	last, err := runtime.RenderIfDirty()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if app.builds.Load() != 2 || app.rows.Load() != 4 {
+		t.Fatalf("total construction = %d builds, %d rows", app.builds.Load(), app.rows.Load())
+	}
+	if len(runtime.treeIndex.records) != 3 {
+		t.Fatalf("final tree records = %d", len(runtime.treeIndex.records))
+	}
+	lastSurface := last.Surface()
+	assertNodeCell(t, lastSurface, 0, 0, "8")
+	assertNodeCell(t, lastSurface, 0, 1, "9")
+	state, ok := runtime.Interaction().ScrollState("virtual-scroll")
+	if !ok || state.Maximum != (ScrollOffset{Y: 999_998}) {
+		t.Fatalf("scroll state = %+v, present = %t", state, ok)
+	}
+
+	for offset := range uint32(256) {
+		if !runtime.SetScrollOffset("virtual-scroll", ScrollOffset{Y: offset}) {
+			t.Fatal("SetScrollOffset returned false during sustained scrolling")
+		}
+		if frame, err := runtime.RenderIfDirty(); err != nil || frame == nil {
+			t.Fatalf("sustained frame %d = %v, %v", offset, frame, err)
+		}
+		if len(runtime.treeIndex.records) != 3 {
+			t.Fatalf("sustained tree records = %d", len(runtime.treeIndex.records))
+		}
+	}
+	if app.builds.Load() != 258 || app.rows.Load() != 516 {
+		t.Fatalf("sustained construction = %d builds, %d rows", app.builds.Load(), app.rows.Load())
+	}
+}
+
+type overscannedScrollApp struct{}
+
+func (*overscannedScrollApp) Init() Effect[struct{}] { return NoneEffect[struct{}]() }
+func (*overscannedScrollApp) Subscriptions() Subscription[struct{}] {
+	return NoneSubscription[struct{}]()
+}
+func (*overscannedScrollApp) Update(struct{}) Effect[struct{}] { return NoneEffect[struct{}]() }
+func (*overscannedScrollApp) View(ViewContext) Node[struct{}] {
+	return VirtualScrollViewportWithOptions(
+		"overscanned-scroll",
+		Size{Width: 3, Height: 6},
+		ScrollViewportOptions[struct{}]{Axis: ScrollAxisVertical},
+		func(viewport VirtualViewport) VirtualFragment[struct{}] {
+			start := viewport.Offset.Y
+			if start > 0 {
+				start--
+			}
+			end := min(
+				saturatingAdd32(saturatingAdd32(viewport.Offset.Y, viewport.Size.Height), 1),
+				viewport.ContentSize.Height,
+			)
+			rows := make([]Node[struct{}], 0, end-start)
+			for row := start; row < end; row++ {
+				rows = append(rows, Text[struct{}](strconv.FormatUint(uint64(row), 10)).
+					WithID(NewNodeID("overscan-row-"+strconv.FormatUint(uint64(row), 10))))
+			}
+			return NewVirtualFragment(ScrollOffset{Y: start}, Column(rows...))
+		},
+	)
+}
+
+func TestVirtualScrollViewportPositionsBoundedOverscan(t *testing.T) {
+	runtime, err := NewRuntimeWithClock[struct{}](
+		&overscannedScrollApp{},
+		NewRuntimeConfig(Size{Width: 3, Height: 2}),
+		NewVirtualClock(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	if _, err := runtime.RenderIfDirty(); err != nil {
+		t.Fatal(err)
+	}
+	if !runtime.SetScrollOffset("overscanned-scroll", ScrollOffset{Y: 2}) {
+		t.Fatal("SetScrollOffset returned false")
+	}
+
+	frame, err := runtime.RenderIfDirty()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rendered := frame.Surface()
+	assertNodeCell(t, rendered, 0, 0, "2")
+	assertNodeCell(t, rendered, 0, 1, "3")
+	if len(runtime.treeIndex.records) != 5 {
+		t.Fatalf("tree records = %d, want 5", len(runtime.treeIndex.records))
+	}
+}
+
+func TestVirtualScrollViewportRetainedMemoryStabilizes(t *testing.T) {
+	app := &virtualScrollApp{}
+	uiRuntime, err := NewRuntimeWithClock[struct{}](
+		app,
+		NewRuntimeConfig(Size{Width: 80, Height: 24}),
+		NewVirtualClock(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer uiRuntime.Close()
+	if _, err := uiRuntime.RenderIfDirty(); err != nil {
+		t.Fatal(err)
+	}
+
+	renderVirtualFrames(t, uiRuntime, 1, 512)
+	baseline := heapAllocationAfterGC()
+	renderVirtualFrames(t, uiRuntime, 10_000, 512)
+	retained := heapAllocationAfterGC()
+	const tolerance = uint64(1 << 20)
+	if retained > baseline+tolerance {
+		t.Fatalf("retained heap grew from %d to %d bytes", baseline, retained)
+	}
+	runtime.KeepAlive(uiRuntime)
+}
+
+func renderVirtualFrames(t *testing.T, uiRuntime *Runtime[struct{}], start, count uint32) {
+	t.Helper()
+	for offset := start; offset < start+count; offset++ {
+		if !uiRuntime.SetScrollOffset("virtual-scroll", ScrollOffset{Y: offset}) {
+			t.Fatal("SetScrollOffset returned false")
+		}
+		if frame, err := uiRuntime.RenderIfDirty(); err != nil || frame == nil {
+			t.Fatalf("virtual frame %d = %v, %v", offset, frame, err)
+		}
+	}
+}
+
+func heapAllocationAfterGC() uint64 {
+	runtime.GC()
+	var statistics runtime.MemStats
+	runtime.ReadMemStats(&statistics)
+	return statistics.HeapAlloc
+}
+
 type lifecycleMessage uint8
 
 const lifecycleStop lifecycleMessage = iota

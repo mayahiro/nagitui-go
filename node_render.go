@@ -15,7 +15,9 @@ func (n Node[Message]) render(target *surface.Surface, rect, clip Rect, interact
 	case nodeRichText:
 		renderRichText(target, rect, clip, n.spans, n.paragraph)
 	case nodeSurface:
-		renderSurfaceNode(target, rect, clip, n.embeddedSurface)
+		if n.payload != nil {
+			renderSurfaceNode(target, rect, clip, n.payload.surface)
+		}
 	case nodeSpacer, nodeGap:
 	case nodeTextInput:
 		renderTextInput(target, rect, clip, n.id, n.content, n.placeholder, n.style, n.placeholderStyle, interaction)
@@ -40,6 +42,22 @@ func (n Node[Message]) render(target *surface.Surface, rect, clip Rect, interact
 	case nodeScrollViewport:
 		childRect := scrollChildRect(rect, n.child, interaction.ScrollOffset(n.id), n.scroll.Axis)
 		n.child.render(target, childRect, clip.Intersection(rect), interaction)
+	case nodeVirtualScrollViewport:
+		if fragment, ok := ensureVirtualFragment(
+			n.payload.virtualSize,
+			n.scroll.Axis,
+			n.payload.virtualBuilder,
+			&n.payload.virtualCache,
+			rect,
+			interaction.ScrollOffset(n.id),
+		); ok {
+			fragment.fragment.Node.render(
+				target,
+				virtualFragmentRect(rect, fragment),
+				clip.Intersection(rect),
+				interaction,
+			)
+		}
 	case nodeModal:
 		n.child.render(target, rect, clip, interaction)
 	case nodePanel:
@@ -206,6 +224,92 @@ func scrollChildRect[Message any](viewport Rect, child *Node[Message], requested
 		Y:      clampInt64ToInt32(int64(viewport.Y) - int64(offset.Y)),
 		Width:  width,
 		Height: height,
+	}
+}
+
+func ensureVirtualFragment[Message any](
+	declaredContentSize Size,
+	axis ScrollAxis,
+	builder func(VirtualViewport) VirtualFragment[Message],
+	cache *virtualCacheState[Message],
+	viewport Rect,
+	requested ScrollOffset,
+) (*virtualCacheState[Message], bool) {
+	if viewport.Empty() || virtualContentEmpty(declaredContentSize, axis) {
+		var zero VirtualFragment[Message]
+		cache.valid = false
+		cache.fragment = zero
+		return cache, false
+	}
+	contentSize := resolvedVirtualContentSize(declaredContentSize, viewport.Size(), axis)
+	requested = normalizeScrollOffset(axis, requested)
+	offset := clampScroll(
+		contentSize.Width,
+		contentSize.Height,
+		viewport.Width,
+		viewport.Height,
+		requested,
+	)
+	request := VirtualViewport{
+		Offset: offset,
+		Size: Size{
+			Width:  min(viewport.Width, contentSize.Width-offset.X),
+			Height: min(viewport.Height, contentSize.Height-offset.Y),
+		},
+		ContentSize: contentSize,
+	}
+	if !cache.valid || cache.request != request {
+		cache.request = request
+		cache.fragment = builder(request)
+		cache.valid = true
+	}
+	return cache, true
+}
+
+func resolvedVirtualContentSize(declared, viewport Size, _ ScrollAxis) Size {
+	return Size{
+		Width:  max(declared.Width, viewport.Width),
+		Height: max(declared.Height, viewport.Height),
+	}
+}
+
+func virtualContentEmpty(content Size, axis ScrollAxis) bool {
+	switch axis {
+	case ScrollAxisBoth:
+		return content.Width == 0 || content.Height == 0
+	case ScrollAxisVertical:
+		return content.Height == 0
+	case ScrollAxisHorizontal:
+		return content.Width == 0
+	default:
+		panic("nagi-tui: invalid scroll axis")
+	}
+}
+
+func virtualFragmentRect[Message any](viewport Rect, cached *virtualCacheState[Message]) Rect {
+	request := cached.request
+	origin := ScrollOffset{
+		X: min(cached.fragment.Origin.X, request.ContentSize.Width),
+		Y: min(cached.fragment.Origin.Y, request.ContentSize.Height),
+	}
+	remaining := Size{
+		Width:  request.ContentSize.Width - origin.X,
+		Height: request.ContentSize.Height - origin.Y,
+	}
+	measured := cached.fragment.Node.measure(boundedConstraints(remaining))
+	visibleEnd := ScrollOffset{
+		X: saturatingAdd32(request.Offset.X, request.Size.Width),
+		Y: saturatingAdd32(request.Offset.Y, request.Size.Height),
+	}
+	coverage := Size{
+		Width:  visibleEnd.X - min(visibleEnd.X, origin.X),
+		Height: visibleEnd.Y - min(visibleEnd.Y, origin.Y),
+	}
+	return Rect{
+		X:      clampInt64ToInt32(int64(viewport.X) + int64(origin.X) - int64(request.Offset.X)),
+		Y:      clampInt64ToInt32(int64(viewport.Y) + int64(origin.Y) - int64(request.Offset.Y)),
+		Width:  min(max(measured.Width, coverage.Width), remaining.Width),
+		Height: min(max(measured.Height, coverage.Height), remaining.Height),
 	}
 }
 

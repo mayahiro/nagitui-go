@@ -52,6 +52,7 @@ Go repository rootから実terminalで実行します
 | [Command palette](examples/command-palette/README.md) | `go run ./examples/command-palette` |
 | [Async search](examples/async-search/README.md) | `go run ./examples/async-search` |
 | [Log viewer](examples/log-viewer/README.md) | `go run ./examples/log-viewer` |
+| [Virtual scroll](examples/virtual-scroll/README.md) | `go run ./examples/virtual-scroll` |
 | [Widget gallery](examples/widget-gallery/README.md) | `go run ./examples/widget-gallery` |
 | [Extended widget gallery](examples/extended-widget-gallery/README.md) | `go run ./examples/extended-widget-gallery` |
 | [Dashboard](examples/dashboard/README.md) | `go run ./examples/dashboard` |
@@ -64,7 +65,7 @@ Go repository rootから実terminalで実行します
 
 Terminal inputとoutputはterminalへ接続されている必要があります。Mouse reportは既定で無効です。Raw modeとscreen stateは正常return、error、panic経路でbest effortとして復元します。Process abort、nested terminal session、suspendとresume、`/dev/tty`取得には対応していません
 
-`ScrollViewport`は構築済みのchild treeをclipしてscrollします。Childの構築、measure、render treeの走査をvirtualizeしないため、大規模dataを表示するapplicationは渡すchild数を制限する必要があります
+`ScrollViewport`はeagerなchild treeをclipしてscrollします。大規模dataでは`VirtualScrollViewport`を使用し、content全体のCell extentを宣言して現在表示する範囲または上限付きoverscanの`VirtualFragment`だけを構築できます
 
 ## License
 

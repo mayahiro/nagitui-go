@@ -67,6 +67,43 @@ func DefaultScrollViewportOptions[Message any]() ScrollViewportOptions[Message] 
 	return ScrollViewportOptions[Message]{Axis: ScrollAxisBoth}
 }
 
+// VirtualViewport is the visible content range requested by a virtual
+// ScrollViewport
+type VirtualViewport struct {
+	// Offset is the first visible cell in content coordinates
+	Offset ScrollOffset
+	// Size is the visible viewport size in cells
+	Size Size
+	// ContentSize is the complete resolved content extent in cells
+	ContentSize Size
+}
+
+// VirtualFragment is one lazily constructed visible or overscanned fragment
+type VirtualFragment[Message any] struct {
+	// Origin is the fragment origin in content coordinates
+	Origin ScrollOffset
+	// Node is the semantic subtree beginning at Origin
+	Node Node[Message]
+}
+
+// NewVirtualFragment returns a fragment beginning at origin
+func NewVirtualFragment[Message any](origin ScrollOffset, node Node[Message]) VirtualFragment[Message] {
+	return VirtualFragment[Message]{Origin: origin, Node: node}
+}
+
+type virtualCacheState[Message any] struct {
+	valid    bool
+	request  VirtualViewport
+	fragment VirtualFragment[Message]
+}
+
+type nodePayload[Message any] struct {
+	surface        *surface.Surface
+	virtualSize    Size
+	virtualBuilder func(VirtualViewport) VirtualFragment[Message]
+	virtualCache   virtualCacheState[Message]
+}
+
 // Node is a semantic view node rebuilt by an application for each frame
 type Node[Message any] struct {
 	kind             nodeKind
@@ -74,7 +111,7 @@ type Node[Message any] struct {
 	style            vt.Style
 	spans            []TextSpan
 	paragraph        ParagraphOptions
-	embeddedSurface  *surface.Surface
+	payload          *nodePayload[Message]
 	intrinsicSize    Size
 	gap              uint32
 	title            string
@@ -114,6 +151,7 @@ const (
 	nodeAlign
 	nodeClip
 	nodeScrollViewport
+	nodeVirtualScrollViewport
 	nodeModal
 	nodePanel
 )
@@ -166,7 +204,10 @@ func SurfaceNode[Message any](source *surface.Surface) Node[Message] {
 	if source == nil {
 		return Node[Message]{kind: nodeSurface}
 	}
-	return Node[Message]{kind: nodeSurface, embeddedSurface: source.Clone()}
+	return Node[Message]{
+		kind:    nodeSurface,
+		payload: &nodePayload[Message]{surface: source.Clone()},
+	}
 }
 
 // Spacer returns an invisible node with a fixed measured size
@@ -258,16 +299,16 @@ func StyledTextInput[Message any](
 
 // ScrollViewport returns a clipped viewport with runtime-owned cell offset
 //
-// The supplied child tree is fully constructed and measured, and render-tree
-// traversal is not virtualized.
+// The supplied child tree is eager. Use VirtualScrollViewport when content
+// construction must be bounded by the visible region.
 func ScrollViewport[Message any](id NodeID, child Node[Message]) Node[Message] {
 	return ScrollViewportWithOptions(id, child, DefaultScrollViewportOptions[Message]())
 }
 
 // ScrollViewportWithOptions returns a clipped viewport with configured behavior
 //
-// The supplied child tree is fully constructed and measured, and render-tree
-// traversal is not virtualized.
+// The supplied child tree is eager. Use VirtualScrollViewportWithOptions when
+// content construction must be bounded by the visible region.
 func ScrollViewportWithOptions[Message any](
 	id NodeID,
 	child Node[Message],
@@ -280,6 +321,56 @@ func ScrollViewportWithOptions[Message any](
 		hasID:     true,
 		focusable: true,
 		scroll:    options,
+	}
+}
+
+// VirtualScrollViewport returns a viewport that constructs only a visible
+// content fragment
+//
+// contentSize declares the complete scrollable cell extent without
+// constructing it. The builder is cached for one resolved visible range
+// during the semantic frame and may return bounded overscan before that range.
+// A nil builder produces empty fragments.
+func VirtualScrollViewport[Message any](
+	id NodeID,
+	contentSize Size,
+	builder func(VirtualViewport) VirtualFragment[Message],
+) Node[Message] {
+	return VirtualScrollViewportWithOptions(
+		id,
+		contentSize,
+		DefaultScrollViewportOptions[Message](),
+		builder,
+	)
+}
+
+// VirtualScrollViewportWithOptions returns a virtual viewport with configured
+// scrolling behavior
+//
+// Only the cached fragment participates in measurement, rendering, focus, hit
+// testing, and event routing. Fragment Node IDs therefore represent visible or
+// overscanned content and must remain stable across requests.
+func VirtualScrollViewportWithOptions[Message any](
+	id NodeID,
+	contentSize Size,
+	options ScrollViewportOptions[Message],
+	builder func(VirtualViewport) VirtualFragment[Message],
+) Node[Message] {
+	if builder == nil {
+		builder = func(VirtualViewport) VirtualFragment[Message] {
+			return NewVirtualFragment(ScrollOffset{}, Column[Message]())
+		}
+	}
+	return Node[Message]{
+		kind:      nodeVirtualScrollViewport,
+		id:        id,
+		hasID:     true,
+		focusable: true,
+		scroll:    options,
+		payload: &nodePayload[Message]{
+			virtualSize:    contentSize,
+			virtualBuilder: builder,
+		},
 	}
 }
 
@@ -346,8 +437,8 @@ func (n Node[Message]) measure(constraints layoutConstraints) Size {
 	case nodeRichText:
 		measured = measureRichText(n.spans, n.paragraph, constraints)
 	case nodeSurface:
-		if n.embeddedSurface != nil {
-			measured = Size{Width: n.embeddedSurface.Width(), Height: n.embeddedSurface.Height()}
+		if n.payload != nil && n.payload.surface != nil {
+			measured = Size{Width: n.payload.surface.Width(), Height: n.payload.surface.Height()}
 		}
 	case nodeSpacer:
 		measured = n.intrinsicSize
@@ -389,6 +480,8 @@ func (n Node[Message]) measure(constraints layoutConstraints) Size {
 		)
 	case nodeAlign, nodeClip, nodeScrollViewport, nodeModal:
 		measured = n.child.measure(constraints)
+	case nodeVirtualScrollViewport:
+		measured = n.payload.virtualSize
 	default:
 		panic("nagi-tui: invalid node kind")
 	}

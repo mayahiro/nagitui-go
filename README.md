@@ -57,6 +57,7 @@ Run commands from the Go repository root in a real terminal
 | [Command palette](examples/command-palette/README.md) | `go run ./examples/command-palette` |
 | [Async search](examples/async-search/README.md) | `go run ./examples/async-search` |
 | [Log viewer](examples/log-viewer/README.md) | `go run ./examples/log-viewer` |
+| [Virtual scroll](examples/virtual-scroll/README.md) | `go run ./examples/virtual-scroll` |
 | [Widget gallery](examples/widget-gallery/README.md) | `go run ./examples/widget-gallery` |
 | [Extended widget gallery](examples/extended-widget-gallery/README.md) | `go run ./examples/extended-widget-gallery` |
 | [Dashboard](examples/dashboard/README.md) | `go run ./examples/dashboard` |
@@ -72,9 +73,9 @@ disabled by default. Raw mode and screen restoration are best effort on normal
 return, error, and panic paths. Process abort, nested terminal sessions,
 suspend and resume, and `/dev/tty` acquisition are not supported
 
-`ScrollViewport` clips and scrolls an already constructed child tree. It does
-not virtualize child construction, measurement, or render-tree traversal, so
-applications must bound the supplied children when displaying large data sets
+`ScrollViewport` clips and scrolls an eager child tree. Large data sets can use
+`VirtualScrollViewport`, which declares the complete cell extent and constructs
+only the current visible or bounded-overscan `VirtualFragment`
 
 ## License
 

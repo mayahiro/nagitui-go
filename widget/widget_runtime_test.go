@@ -268,6 +268,182 @@ func TestTableIsOneTabStopAndSelectionFollowsViewport(t *testing.T) {
 	}
 }
 
+type listViewportApp struct {
+	selected int
+}
+
+func (*listViewportApp) Init() tui.Effect[int] {
+	return tui.NoneEffect[int]()
+}
+
+func (a *listViewportApp) Update(selected int) tui.Effect[int] {
+	a.selected = selected
+	return tui.NoneEffect[int]()
+}
+
+func (*listViewportApp) Subscriptions() tui.Subscription[int] {
+	return tui.NoneSubscription[int]()
+}
+
+func (a *listViewportApp) View(tui.ViewContext) tui.Node[int] {
+	items := make([]ListItem, 5)
+	for index := range items {
+		items[index] = NewListItem(tui.NodeID("list-row-"+string(rune('0'+index))), string(rune('0'+index)))
+	}
+	return NewList("large-list", items, a.selected, func(selected int) int {
+		return selected
+	}).Viewport("list-body", tui.Fixed(2)).Node()
+}
+
+func TestListSelectionFollowsVirtualViewport(t *testing.T) {
+	app := &listViewportApp{}
+	runtime, err := tui.NewRuntimeWithClock[int](
+		app,
+		tui.NewRuntimeConfig(tui.Size{Width: 12, Height: 2}),
+		tui.NewVirtualClock(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	if _, err := runtime.RenderIfDirty(); err != nil {
+		t.Fatal(err)
+	}
+	if focused, err := runtime.RequestFocus("large-list"); err != nil || !focused {
+		t.Fatalf("focus list = %t, %v", focused, err)
+	}
+	if _, err := runtime.DispatchEvent(widgetKey(vt.KeyEnd)); err != nil {
+		t.Fatal(err)
+	}
+	if count, err := runtime.ProcessPending(); err != nil || count != 1 {
+		t.Fatalf("select last = %d, %v", count, err)
+	}
+	if _, err := runtime.RenderIfDirty(); err != nil {
+		t.Fatal(err)
+	}
+	state, ok := runtime.Interaction().ScrollState("list-body")
+	if !ok || state.Offset.Y != 3 || state.Maximum.Y != 3 {
+		t.Fatalf("scroll state = %+v, %t", state, ok)
+	}
+
+	app.selected = 0
+	runtime.RequestFrame()
+	if _, err := runtime.RenderIfDirty(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.DispatchEvent(vt.Event{Kind: vt.EventMouse, Mouse: vt.MouseEvent{
+		Kind: vt.MousePress, Button: vt.MouseLeft, X: 0, Y: 1,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if count, err := runtime.ProcessPending(); err != nil || count != 1 {
+		t.Fatalf("mouse selection = %d, %v", count, err)
+	}
+	if app.selected != 1 {
+		t.Fatalf("selected = %d", app.selected)
+	}
+	if focused, ok := runtime.Interaction().Focused(); !ok || focused != "large-list" {
+		t.Fatalf("focus after click = %q, %t", focused, ok)
+	}
+}
+
+type wrappedListViewportApp struct{}
+
+func (*wrappedListViewportApp) Init() tui.Effect[int] {
+	return tui.NoneEffect[int]()
+}
+
+func (*wrappedListViewportApp) Update(int) tui.Effect[int] {
+	return tui.NoneEffect[int]()
+}
+
+func (*wrappedListViewportApp) Subscriptions() tui.Subscription[int] {
+	return tui.NoneSubscription[int]()
+}
+
+func (*wrappedListViewportApp) View(tui.ViewContext) tui.Node[int] {
+	return NewList(
+		"wrapped-list",
+		[]ListItem{
+			NewListItem("wrapped-first", "ABCDEFGHIJ"),
+			NewListItem("wrapped-second", "B"),
+		},
+		0,
+		func(selected int) int { return selected },
+	).Viewport("wrapped-list-body", tui.Fixed(2)).Node()
+}
+
+func TestVirtualListRowsAreOneCellHigh(t *testing.T) {
+	runtime, err := tui.NewRuntimeWithClock[int](
+		&wrappedListViewportApp{},
+		tui.NewRuntimeConfig(tui.Size{Width: 6, Height: 2}),
+		tui.NewVirtualClock(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+
+	frame, err := runtime.RenderIfDirty()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if actual := widgetRowText(frame.Surface(), 0); actual != "> ABCD" {
+		t.Fatalf("first row = %q", actual)
+	}
+	if actual := widgetRowText(frame.Surface(), 1); actual != "  B   " {
+		t.Fatalf("second row = %q", actual)
+	}
+}
+
+type multilineTableViewportApp struct{}
+
+func (*multilineTableViewportApp) Init() tui.Effect[int] {
+	return tui.NoneEffect[int]()
+}
+
+func (*multilineTableViewportApp) Update(int) tui.Effect[int] {
+	return tui.NoneEffect[int]()
+}
+
+func (*multilineTableViewportApp) Subscriptions() tui.Subscription[int] {
+	return tui.NoneSubscription[int]()
+}
+
+func (*multilineTableViewportApp) View(tui.ViewContext) tui.Node[int] {
+	return NewTable(
+		"multiline-table",
+		[]TableColumn{NewTableColumn("Value", tui.Fixed(4))},
+		[]TableRow{
+			NewTableRow("multiline-first", []string{"A\nX"}),
+			NewTableRow("multiline-second", []string{"B"}),
+		},
+		0,
+		func(selected int) int { return selected },
+	).Viewport("multiline-table-body", tui.Fixed(2)).Node()
+}
+
+func TestVirtualTableRowsAreOneCellHigh(t *testing.T) {
+	runtime, err := tui.NewRuntimeWithClock[int](
+		&multilineTableViewportApp{},
+		tui.NewRuntimeConfig(tui.Size{Width: 6, Height: 3}),
+		tui.NewVirtualClock(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+
+	frame, err := runtime.RenderIfDirty()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cell, ok := frame.Surface().Cell(2, 2)
+	if !ok || cell.Content() != "B" {
+		t.Fatalf("second row cell = %q, %t", cell.Content(), ok)
+	}
+}
+
 func widgetKey(code vt.KeyCode) vt.Event {
 	return vt.Event{Kind: vt.EventKey, Key: vt.KeyEvent{
 		Code: code, Action: vt.KeyPress, Protocol: vt.KeyProtocolLegacy,

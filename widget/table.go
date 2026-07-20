@@ -106,12 +106,13 @@ func (t Table[Message]) ColumnAlignment(column int, alignment tui.HorizontalAlig
 	return t
 }
 
-// Viewport keeps the header fixed and wraps data rows in a Core ScrollViewport
+// Viewport keeps the header fixed and wraps data rows in a virtual Core ScrollViewport
 //
 // viewportID must be distinct from the table root and row IDs. Applications
-// may control its retained offset through Runtime.SetScrollOffset. The
-// viewport does not virtualize rows; pass a bounded row set for large
-// collections.
+// may control its retained offset through Runtime.SetScrollOffset. Semantic
+// row construction is bounded by the visible body height. Row metadata
+// collection remains eager. Virtualized body rows are one Cell high and clip
+// multiline content.
 func (t Table[Message]) Viewport(viewportID tui.NodeID, bodyHeight tui.Length) Table[Message] {
 	t.viewportID = viewportID
 	t.viewportHeight = bodyHeight
@@ -128,6 +129,9 @@ func (t Table[Message]) Node() tui.Node[Message] {
 		headings[index] = column.Title
 	}
 	header := tableRowNode[Message]("  ", headings, t.columns, t.columnAlignments, t.style.Header)
+	if t.hasViewport {
+		return t.virtualNode(header, selected, hasSelection)
+	}
 	rows := make([]tui.Node[Message], 0, len(t.rows))
 	for index, row := range t.rows {
 		isSelected := hasSelection && index == selected
@@ -175,27 +179,109 @@ func (t Table[Message]) Node() tui.Node[Message] {
 			}))
 	}
 
-	var root tui.Node[Message]
-	if t.hasViewport {
-		body := tui.ScrollViewportWithOptions(
-			t.viewportID,
-			tui.Column(rows...),
-			tui.ScrollViewportOptions[Message]{
-				Axis:                 tui.ScrollAxisVertical,
-				EnsureFocusedVisible: true,
-			},
-		).TabStop(false).WithLength(t.viewportHeight)
-		root = tui.Column(header, body)
-	} else {
-		children := make([]tui.Node[Message], 0, len(rows)+1)
-		children = append(children, header)
-		children = append(children, rows...)
-		root = tui.Column(children...)
-	}
+	children := make([]tui.Node[Message], 0, len(rows)+1)
+	children = append(children, header)
+	children = append(children, rows...)
+	root := tui.Column(children...)
 	if t.enabled && hasSelection {
 		return root
 	}
 	return root.WithID(t.id)
+}
+
+func (t Table[Message]) virtualNode(
+	header tui.Node[Message],
+	selected int,
+	hasSelection bool,
+) tui.Node[Message] {
+	body := tui.VirtualScrollViewportWithOptions(
+		t.viewportID,
+		tui.Size{Height: cellCount(len(t.rows))},
+		tui.ScrollViewportOptions[Message]{
+			Axis:                 tui.ScrollAxisVertical,
+			EnsureFocusedVisible: true,
+		},
+		func(viewport tui.VirtualViewport) tui.VirtualFragment[Message] {
+			start, end := virtualRange(viewport, len(t.rows))
+			rows := make([]tui.Node[Message], 0, end-start)
+			for index := start; index < end; index++ {
+				rows = append(rows, t.virtualRow(selected, hasSelection, index))
+			}
+			visibleRows := tui.Padding(
+				tui.Column(rows...),
+				tui.Insets{Top: cellCount(start)},
+			)
+			layers := []tui.Node[Message]{visibleRows}
+			if t.enabled && hasSelection && (selected < start || selected >= end) {
+				proxy := t.navigationTarget(
+					tui.Spacer[Message](0, 1),
+					selected,
+					false,
+				)
+				layers = append(layers, tui.Padding(proxy, tui.Insets{Top: cellCount(selected)}))
+			}
+			return tui.NewVirtualFragment(tui.ScrollOffset{}, tui.Stack(layers...))
+		},
+	).TabStop(false).WithLength(t.viewportHeight)
+	root := tui.Column(header, body)
+	if t.enabled && hasSelection {
+		return root
+	}
+	return root.WithID(t.id)
+}
+
+func (t Table[Message]) virtualRow(selected int, hasSelection bool, index int) tui.Node[Message] {
+	row := t.rows[index]
+	isSelected := hasSelection && index == selected
+	style := t.style.Normal
+	if isSelected {
+		style = t.style.Selected
+	}
+	if !t.enabled {
+		style = t.style.Disabled
+	}
+	marker := "  "
+	if isSelected {
+		marker = "> "
+	}
+	node := tableRowNode[Message](marker, row.Cells, t.columns, t.columnAlignments, style)
+	if !t.enabled {
+		return node.WithID(row.ID).WithLength(tui.Fixed(1))
+	}
+	selection := index
+	rowID := row.ID
+	rowNode := node.WithID(rowID).OnEvent(rowID, func(event vt.Event) tui.EventResult[Message] {
+		if !isActivationEvent(event) {
+			return tui.IgnoreResult[Message]()
+		}
+		return tui.MessageResult(t.onSelect(selection)).Focus(t.id)
+	})
+	if !isSelected {
+		return rowNode.WithLength(tui.Fixed(1))
+	}
+	return t.navigationTarget(tui.Column(rowNode), index, true).WithLength(tui.Fixed(1))
+}
+
+func (t Table[Message]) navigationTarget(
+	node tui.Node[Message],
+	selected int,
+	applyFocusedStyle bool,
+) tui.Node[Message] {
+	node = node.Focusable(t.id).OnEvent(t.id, func(event vt.Event) tui.EventResult[Message] {
+		next, handled := navigationEvent(event, len(t.rows), selected)
+		if !handled {
+			return tui.IgnoreResult[Message]()
+		}
+		result := tui.ConsumeResult[Message]().Focus(t.id)
+		if next != selected {
+			result = result.Emit(t.onSelect(next))
+		}
+		return result
+	})
+	if applyFocusedStyle {
+		node = node.WithFocusedStyle(t.style.Focused)
+	}
+	return node
 }
 
 func cloneTableRows(rows []TableRow) []TableRow {

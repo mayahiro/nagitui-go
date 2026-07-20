@@ -34,7 +34,7 @@ func (n *Node[Message]) textInputMessage(id NodeID, value string) (Message, bool
 
 func (n *Node[Message]) scrollOptions(id NodeID) (ScrollViewportOptions[Message], bool) {
 	node := n.find(id)
-	if node == nil || node.kind != nodeScrollViewport {
+	if node == nil || (node.kind != nodeScrollViewport && node.kind != nodeVirtualScrollViewport) {
 		return ScrollViewportOptions[Message]{}, false
 	}
 	return node.scroll, true
@@ -62,6 +62,10 @@ func (n *Node[Message]) find(id NodeID) *Node[Message] {
 		}
 	case nodePadding, nodeBorder, nodeAlign, nodeClip, nodeScrollViewport, nodeModal, nodePanel:
 		return n.child.find(id)
+	case nodeVirtualScrollViewport:
+		if n.payload != nil && n.payload.virtualCache.valid {
+			return n.payload.virtualCache.fragment.Node.find(id)
+		}
 	}
 	return nil
 }
@@ -81,6 +85,8 @@ func (n *Node[Message]) buildIndex(
 		case nodeTextInput:
 			kind = interactiveTextInput
 		case nodeScrollViewport:
+			kind = interactiveScrollViewport
+		case nodeVirtualScrollViewport:
 			kind = interactiveScrollViewport
 		case nodeModal:
 			kind = interactiveModal
@@ -128,6 +134,27 @@ func (n *Node[Message]) buildIndex(
 	case nodeScrollViewport:
 		childRect := scrollChildRect(rect, n.child, interaction.ScrollOffset(n.id), n.scroll.Axis)
 		return n.child.buildIndex(childRect, clip.Intersection(rect), childParent, hasChildParent, false, interaction, tree)
+	case nodeVirtualScrollViewport:
+		fragment, ok := ensureVirtualFragment(
+			n.payload.virtualSize,
+			n.scroll.Axis,
+			n.payload.virtualBuilder,
+			&n.payload.virtualCache,
+			rect,
+			interaction.ScrollOffset(n.id),
+		)
+		if !ok {
+			return nil
+		}
+		return fragment.fragment.Node.buildIndex(
+			virtualFragmentRect(rect, fragment),
+			clip.Intersection(rect),
+			childParent,
+			hasChildParent,
+			false,
+			interaction,
+			tree,
+		)
 	case nodeModal:
 		return n.child.buildIndex(rect, clip, childParent, hasChildParent, false, interaction, tree)
 	case nodePanel:
@@ -153,6 +180,25 @@ func (n *Node[Message]) prepareAt(rect Rect, interaction *InteractionState) {
 			n.scroll.StickToEnd,
 		)
 		n.child.prepareAt(scrollChildRect(rect, n.child, state.Offset, n.scroll.Axis), interaction)
+		return
+	case nodeVirtualScrollViewport:
+		content := resolvedVirtualContentSize(n.payload.virtualSize, rect.Size(), n.scroll.Axis)
+		state := interaction.prepareScroll(
+			n.id,
+			ScrollOffset{X: content.Width - rect.Width, Y: content.Height - rect.Height},
+			n.scroll.Axis,
+			n.scroll.StickToEnd,
+		)
+		if fragment, ok := ensureVirtualFragment(
+			n.payload.virtualSize,
+			n.scroll.Axis,
+			n.payload.virtualBuilder,
+			&n.payload.virtualCache,
+			rect,
+			state.Offset,
+		); ok {
+			fragment.fragment.Node.prepareAt(virtualFragmentRect(rect, fragment), interaction)
+		}
 		return
 	}
 

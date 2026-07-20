@@ -887,7 +887,9 @@ func (r *Runtime[Message]) RenderIfDirty() (*Frame, error) {
 	}
 	view.renderTo(current, r.interaction)
 	operations := rendererOperations(r.previousSurface, current)
-	r.previousSurface = current.Clone()
+	// Frame only exposes independent clones, so the immutable rendered surface
+	// can also serve as the next diff baseline without duplicating its cells.
+	r.previousSurface = current
 	r.viewTree = &view
 	r.treeIndex = index
 	r.dirty = false

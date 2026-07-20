@@ -115,12 +115,13 @@ func (l List[Message]) Paginate(page, pageSize int) List[Message] {
 	return l.Window(offset, pageSize)
 }
 
-// Viewport wraps the list in a Core ScrollViewport using a sizing rule
+// Viewport wraps the list in a virtual Core ScrollViewport using a sizing rule
 //
 // viewportID must be distinct from the list root and item IDs. Applications
-// may control its retained offset through Runtime.SetScrollOffset. This does
-// not limit item construction; use Window or Paginate before Viewport for
-// large collections.
+// may control its retained offset through Runtime.SetScrollOffset. Semantic
+// row construction is bounded by the visible height. Item metadata collection
+// and filtering remain eager. Viewport rows are one Cell high and clip content
+// that would otherwise wrap.
 func (l List[Message]) Viewport(viewportID tui.NodeID, height tui.Length) List[Message] {
 	l.viewportID = viewportID
 	l.viewportHeight = height
@@ -135,6 +136,9 @@ func (l List[Message]) Node() tui.Node[Message] {
 		visible = listWindow(visible, l.windowOffset, l.windowLimit)
 	}
 	selected, hasSelection := normalizedListSelection(visible, l.selected)
+	if l.hasViewport {
+		return l.virtualNode(visible, selected, hasSelection)
+	}
 	children := make([]tui.Node[Message], 0, len(visible))
 	for position, originalIndex := range visible {
 		item := l.items[originalIndex]
@@ -187,22 +191,121 @@ func (l List[Message]) Node() tui.Node[Message] {
 	if !l.enabled || !hasSelection {
 		root = root.WithID(l.id)
 	}
-	return l.withViewport(root)
+	return root
 }
 
-func (l List[Message]) withViewport(root tui.Node[Message]) tui.Node[Message] {
-	if !l.hasViewport {
-		return root
-	}
-	viewport := tui.ScrollViewportWithOptions(
+func (l List[Message]) virtualNode(visible []int, selected int, hasSelection bool) tui.Node[Message] {
+	contentHeight := cellCount(len(visible))
+	viewport := tui.VirtualScrollViewportWithOptions(
 		l.viewportID,
-		root,
+		tui.Size{Height: contentHeight},
 		tui.ScrollViewportOptions[Message]{
 			Axis:                 tui.ScrollAxisVertical,
 			EnsureFocusedVisible: true,
 		},
+		func(viewport tui.VirtualViewport) tui.VirtualFragment[Message] {
+			start, end := virtualRange(viewport, len(visible))
+			rows := make([]tui.Node[Message], 0, end-start)
+			for position := start; position < end; position++ {
+				rows = append(rows, l.virtualRow(visible, selected, hasSelection, position))
+			}
+			visibleRows := tui.Padding(
+				tui.Column(rows...),
+				tui.Insets{Top: cellCount(start)},
+			)
+			layers := []tui.Node[Message]{visibleRows}
+			if l.enabled && hasSelection && (selected < start || selected >= end) {
+				proxy := l.navigationTarget(
+					tui.Spacer[Message](0, 1),
+					visible,
+					selected,
+					false,
+				)
+				layers = append(layers, tui.Padding(proxy, tui.Insets{Top: cellCount(selected)}))
+			}
+			return tui.NewVirtualFragment(tui.ScrollOffset{}, tui.Stack(layers...))
+		},
 	).TabStop(false).WithLength(l.viewportHeight)
-	return tui.Column(viewport)
+	root := tui.Column(viewport)
+	if !l.enabled || !hasSelection {
+		root = root.WithID(l.id)
+	}
+	return root
+}
+
+func (l List[Message]) virtualRow(visible []int, selected int, hasSelection bool, position int) tui.Node[Message] {
+	originalIndex := visible[position]
+	item := l.items[originalIndex]
+	isSelected := hasSelection && position == selected
+	marker := "  "
+	if isSelected {
+		marker = "> "
+	}
+	style := l.style.Normal
+	if isSelected {
+		style = l.style.Selected
+	}
+	if !l.enabled {
+		style = l.style.Disabled
+	}
+	node := tui.StyledText[Message](marker+item.Label, style)
+	if !l.enabled {
+		return node.WithID(item.ID).WithLength(tui.Fixed(1))
+	}
+	selection := originalIndex
+	itemID := item.ID
+	row := node.WithID(itemID).OnEvent(itemID, func(event vt.Event) tui.EventResult[Message] {
+		if isActivationEvent(event) {
+			return tui.MessageResult(l.onSelect(selection)).Focus(l.id)
+		}
+		return tui.IgnoreResult[Message]()
+	})
+	if !isSelected {
+		return row.WithLength(tui.Fixed(1))
+	}
+	return l.navigationTarget(tui.Column(row), visible, position, true).WithLength(tui.Fixed(1))
+}
+
+func (l List[Message]) navigationTarget(
+	node tui.Node[Message],
+	visible []int,
+	selected int,
+	applyFocusedStyle bool,
+) tui.Node[Message] {
+	node = node.Focusable(l.id).OnEvent(l.id, func(event vt.Event) tui.EventResult[Message] {
+		next, handled := navigationEvent(event, len(visible), selected)
+		if !handled {
+			return tui.IgnoreResult[Message]()
+		}
+		result := tui.ConsumeResult[Message]().Focus(l.id)
+		if next != selected {
+			result = result.Emit(l.onSelect(visible[next]))
+		}
+		return result
+	})
+	if applyFocusedStyle {
+		node = node.WithFocusedStyle(l.style.Focused)
+	}
+	return node
+}
+
+func virtualRange(viewport tui.VirtualViewport, length int) (int, int) {
+	start := length
+	if uint64(viewport.Offset.Y) < uint64(length) {
+		start = int(viewport.Offset.Y)
+	}
+	count := length - start
+	if uint64(viewport.Size.Height) < uint64(count) {
+		count = int(viewport.Size.Height)
+	}
+	return start, start + count
+}
+
+func cellCount(count int) uint32 {
+	if uint64(count) > uint64(^uint32(0)) {
+		return ^uint32(0)
+	}
+	return uint32(count)
 }
 
 func listVisibleIndices(items []ListItem, query string) []int {
