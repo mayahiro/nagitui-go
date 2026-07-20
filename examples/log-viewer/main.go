@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"sync/atomic"
@@ -11,88 +12,181 @@ import (
 )
 
 const (
-	logInterval   = 5 * time.Millisecond
-	frameInterval = 16 * time.Millisecond
-	maxLogLines   = 1_000
+	logInterval       = 5 * time.Millisecond
+	frameInterval     = (time.Second + 59) / 60
+	uptimeInterval    = time.Second
+	maximumBatchLines = 64
+	maxLogLines       = 1_000
+)
+
+type messageKind uint8
+
+const (
+	processOutputMessage messageKind = iota
+	uptimeMessage
+	togglePauseMessage
+	quitMessage
 )
 
 type message struct {
-	sequence uint64
-	toggle   bool
-	quit     bool
+	kind          messageKind
+	sequence      uint64
+	uptimeSeconds uint64
+}
+
+type logBuffer struct {
+	values []string
+	start  int
+	limit  int
+}
+
+func newLogBuffer(limit int) logBuffer {
+	return logBuffer{values: make([]string, 0, limit), limit: limit}
+}
+
+func (b *logBuffer) append(value string) {
+	if b.limit == 0 {
+		return
+	}
+	if len(b.values) < b.limit {
+		b.values = append(b.values, value)
+		return
+	}
+	b.values[b.start] = value
+	b.start = (b.start + 1) % b.limit
+}
+
+func (b logBuffer) len() int {
+	return len(b.values)
+}
+
+func (b logBuffer) at(index int) string {
+	return b.values[(b.start+index)%len(b.values)]
 }
 
 type logViewer struct {
-	paused   bool
-	exiting  bool
-	sequence atomic.Uint64
-	lines    []string
+	paused    bool
+	exiting   bool
+	startedAt time.Time
+	uptime    uint64
+	sequence  atomic.Uint64
+	lines     logBuffer
 }
 
-func (*logViewer) Init() tui.Effect[message] {
+func newLogViewer() *logViewer {
+	return &logViewer{lines: newLogBuffer(maxLogLines)}
+}
+
+func (a *logViewer) Init() tui.Effect[message] {
+	a.startedAt = time.Now()
 	return tui.NoneEffect[message]()
 }
 
 func (a *logViewer) Update(msg message) tui.Effect[message] {
-	if msg.quit {
+	switch msg.kind {
+	case processOutputMessage:
+		a.lines.append(formatLogLine(msg.sequence))
+	case uptimeMessage:
+		a.uptime = msg.uptimeSeconds
+	case togglePauseMessage:
+		a.paused = !a.paused
+	case quitMessage:
 		a.exiting = true
 		return tui.ExitEffect[message]()
-	}
-	if msg.toggle {
-		a.paused = !a.paused
-		return tui.NoneEffect[message]()
-	}
-	level := "\x1b[32mINFO\x1b[0m"
-	if msg.sequence%10 == 0 {
-		level = "\x1b[31;1mERROR\x1b[0m"
-	}
-	a.lines = append(a.lines, fmt.Sprintf("%06d %s simulated log event", msg.sequence, level))
-	if len(a.lines) > maxLogLines {
-		copy(a.lines, a.lines[len(a.lines)-maxLogLines:])
-		a.lines = a.lines[:maxLogLines]
 	}
 	return tui.NoneEffect[message]()
 }
 
 func (a *logViewer) Subscriptions() tui.Subscription[message] {
-	if a.paused {
+	if a.exiting {
 		return tui.NoneSubscription[message]()
 	}
-	return tui.EverySubscription("live-logs", logInterval, tui.LatestDelivery(), func() message {
-		return message{sequence: a.sequence.Add(1)}
-	})
+	startedAt := a.startedAt
+	subscriptions := []tui.Subscription[message]{
+		tui.EverySubscription("uptime", uptimeInterval, tui.LatestDelivery(), func() message {
+			return message{
+				kind:          uptimeMessage,
+				uptimeSeconds: uint64(time.Since(startedAt) / time.Second),
+			}
+		}),
+	}
+	if !a.paused {
+		subscriptions = append(subscriptions, processOutputSubscription(&a.sequence))
+	}
+	return tui.BatchSubscriptions(subscriptions...)
 }
 
-func (a *logViewer) View(context tui.ViewContext) tui.Node[message] {
+func processOutputSubscription(sequence *atomic.Uint64) tui.Subscription[message] {
+	return tui.StreamSubscription(
+		"process-output",
+		tui.BatchDelivery(maximumBatchLines, frameInterval),
+		func(ctx context.Context, sink tui.SubscriptionSink[message]) {
+			// A real adapter blocks on process stdout. The timer only keeps this
+			// example self-contained while Nagi owns cancellation and wake-up.
+			ticker := time.NewTicker(logInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					if !sink.Send(message{kind: processOutputMessage, sequence: sequence.Add(1)}) {
+						return
+					}
+				}
+			}
+		},
+	)
+}
+
+func (a *logViewer) View(viewContext tui.ViewContext) tui.Node[message] {
 	status := "LIVE"
 	if a.exiting {
 		status = "STOPPED"
 	} else if a.paused {
 		status = "PAUSED"
 	}
-	lines := make([]tui.Node[message], 0, max(len(a.lines), 1))
-	for _, line := range a.lines {
-		lines = append(lines, tui.ANSIText[message](line, tui.ANSITextOptions{
-			Paragraph: tui.ParagraphOptions{Wrap: tui.WrapNone, Alignment: tui.AlignStart},
-		}).WithLength(tui.Fixed(1)))
-	}
-	if len(lines) == 0 {
-		lines = append(lines, tui.Text[message]("Waiting for logs...").WithLength(tui.Fixed(1)))
-	}
+	lines := a.lines
+	contentHeight := uint32(max(lines.len(), 1))
 	help := "Space/P pause, PageUp/PageDown/Home/End or wheel scroll, Q/Esc quit"
-	if context.Size.Width < 60 {
+	if viewContext.Size.Width < 60 {
 		help = "P pause  Q quit"
 	}
 	return tui.Border(
 		tui.Column(
-			tui.StyledText[message]("Log Viewer", vt.Style{Bold: true}).WithLength(tui.Fixed(1)),
-			tui.Text[message](fmt.Sprintf("Status: %s  Buffered: %d", status, len(a.lines))).WithLength(tui.Fixed(1)),
-			tui.ScrollViewportWithOptions(
+			tui.StyledText[message]("Event-driven Process Monitor", vt.Style{Bold: true}).WithLength(tui.Fixed(1)),
+			tui.Text[message](fmt.Sprintf(
+				"Status: %s  Uptime: %s  Buffered: %d",
+				status,
+				formatUptime(a.uptime),
+				lines.len(),
+			)).WithLength(tui.Fixed(1)),
+			tui.VirtualScrollViewportWithOptions(
 				"log-scroll",
-				tui.Column(lines...),
+				tui.Size{Height: contentHeight},
 				tui.ScrollViewportOptions[message]{
 					Axis:       tui.ScrollAxisVertical,
 					StickToEnd: true,
+				},
+				func(viewport tui.VirtualViewport) tui.VirtualFragment[message] {
+					if lines.len() == 0 {
+						return tui.NewVirtualFragment(
+							tui.ScrollOffset{},
+							tui.Column(tui.Text[message]("Waiting for process output...").WithLength(tui.Fixed(1))),
+						)
+					}
+					start := int(viewport.Offset.Y)
+					end := min(start+int(viewport.Size.Height), lines.len())
+					visible := make([]tui.Node[message], 0, end-start)
+					for index := start; index < end; index++ {
+						visible = append(visible, tui.ANSIText[message](lines.at(index), tui.ANSITextOptions{
+							Paragraph: tui.ParagraphOptions{Wrap: tui.WrapNone, Alignment: tui.AlignStart},
+						}).WithLength(tui.Fixed(1)))
+					}
+					return tui.NewVirtualFragment(
+						tui.ScrollOffset{Y: uint32(start)},
+						tui.Column(visible...),
+					)
 				},
 			).WithLength(tui.Flex(1)),
 			tui.Text[message](help).WithLength(tui.Fixed(1)),
@@ -101,16 +195,28 @@ func (a *logViewer) View(context tui.ViewContext) tui.Node[message] {
 	)
 }
 
+func formatLogLine(sequence uint64) string {
+	level := "\x1b[32mINFO\x1b[0m"
+	if sequence%10 == 0 {
+		level = "\x1b[31;1mERROR\x1b[0m"
+	}
+	return fmt.Sprintf("%06d %s simulated process output", sequence, level)
+}
+
+func formatUptime(seconds uint64) string {
+	return fmt.Sprintf("%02d:%02d:%02d", seconds/3_600, seconds/60%60, seconds%60)
+}
+
 func mapEvent(event vt.Event) tui.EventAction[message] {
 	switch {
 	case event.Kind == vt.EventKey && event.Key.Code == vt.KeyEscape:
-		return tui.MessageAction(message{quit: true})
+		return tui.MessageAction(message{kind: quitMessage})
 	case event.Kind == vt.EventKey && event.Key.Code == vt.KeyCharacter && event.Key.Character == 'c' && event.Key.Modifiers.Control:
-		return tui.MessageAction(message{quit: true})
+		return tui.MessageAction(message{kind: quitMessage})
 	case event.Kind == vt.EventText && (event.Text == "q" || event.Text == "Q"):
-		return tui.MessageAction(message{quit: true})
+		return tui.MessageAction(message{kind: quitMessage})
 	case isPauseToggle(event):
-		return tui.MessageAction(message{toggle: true})
+		return tui.MessageAction(message{kind: togglePauseMessage})
 	default:
 		return tui.IgnoreAction[message]()
 	}
@@ -134,7 +240,7 @@ func run() error {
 	options.FocusFirst = true
 	mouseTracking := vt.MouseTrackingPress
 	options.MouseTracking = &mouseTracking
-	return tui.RunTerminal[message](&logViewer{}, options, mapEvent)
+	return tui.RunTerminal[message](newLogViewer(), options, mapEvent)
 }
 
 func main() {

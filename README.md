@@ -47,6 +47,9 @@ define behavior shared with the Rust implementation
 Package `tuitest` drives messages, terminal input, resize, virtual time,
 Effects, Subscriptions, and frame inspection without a real terminal
 
+The shared [event-driven application architecture](https://github.com/mayahiro/nagi/blob/main/docs/EVENT_DRIVEN_APPLICATIONS.md)
+explains how process output and timers enter Nagi without a second UI loop
+
 ## Examples
 
 Run commands from the Go repository root in a real terminal
@@ -56,7 +59,7 @@ Run commands from the Go repository root in a real terminal
 | [Counter](examples/counter/README.md) | `go run ./examples/counter` |
 | [Command palette](examples/command-palette/README.md) | `go run ./examples/command-palette` |
 | [Async search](examples/async-search/README.md) | `go run ./examples/async-search` |
-| [Log viewer](examples/log-viewer/README.md) | `go run ./examples/log-viewer` |
+| [Event-driven log viewer](examples/log-viewer/README.md) | `go run ./examples/log-viewer` |
 | [Virtual scroll](examples/virtual-scroll/README.md) | `go run ./examples/virtual-scroll` |
 | [Widget gallery](examples/widget-gallery/README.md) | `go run ./examples/widget-gallery` |
 | [Extended widget gallery](examples/extended-widget-gallery/README.md) | `go run ./examples/extended-widget-gallery` |
