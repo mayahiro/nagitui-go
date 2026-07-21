@@ -226,12 +226,12 @@ func terminalWaitDuration(decoder terminalDeadlineSource, runtime runtimeDeadlin
 }
 
 func writeTerminalFrame[Message any](session *ttyunix.Session, runtime *Runtime[Message], capabilities vt.Capabilities) error {
-	frame, err := runtime.RenderIfDirty()
+	operations, err := runtime.terminalOperationsIfDirty()
 	if err != nil {
 		return err
 	}
-	if frame == nil {
+	if len(operations) == 0 {
 		return nil
 	}
-	return session.WriteOperations(frame.Operations(), capabilities)
+	return session.WriteOperations(operations, capabilities)
 }

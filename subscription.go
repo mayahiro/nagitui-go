@@ -253,16 +253,17 @@ type subscriptionAtomicDiagnostics struct {
 }
 
 type subscriptionInbox[Message any] struct {
-	mu          sync.Mutex
-	changed     *sync.Cond
-	done        chan struct{}
-	stopped     bool
-	messages    []subscriptionEnvelope[Message]
-	capacity    int
-	policy      DeliveryPolicy
-	sequence    *atomic.Uint64
-	diagnostics *subscriptionAtomicDiagnostics
-	wake        runtimeWake
+	mu                     sync.Mutex
+	changed                *sync.Cond
+	done                   chan struct{}
+	stopped                bool
+	batchThresholdNotified bool
+	messages               []subscriptionEnvelope[Message]
+	capacity               int
+	policy                 DeliveryPolicy
+	sequence               *atomic.Uint64
+	diagnostics            *subscriptionAtomicDiagnostics
+	wake                   runtimeWake
 }
 
 func newSubscriptionInbox[Message any](
@@ -306,13 +307,24 @@ func (i *subscriptionInbox[Message]) send(message Message) bool {
 			return false
 		}
 	}
+	wasEmpty := len(i.messages) == 0
 	i.messages = append(i.messages, subscriptionEnvelope[Message]{
 		sequence: nextSubscriptionSequence(i.sequence),
 		message:  message,
 	})
+	notifyRuntime := true
+	if i.policy.kind == deliveryBatch {
+		reachedThreshold := len(i.messages) >= i.policy.maximumMessages
+		notifyRuntime = wasEmpty || reachedThreshold && !i.batchThresholdNotified
+		if reachedThreshold {
+			i.batchThresholdNotified = true
+		}
+	}
 	i.changed.Broadcast()
 	i.mu.Unlock()
-	i.wake.notify()
+	if notifyRuntime {
+		i.wake.notify()
+	}
 	return true
 }
 
@@ -375,6 +387,9 @@ func (i *subscriptionInbox[Message]) popIfSequence(sequence uint64) (subscriptio
 	var zero subscriptionEnvelope[Message]
 	i.messages[0] = zero
 	i.messages = i.messages[1:]
+	if len(i.messages) == 0 {
+		i.batchThresholdNotified = false
+	}
 	i.changed.Broadcast()
 	return message, true
 }
@@ -398,6 +413,7 @@ func (i *subscriptionInbox[Message]) stop() int {
 		i.messages[index] = zero
 	}
 	i.messages = i.messages[:0]
+	i.batchThresholdNotified = false
 	i.diagnostics.discardedMessages.Add(uint64(discarded))
 	close(i.done)
 	i.changed.Broadcast()

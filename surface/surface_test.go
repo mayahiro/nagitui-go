@@ -52,6 +52,21 @@ func TestChangedRunExpandsOverUnchangedContinuation(t *testing.T) {
 	}
 }
 
+func TestChangedRunsCompareStylesIndependentOfStorageOrder(t *testing.T) {
+	red := vt.Style{Foreground: vt.RGBColor(255, 0, 0)}
+	blue := vt.Style{Foreground: vt.RGBColor(0, 0, 255)}
+	previous, _ := New(2, 1)
+	previous.Write(0, 0, "A", red, celltext.ModernWidth())
+	previous.Write(1, 0, "B", blue, celltext.ModernWidth())
+	current, _ := New(2, 1)
+	current.Write(1, 0, "B", blue, celltext.ModernWidth())
+	current.Write(0, 0, "A", red, celltext.ModernWidth())
+
+	if got := current.ChangedRuns(previous); len(got) != 0 {
+		t.Fatalf("ChangedRuns() = %v, want no changes", got)
+	}
+}
+
 func TestCellValidationAndZeroWidthFallback(t *testing.T) {
 	if _, err := NewCell("ab", vt.Style{}, celltext.ModernWidth()); !errors.Is(err, ErrExpectedSingleGrapheme) {
 		t.Fatalf("NewCell(ab) error = %v, want ErrExpectedSingleGrapheme", err)

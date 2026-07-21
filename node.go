@@ -111,6 +111,7 @@ type Node[Message any] struct {
 	style            vt.Style
 	spans            []TextSpan
 	paragraph        ParagraphOptions
+	richTextCache    *richTextLayoutCache
 	payload          *nodePayload[Message]
 	intrinsicSize    Size
 	gap              uint32
@@ -186,15 +187,21 @@ func StyledText[Message any](content string, style vt.Style) Node[Message] {
 // RichText returns inline styled text with grapheme-safe hard wrapping
 func RichText[Message any](spans ...TextSpan) Node[Message] {
 	return Node[Message]{
-		kind:      nodeRichText,
-		spans:     cloneTextSpans(spans),
-		paragraph: ParagraphOptions{Wrap: WrapHard, Alignment: AlignStart},
+		kind:          nodeRichText,
+		spans:         cloneTextSpans(spans),
+		paragraph:     ParagraphOptions{Wrap: WrapHard, Alignment: AlignStart},
+		richTextCache: &richTextLayoutCache{},
 	}
 }
 
 // Paragraph returns inline styled text using the supplied wrapping and alignment
 func Paragraph[Message any](spans []TextSpan, options ParagraphOptions) Node[Message] {
-	return Node[Message]{kind: nodeRichText, spans: cloneTextSpans(spans), paragraph: options}
+	return Node[Message]{
+		kind:          nodeRichText,
+		spans:         cloneTextSpans(spans),
+		paragraph:     options,
+		richTextCache: &richTextLayoutCache{},
+	}
 }
 
 // SurfaceNode captures an independent snapshot of a public Surface as a node
@@ -445,7 +452,7 @@ func (n Node[Message]) measure(constraints layoutConstraints) Size {
 	case nodeText:
 		measured = measureText(n.content, constraints)
 	case nodeRichText:
-		measured = measureRichText(n.spans, n.paragraph, constraints)
+		measured = measureRichText(n.spans, n.paragraph, n.richTextCache, constraints)
 	case nodeSurface:
 		if n.payload != nil && n.payload.surface != nil {
 			measured = Size{Width: n.payload.surface.Width(), Height: n.payload.surface.Height()}

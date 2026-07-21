@@ -53,16 +53,17 @@ const (
 
 // Effect is declarative follow-up work produced by App.Init or App.Update
 type Effect[Message any] struct {
-	kind    effectKind
-	task    Task[Message]
-	key     TaskKey
-	scope   ScopeID
-	delay   time.Duration
-	message Message
-	id      NodeID
-	offset  ScrollOffset
-	effect  *Effect[Message]
-	effects []Effect[Message]
+	kind          effectKind
+	task          Task[Message]
+	key           TaskKey
+	scope         ScopeID
+	delay         time.Duration
+	message       Message
+	id            NodeID
+	offset        ScrollOffset
+	effect        *Effect[Message]
+	effects       []Effect[Message]
+	withoutRedraw bool
 }
 
 // NoneEffect returns an effect that performs no work
@@ -138,6 +139,16 @@ func BatchEffects[Message any](effects ...Effect[Message]) Effect[Message] {
 // SequenceEffects runs child effects in order
 func SequenceEffects[Message any](effects ...Effect[Message]) Effect[Message] {
 	return Effect[Message]{kind: effectSequence, effects: append([]Effect[Message](nil), effects...)}
+}
+
+// WithoutRedraw declares that the Update returning this effect did not change
+// state observed by View
+//
+// Follow-up work is still scheduled and Subscriptions are still reconciled.
+// Synchronous UI commands and an already-dirty runtime still produce a frame.
+func (e Effect[Message]) WithoutRedraw() Effect[Message] {
+	e.withoutRedraw = true
+	return e
 }
 
 // IsNone reports whether this effect performs no work

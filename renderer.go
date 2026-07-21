@@ -1,14 +1,13 @@
 package tui
 
 import (
+	"strings"
+
 	"github.com/mayahiro/nagi-go/vt"
 	"github.com/mayahiro/nagitui-go/surface"
 )
 
 func rendererOperations(previous, current *surface.Surface) []vt.TerminalOp {
-	operations := make([]vt.TerminalOp, 0, 8)
-	operations = append(operations, vt.BeginSynchronizedUpdate(), vt.HideCursor())
-
 	var runs []surface.ChangedRun
 	if previous == nil {
 		if current.Width() != 0 {
@@ -20,12 +19,22 @@ func rendererOperations(previous, current *surface.Surface) []vt.TerminalOp {
 	} else {
 		runs = current.ChangedRuns(previous)
 	}
+	if previous != nil && len(runs) == 0 {
+		previousCursor, previousHasCursor := previous.Cursor()
+		currentCursor, currentHasCursor := current.Cursor()
+		if previousHasCursor == currentHasCursor && (!currentHasCursor || previousCursor == currentCursor) {
+			return nil
+		}
+	}
+	operations := make([]vt.TerminalOp, 0, 8)
+	operations = append(operations, vt.BeginSynchronizedUpdate(), vt.HideCursor())
 
 	for _, run := range runs {
 		operations = append(operations, vt.MoveTo(run.Start, run.Row))
 		var activeStyle vt.Style
 		hasStyle := false
-		text := ""
+		var text strings.Builder
+		text.Grow(int(run.End - run.Start))
 		for column := run.Start; column < run.End; column++ {
 			cell, ok := current.Cell(int32(column), int32(run.Row))
 			if !ok || cell.Continuation() {
@@ -41,7 +50,7 @@ func rendererOperations(previous, current *surface.Surface) []vt.TerminalOp {
 					operations = append(operations, vt.SetStyle(rendererSgrStyle(activeStyle)))
 				}
 			}
-			text += cell.Content()
+			text.WriteString(cell.Content())
 		}
 		operations = flushRendererText(operations, &text)
 	}
@@ -55,10 +64,10 @@ func rendererOperations(previous, current *surface.Surface) []vt.TerminalOp {
 	return append(operations, vt.EndSynchronizedUpdate())
 }
 
-func flushRendererText(operations []vt.TerminalOp, text *string) []vt.TerminalOp {
-	if *text != "" {
-		operations = append(operations, vt.WriteText(*text))
-		*text = ""
+func flushRendererText(operations []vt.TerminalOp, text *strings.Builder) []vt.TerminalOp {
+	if text.Len() != 0 {
+		operations = append(operations, vt.WriteText(text.String()))
+		text.Reset()
 	}
 	return operations
 }

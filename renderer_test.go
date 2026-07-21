@@ -37,6 +37,9 @@ func TestUnchangedSecondFrameHasNoTextAndBaselineOmitsSync(t *testing.T) {
 	}
 
 	encoded := vt.Encode(rendererOperations(current, current), vt.BaselineCapabilities())
+	if len(encoded) != 0 {
+		t.Fatalf("unchanged frame encoded %q, want no output", encoded)
+	}
 
 	if bytes.Contains(encoded, []byte("?2026")) {
 		t.Fatalf("baseline frame contains synchronized update sequence: %q", encoded)

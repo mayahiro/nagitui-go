@@ -250,6 +250,9 @@ func (s *subscriptionSupervisor[Message]) timeUntilDeadline(now Timestamp) (time
 	var earliest Timestamp
 	found := false
 	for _, active := range s.active {
+		if subscriptionSourceReady(active) {
+			return 0, true
+		}
 		if active.kind == subscriptionEvery && active.hasNextDue && (!found || active.nextDue < earliest) {
 			earliest = active.nextDue
 			found = true

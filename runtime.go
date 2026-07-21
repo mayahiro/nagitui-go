@@ -92,6 +92,8 @@ type Runtime[Message any] struct {
 	lastFrame            Timestamp
 	hasLastFrame         bool
 	previousSurface      *surface.Surface
+	previousReusable     bool
+	spareSurface         *surface.Surface
 	interaction          *InteractionState
 	viewTree             *Node[Message]
 	treeIndex            treeIndex
@@ -360,9 +362,12 @@ func (r *Runtime[Message]) ProcessPendingWith(observe func(Message)) (int, error
 			observe(queued.message)
 		}
 		effect := r.app.Update(queued.message)
+		withoutRedraw := effect.withoutRedraw
 		r.effects.schedule(effect, r.clock.Now())
 		r.applyEffectCommands()
-		r.dirty = true
+		if !withoutRedraw {
+			r.dirty = true
+		}
 		r.subscriptionsDirty = true
 		if err := r.reconcileSubscriptions(); err != nil {
 			return processed, err
@@ -846,9 +851,10 @@ func (r *Runtime[Message]) ensureTree() error {
 		r.interaction.hasCapture = false
 	}
 	r.applyPendingInteraction(*index)
-	view.prepareInteraction(r.size, r.interaction)
-	if err := view.buildTreeIndex(r.size, r.interaction, index); err != nil {
-		return err
+	if view.prepareInteraction(r.size, r.interaction) {
+		if err := view.buildTreeIndex(r.size, r.interaction, index); err != nil {
+			return err
+		}
 	}
 	if err := r.ensureFocusedVisible(&view, index); err != nil {
 		return err
@@ -860,6 +866,10 @@ func (r *Runtime[Message]) ensureTree() error {
 
 // RenderIfDirty renders one frame when requested or state changed
 func (r *Runtime[Message]) RenderIfDirty() (*Frame, error) {
+	return r.renderIfDirty(false)
+}
+
+func (r *Runtime[Message]) renderIfDirty(recycleSurface bool) (*Frame, error) {
 	if err := r.reconcileSubscriptions(); err != nil {
 		return nil, err
 	}
@@ -881,22 +891,37 @@ func (r *Runtime[Message]) RenderIfDirty() (*Frame, error) {
 		r.interaction.hasCapture = false
 	}
 	r.applyPendingInteraction(*index)
-	view.prepareInteraction(r.size, r.interaction)
-	if err := view.buildTreeIndex(r.size, r.interaction, index); err != nil {
-		return nil, err
+	if view.prepareInteraction(r.size, r.interaction) {
+		if err := view.buildTreeIndex(r.size, r.interaction, index); err != nil {
+			return nil, err
+		}
 	}
 	if err := r.ensureFocusedVisible(&view, index); err != nil {
 		return nil, err
 	}
-	current, err := surface.New(r.size.Width, r.size.Height)
-	if err != nil {
-		return nil, fmt.Errorf("construct runtime surface: %w", err)
+	var current *surface.Surface
+	if recycleSurface && r.spareSurface != nil &&
+		r.spareSurface.Width() == r.size.Width && r.spareSurface.Height() == r.size.Height {
+		current = r.spareSurface
+		r.spareSurface = nil
+		current.Clear()
+	} else {
+		var err error
+		current, err = surface.New(r.size.Width, r.size.Height)
+		if err != nil {
+			return nil, fmt.Errorf("construct runtime surface: %w", err)
+		}
 	}
 	view.renderTo(current, r.interaction)
-	operations := rendererOperations(r.previousSurface, current)
+	previous := r.previousSurface
+	operations := rendererOperations(previous, current)
 	// Frame only exposes independent clones, so the immutable rendered surface
 	// can also serve as the next diff baseline without duplicating its cells.
 	r.previousSurface = current
+	if recycleSurface && r.previousReusable && previous != nil {
+		r.spareSurface = previous
+	}
+	r.previousReusable = recycleSurface
 	r.viewTree = &view
 	r.treeIndex, r.nextTreeIndex = r.nextTreeIndex, r.treeIndex
 	r.dirty = false
@@ -908,6 +933,14 @@ func (r *Runtime[Message]) RenderIfDirty() (*Frame, error) {
 		surface:    current,
 		operations: operations,
 	}, nil
+}
+
+func (r *Runtime[Message]) terminalOperationsIfDirty() ([]vt.TerminalOp, error) {
+	frame, err := r.renderIfDirty(true)
+	if err != nil || frame == nil {
+		return nil, err
+	}
+	return frame.operations, nil
 }
 
 func visibleAxisOffset(current uint32, viewportStart int32, viewportSize uint32, targetStart int32, targetSize uint32) uint32 {

@@ -16,7 +16,9 @@ import (
 )
 
 type runtimeMessage struct {
-	add uint32
+	add               uint32
+	withoutRedraw     bool
+	exitWithoutRedraw bool
 }
 
 type counterApp struct {
@@ -30,9 +32,79 @@ func (a *counterApp) Init() Effect[runtimeMessage] {
 }
 
 func (a *counterApp) Update(message runtimeMessage) Effect[runtimeMessage] {
+	if message.exitWithoutRedraw {
+		return ExitEffect[runtimeMessage]().WithoutRedraw()
+	}
+	if message.withoutRedraw {
+		a.updates = append(a.updates, message.add)
+		return NoneEffect[runtimeMessage]().WithoutRedraw()
+	}
 	a.value += message.add
 	a.updates = append(a.updates, message.add)
 	return NoneEffect[runtimeMessage]()
+}
+
+func TestEffectWithoutRedrawSkipsUnchangedFrame(t *testing.T) {
+	runtime, err := NewRuntime[runtimeMessage](&counterApp{}, Size{Width: 3, Height: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(runtime.Close)
+	if _, err := runtime.RenderIfDirty(); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Enqueue(runtimeMessage{withoutRedraw: true}); err != nil {
+		t.Fatal(err)
+	}
+	if processed, err := runtime.ProcessPending(); err != nil || processed != 1 {
+		t.Fatalf("ProcessPending = %d, %v", processed, err)
+	}
+	if frame, err := runtime.RenderIfDirty(); err != nil || frame != nil {
+		t.Fatalf("RenderIfDirty = %v, %v, want nil frame", frame, err)
+	}
+}
+
+func TestEffectWithoutRedrawDoesNotSuppressSynchronousCommandFrame(t *testing.T) {
+	runtime, err := NewRuntime[runtimeMessage](&counterApp{}, Size{Width: 3, Height: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(runtime.Close)
+	if _, err := runtime.RenderIfDirty(); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Enqueue(runtimeMessage{exitWithoutRedraw: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.ProcessPending(); err != nil {
+		t.Fatal(err)
+	}
+	if frame, err := runtime.RenderIfDirty(); err != nil || frame == nil {
+		t.Fatalf("RenderIfDirty = %v, %v, want command frame", frame, err)
+	}
+}
+
+func TestTerminalRenderingReusesReleasedSurfaceStorage(t *testing.T) {
+	runtime, err := NewRuntime[runtimeMessage](&counterApp{}, Size{Width: 3, Height: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(runtime.Close)
+	if _, err := runtime.terminalOperationsIfDirty(); err != nil {
+		t.Fatal(err)
+	}
+	first := runtime.previousSurface
+	runtime.RequestFrame()
+	if _, err := runtime.terminalOperationsIfDirty(); err != nil {
+		t.Fatal(err)
+	}
+	runtime.RequestFrame()
+	if _, err := runtime.terminalOperationsIfDirty(); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.previousSurface != first {
+		t.Fatal("terminal rendering did not reuse the released surface")
+	}
 }
 
 func (*counterApp) Subscriptions() Subscription[runtimeMessage] {
@@ -161,6 +233,7 @@ func (*runtimeSubscriptionApp) Init() Effect[runtimeSubscriptionMessage] {
 func (a *runtimeSubscriptionApp) Update(message runtimeSubscriptionMessage) Effect[runtimeSubscriptionMessage] {
 	if message.toggle {
 		a.running = !a.running
+		return NoneEffect[runtimeSubscriptionMessage]().WithoutRedraw()
 	} else {
 		a.values = append(a.values, message.tick)
 	}

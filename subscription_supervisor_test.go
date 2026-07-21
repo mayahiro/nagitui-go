@@ -258,6 +258,62 @@ func TestStreamSubscriptionSendNotifiesRuntimeWake(t *testing.T) {
 	}
 }
 
+func TestBatchSubscriptionCoalescesRuntimeWakeUntilDeliveryBoundary(t *testing.T) {
+	started := make(chan SubscriptionSink[string], 1)
+	var notifications atomic.Uint64
+	supervisor := newSubscriptionSupervisor[string](8)
+	supervisor.wake = func() { notifications.Add(1) }
+	t.Cleanup(supervisor.close)
+	_, err := supervisor.reconcile(
+		StreamSubscription("logs", BatchDelivery(4, time.Second), func(ctx context.Context, sink SubscriptionSink[string]) {
+			started <- sink
+			<-ctx.Done()
+		}),
+		0,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink := waitSubscriptionSink(t, started)
+	for _, message := range []string{"one", "two", "three"} {
+		if !sink.Send(message) {
+			t.Fatal("batch stream send failed")
+		}
+	}
+	if actual := notifications.Load(); actual != 1 {
+		t.Fatalf("notifications before threshold = %d, want 1", actual)
+	}
+	supervisor.poll(0)
+	if actual := joinSubscriptionMessages(supervisor.takeReady(8)); actual != "-" {
+		t.Fatalf("messages before threshold = %q, want none", actual)
+	}
+	if delay, ok := supervisor.timeUntilDeadline(0); !ok || delay != time.Second {
+		t.Fatalf("batch deadline = %v, %t, want 1s", delay, ok)
+	}
+	if !sink.Send("four") || !sink.Send("five") {
+		t.Fatal("batch stream send failed")
+	}
+	if actual := notifications.Load(); actual != 2 {
+		t.Fatalf("notifications after threshold = %d, want 2", actual)
+	}
+	supervisor.poll(0)
+	if actual := joinSubscriptionMessages(supervisor.takeReady(2)); actual != "one,two" {
+		t.Fatalf("first messages after threshold = %q", actual)
+	}
+	if delay, ok := supervisor.timeUntilDeadline(0); !ok || delay != 0 {
+		t.Fatalf("ready remainder deadline = %v, %t, want immediate", delay, ok)
+	}
+	if actual := joinSubscriptionMessages(supervisor.takeReady(8)); actual != "three,four,five" {
+		t.Fatalf("remaining messages after threshold = %q", actual)
+	}
+	if !sink.Send("next") {
+		t.Fatal("batch stream send failed")
+	}
+	if actual := notifications.Load(); actual != 3 {
+		t.Fatalf("notifications after drain = %d, want 3", actual)
+	}
+}
+
 func TestLatestSubscriptionBurstRemainsBounded(t *testing.T) {
 	started := make(chan SubscriptionSink[string], 1)
 	supervisor := newSubscriptionSupervisor[string](2)

@@ -13,7 +13,7 @@ func (n Node[Message]) render(target *surface.Surface, rect, clip Rect, interact
 	case nodeText:
 		renderText(target, rect, clip, n.content, n.style)
 	case nodeRichText:
-		renderRichText(target, rect, clip, n.spans, n.paragraph)
+		renderRichText(target, rect, clip, n.spans, n.paragraph, n.richTextCache)
 	case nodeSurface:
 		if n.payload != nil {
 			renderSurfaceNode(target, rect, clip, n.payload.surface)

@@ -53,6 +53,7 @@ type Session struct {
 	lifecycleStarted bool
 	initialResize    bool
 	ownsProcess      bool
+	outputBuffer     []byte
 }
 
 // Open validates stdin and stdout, enables raw mode, and enters the alternate
@@ -118,7 +119,7 @@ func startSession(backend terminalBackend, inputFD, outputFD int, options Option
 		operations = append(operations, vt.EnableMouse(*options.MouseTracking))
 	}
 	operations = append(operations, vt.EnableFocus())
-	if err := session.Write(vt.Encode(operations, vt.BaselineCapabilities())); err != nil {
+	if err := session.WriteOperations(operations, vt.BaselineCapabilities()); err != nil {
 		_ = session.Close()
 		return nil, err
 	}
@@ -190,7 +191,8 @@ func (s *Session) Write(buffer []byte) error {
 
 // WriteOperations encodes and writes typed terminal operations.
 func (s *Session) WriteOperations(operations []vt.TerminalOp, capabilities vt.Capabilities) error {
-	return s.Write(vt.Encode(operations, capabilities))
+	s.outputBuffer = vt.AppendEncoded(s.outputBuffer[:0], operations, capabilities)
+	return s.Write(s.outputBuffer)
 }
 
 // Wait blocks until terminal input, a runtime notification, or an optional
@@ -248,7 +250,7 @@ func (s *Session) Close() error {
 			vt.ShowCursor(),
 			vt.LeaveAlternateScreen(),
 		}
-		if err := s.Write(vt.Encode(operations, vt.BaselineCapabilities())); err != nil {
+		if err := s.WriteOperations(operations, vt.BaselineCapabilities()); err != nil {
 			firstErr = err
 		}
 	}

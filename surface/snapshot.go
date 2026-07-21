@@ -20,7 +20,7 @@ func snapshot(surface *Surface) string {
 		fmt.Fprintf(&output, "row=%d", row)
 		for column := uint32(0); column < surface.width; column++ {
 			output.WriteByte('\t')
-			writeCell(&output, surface.cells[surface.index(int(column), int(row))])
+			writeCell(&output, surface.cellAt(surface.index(int(column), int(row))))
 		}
 		output.WriteByte('\n')
 	}

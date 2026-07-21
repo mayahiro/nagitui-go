@@ -8,8 +8,8 @@ func (n *Node[Message]) buildTreeIndex(size Size, interaction *InteractionState,
 	return n.buildIndex(bounds, bounds, "", false, true, interaction, index)
 }
 
-func (n *Node[Message]) prepareInteraction(size Size, interaction *InteractionState) {
-	n.prepareAt(Rect{Width: size.Width, Height: size.Height}, interaction)
+func (n *Node[Message]) prepareInteraction(size Size, interaction *InteractionState) bool {
+	return n.prepareAt(Rect{Width: size.Width, Height: size.Height}, interaction)
 }
 
 func (n *Node[Message]) handleEvent(id NodeID, event vt.Event) (EventResult[Message], bool) {
@@ -173,11 +173,13 @@ func (n *Node[Message]) buildIndex(
 	return nil
 }
 
-func (n *Node[Message]) prepareAt(rect Rect, interaction *InteractionState) {
+func (n *Node[Message]) prepareAt(rect Rect, interaction *InteractionState) bool {
 	switch n.kind {
 	case nodeTextInput:
 		interaction.ensureTextInput(n.id, n.content)
+		return false
 	case nodeScrollViewport:
+		previous := interaction.ScrollOffset(n.id)
 		content := n.child.measure(scrollConstraints(rect, n.scroll.Axis))
 		width := max(content.Width, rect.Width)
 		height := max(content.Height, rect.Height)
@@ -187,15 +189,18 @@ func (n *Node[Message]) prepareAt(rect Rect, interaction *InteractionState) {
 			n.scroll.Axis,
 			n.scroll.StickToEnd,
 		)
-		n.child.prepareAt(scrollChildRect(rect, n.child, state.Offset, n.scroll.Axis), interaction)
-		return
+		childChanged := n.child.prepareAt(scrollChildRect(rect, n.child, state.Offset, n.scroll.Axis), interaction)
+		return state.Offset != previous || childChanged
 	case nodeVirtualScrollViewport:
+		previousRequest := n.payload.virtualCache.request
+		wasValid := n.payload.virtualCache.valid
 		state := interaction.prepareScroll(
 			n.id,
 			virtualScrollMaximum(n.payload.virtualSize, rect, n.scroll.Axis),
 			n.scroll.Axis,
 			n.scroll.StickToEnd,
 		)
+		childChanged := false
 		if fragment, ok := ensureVirtualFragment(
 			n.payload.virtualSize,
 			n.scroll.Axis,
@@ -204,11 +209,14 @@ func (n *Node[Message]) prepareAt(rect Rect, interaction *InteractionState) {
 			rect,
 			state.Offset,
 		); ok {
-			fragment.fragment.Node.prepareAt(virtualFragmentRect(rect, fragment), interaction)
+			childChanged = fragment.fragment.Node.prepareAt(virtualFragmentRect(rect, fragment), interaction)
 		}
-		return
+		cacheChanged := wasValid != n.payload.virtualCache.valid ||
+			n.payload.virtualCache.valid && previousRequest != n.payload.virtualCache.request
+		return cacheChanged || childChanged
 	}
 
+	changed := false
 	switch n.kind {
 	case nodeRow, nodeColumn:
 		horizontal := n.kind == nodeRow
@@ -216,25 +224,26 @@ func (n *Node[Message]) prepareAt(rect Rect, interaction *InteractionState) {
 		var offset uint32
 		for index := range n.children {
 			childRect := layout.childRect(rect, horizontal, index, offset)
-			n.children[index].prepareAt(childRect, interaction)
+			changed = n.children[index].prepareAt(childRect, interaction) || changed
 			offset = saturatingAdd32(offset, layout.allocation(index))
 		}
 	case nodeStack:
 		for index := range n.children {
-			n.children[index].prepareAt(rect, interaction)
+			changed = n.children[index].prepareAt(rect, interaction) || changed
 		}
 	case nodePadding:
-		n.child.prepareAt(insetRect(rect, n.insets.Left, n.insets.Top, n.insets.Right, n.insets.Bottom), interaction)
+		changed = n.child.prepareAt(insetRect(rect, n.insets.Left, n.insets.Top, n.insets.Right, n.insets.Bottom), interaction)
 	case nodeBorder:
-		n.child.prepareAt(insetRect(rect, 1, 1, 1, 1), interaction)
+		changed = n.child.prepareAt(insetRect(rect, 1, 1, 1, 1), interaction)
 	case nodeAlign:
-		n.child.prepareAt(alignedChildRect(rect, n.child, n.horizontal, n.vertical), interaction)
+		changed = n.child.prepareAt(alignedChildRect(rect, n.child, n.horizontal, n.vertical), interaction)
 	case nodeClip:
-		n.child.prepareAt(rect, interaction)
+		changed = n.child.prepareAt(rect, interaction)
 	case nodeModal:
-		n.child.prepareAt(rect, interaction)
+		changed = n.child.prepareAt(rect, interaction)
 	case nodePanel:
 		insets := panelContentInsets(n.panel)
-		n.child.prepareAt(insetRect(rect, insets.Left, insets.Top, insets.Right, insets.Bottom), interaction)
+		changed = n.child.prepareAt(insetRect(rect, insets.Left, insets.Top, insets.Right, insets.Bottom), interaction)
 	}
+	return changed
 }
