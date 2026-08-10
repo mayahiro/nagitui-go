@@ -22,3 +22,8 @@ func isActivationEvent(event vt.Event) bool {
 	}
 	return false
 }
+
+func isPointerActivationEvent(event vt.Event) bool {
+	return event.Kind == vt.EventMouse &&
+		event.Mouse.Kind == vt.MousePress && event.Mouse.Button == vt.MouseLeft
+}

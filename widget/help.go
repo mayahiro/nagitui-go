@@ -72,9 +72,37 @@ type Help[Message any] struct {
 
 // NewHelp returns compact help for the supplied bindings
 func NewHelp[Message any](bindings []HelpBinding) Help[Message] {
+	return newHelp[Message](cloneHelpBindings(bindings))
+}
+
+func newHelp[Message any](bindings []HelpBinding) Help[Message] {
 	return Help[Message]{
-		bindings: cloneHelpBindings(bindings), separator: " • ", style: DefaultHelpStyle(),
+		bindings: bindings, separator: " • ", style: DefaultHelpStyle(),
 	}
+}
+
+// NewHelpFromResolvedActions returns compact help for Help-visible resolved actions
+//
+// Each effective key becomes one binding in action and binding order without
+// duplicating key notation. Unavailable actions and bindings with unsupported
+// terminal metadata become disabled Help bindings.
+func NewHelpFromResolvedActions[Message any](actions []tui.ResolvedAction) Help[Message] {
+	bindings := make([]HelpBinding, 0, len(actions)*2)
+	for _, action := range actions {
+		if !action.HelpVisible() {
+			continue
+		}
+		actionEnabled := action.Availability() == tui.ActionEnabled
+		description := celltext.NormalizeUTF8(action.Label())
+		for _, binding := range action.Bindings() {
+			bindings = append(bindings, HelpBinding{
+				Key:         celltext.NormalizeUTF8(binding.Stroke().Notation()),
+				Description: description,
+				Enabled:     actionEnabled && binding.Support() != tui.BindingUnsupported,
+			})
+		}
+	}
+	return newHelp[Message](bindings)
 }
 
 // Mode replaces the binding arrangement

@@ -130,6 +130,7 @@ type Node[Message any] struct {
 	focusedStyle     vt.Style
 	hasFocusedStyle  bool
 	handler          eventHandler[Message]
+	keyInteraction   *nodeKeyInteraction[Message]
 	onChange         func(string) Message
 	placeholder      string
 	placeholderStyle vt.Style
@@ -433,6 +434,47 @@ func (n Node[Message]) OnEvent(id NodeID, handler func(vt.Event) EventResult[Mes
 	n.hasID = true
 	n.handler = handler
 	return n
+}
+
+// OnActions attaches a complete semantic action group under a stable owner
+// identity. A later call replaces the complete group.
+func (n Node[Message]) OnActions(id NodeID, actions []Action[Message]) Node[Message] {
+	n.id = id
+	n.hasID = true
+	n.keyInteraction = cloneNodeKeyInteraction(n.keyInteraction)
+	n.keyInteraction.actions = append([]Action[Message](nil), actions...)
+	return n
+}
+
+// WithKeyScope attaches one immutable KeyMap scope to this semantic node
+//
+// The scope ID becomes the node identity. Later identity modifiers may replace
+// it without retaining a stale scope identity. A later call replaces the
+// complete scope.
+func (n Node[Message]) WithKeyScope(scope KeyScope) Node[Message] {
+	n.id = scope.id
+	n.hasID = true
+	n.keyInteraction = cloneNodeKeyInteraction(n.keyInteraction)
+	n.keyInteraction.scope = &nodeKeyScope{
+		keyMap:      scope.keyMap,
+		propagation: scope.propagation,
+	}
+	return n
+}
+
+func cloneNodeKeyInteraction[Message any](
+	interaction *nodeKeyInteraction[Message],
+) *nodeKeyInteraction[Message] {
+	cloned := &nodeKeyInteraction[Message]{}
+	if interaction == nil {
+		return cloned
+	}
+	cloned.actions = interaction.actions
+	if interaction.scope != nil {
+		scope := *interaction.scope
+		cloned.scope = &scope
+	}
+	return cloned
 }
 
 // WithLength sets the node's main-axis sizing rule in a row or column

@@ -27,7 +27,7 @@ go run ./examples/counter
 
 | Package | 責務 |
 | --- | --- |
-| Module root `tui` | App lifecycle、semantic Node、layout、event、Effect、Subscription、terminal loop |
+| Module root `tui` | App lifecycle、semantic Node、Scoped KeyMap、layout、event、Effect、Subscription、terminal loop |
 | `surface` | Geometry、Cell、Surface描画、composition、diff、snapshot |
 | `widget` | Public TUI APIから構築した21個の標準Widget |
 | `tuitest` | Virtual input、resize、time、Effect、Subscription、frame検査 |
@@ -40,7 +40,7 @@ Root packageはapplicationから使いやすくするためSurfaceのGeometry型
 
 ## Application test
 
-`tuitest` packageは実terminalを使わずにMessage、terminal input、resize、virtual time、Effect、Subscription、frameを操作できます
+`tuitest` packageは実terminalを使わずにMessage、terminal input、resize、virtual time、Effect、Subscription、frame、activeなresolved actionを操作できます
 
 共有の[event-driven application architecture](https://github.com/mayahiro/nagi/blob/main/docs/EVENT_DRIVEN_APPLICATIONS_ja.md)では、第2のUI loopを作らずprocess outputとtimerをNagiへ渡す方法を説明します
 

@@ -155,6 +155,72 @@ func TestRuntimeProcessesFIFOAndCoalescesRendering(t *testing.T) {
 	}
 }
 
+type dispatchAllocationApp struct {
+	withAction bool
+}
+
+func (*dispatchAllocationApp) Init() Effect[struct{}] { return NoneEffect[struct{}]() }
+func (*dispatchAllocationApp) Update(struct{}) Effect[struct{}] {
+	return NoneEffect[struct{}]()
+}
+func (*dispatchAllocationApp) Subscriptions() Subscription[struct{}] {
+	return NoneSubscription[struct{}]()
+}
+func (a *dispatchAllocationApp) View(ViewContext) Node[struct{}] {
+	node := Text[struct{}]("target").Focusable("target")
+	if !a.withAction {
+		return node
+	}
+	descriptor := NewActionDescriptor(
+		"app.action",
+		"Action",
+		[]KeyBinding{NewKeyBinding(NewCharacterKeyStroke('x', vt.Modifiers{}))},
+	)
+	return node.OnActions("target", []Action[struct{}]{
+		NewAction(descriptor, func(ActionEvent) EventResult[struct{}] {
+			return IgnoreResult[struct{}]()
+		}),
+	})
+}
+
+func TestDispatchRouteCacheHasNoPerEventActionResolutionAllocation(t *testing.T) {
+	event := vt.Event{Kind: vt.EventKey, Key: vt.KeyEvent{
+		Code: vt.KeyCharacter, Character: 'x', Action: vt.KeyPress,
+	}}
+	for _, withAction := range []bool{false, true} {
+		name := "actionless"
+		if withAction {
+			name = "cached-action"
+		}
+		t.Run(name, func(t *testing.T) {
+			runtime, err := NewRuntime[struct{}](&dispatchAllocationApp{withAction: withAction}, Size{Width: 8, Height: 1})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(runtime.Close)
+			if _, err := runtime.RenderIfDirty(); err != nil {
+				t.Fatal(err)
+			}
+			if focused, err := runtime.RequestFocus("target"); err != nil || !focused {
+				t.Fatalf("RequestFocus = %t, %v", focused, err)
+			}
+			if _, err := runtime.ActiveActionGroups(); err != nil {
+				t.Fatal(err)
+			}
+			var dispatchErr error
+			allocations := testing.AllocsPerRun(1_000, func() {
+				_, dispatchErr = runtime.DispatchEvent(event)
+			})
+			if dispatchErr != nil {
+				t.Fatal(dispatchErr)
+			}
+			if allocations > 1 {
+				t.Fatalf("DispatchEvent allocations = %f, want at most route storage", allocations)
+			}
+		})
+	}
+}
+
 func TestRuntimeFrameRateAndUrgentCoalescingMatchSharedFixtures(t *testing.T) {
 	records := loadSubscriptionFixtures(
 		t,

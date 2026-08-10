@@ -74,6 +74,55 @@ func TestHarnessObservesBytesMessagesFramesAndEscapeTime(t *testing.T) {
 	}
 }
 
+type actionProjectionApp struct{}
+
+func (*actionProjectionApp) Init() tui.Effect[struct{}] { return tui.NoneEffect[struct{}]() }
+func (*actionProjectionApp) Update(struct{}) tui.Effect[struct{}] {
+	return tui.NoneEffect[struct{}]()
+}
+func (*actionProjectionApp) Subscriptions() tui.Subscription[struct{}] {
+	return tui.NoneSubscription[struct{}]()
+}
+func (*actionProjectionApp) View(tui.ViewContext) tui.Node[struct{}] {
+	descriptor := tui.NewActionDescriptor(
+		"app.action",
+		"Action",
+		[]tui.KeyBinding{tui.NewKeyBinding(tui.NewCharacterKeyStroke('x', vt.Modifiers{}))},
+	)
+	return tui.Text[struct{}]("action").Focusable("owner").OnActions(
+		"owner",
+		[]tui.Action[struct{}]{tui.NewAction(descriptor, func(tui.ActionEvent) tui.EventResult[struct{}] {
+			return tui.ConsumeResult[struct{}]()
+		})},
+	)
+}
+
+func TestHarnessObservesActiveActionProjection(t *testing.T) {
+	harness, err := New[struct{}](
+		&actionProjectionApp{},
+		tui.Size{Width: 8, Height: 1},
+		func(vt.Event) tui.EventAction[struct{}] { return tui.IgnoreAction[struct{}]() },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer harness.Close()
+	if focused, err := harness.RequestFocus("owner"); err != nil || !focused {
+		t.Fatalf("RequestFocus = %t, %v", focused, err)
+	}
+
+	groups, err := harness.ActiveActionGroups()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups) != 1 || groups[0].Owner() != "owner" {
+		t.Fatalf("groups = %v", groups)
+	}
+	if actions := groups[0].Actions(); len(actions) != 1 || actions[0].ID() != "app.action" {
+		t.Fatalf("actions = %v", actions)
+	}
+}
+
 type manualApp struct {
 	task   tui.Task[echoMessage]
 	values []string

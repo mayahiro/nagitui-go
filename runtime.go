@@ -98,6 +98,9 @@ type Runtime[Message any] struct {
 	viewTree             *Node[Message]
 	treeIndex            treeIndex
 	nextTreeIndex        treeIndex
+	actionIndex          actionIndex[Message]
+	nextActionIndex      actionIndex[Message]
+	resolvedActionRoute  *resolvedActionRoute[Message]
 	effects              *effectSupervisor[Message]
 	subscriptions        *subscriptionSupervisor[Message]
 	subscriptionsDirty   bool
@@ -490,6 +493,25 @@ func (r *Runtime[Message]) SetScrollOffset(id NodeID, offset ScrollOffset) bool 
 	return true
 }
 
+// ActiveActionGroups returns resolved semantic action groups on the active
+// target-to-root route
+//
+// Groups outside the nearest KeyScopeStopAtScope boundary are omitted. Each
+// projection contains the complete active root-to-target scope path.
+func (r *Runtime[Message]) ActiveActionGroups() ([]ResolvedActions, error) {
+	if err := r.ensureTree(); err != nil {
+		return nil, err
+	}
+	route := r.treeIndex.route(r.interaction.focused, r.interaction.hasFocus)
+	if err := r.ensureActionRoute(route); err != nil {
+		return nil, err
+	}
+	if r.resolvedActionRoute == nil {
+		return nil, nil
+	}
+	return r.resolvedActionRoute.actionGroups(), nil
+}
+
 // DispatchEvent routes one normalized event through focus, hit testing, and
 // ancestors
 func (r *Runtime[Message]) DispatchEvent(event vt.Event) (EventDispatch, error) {
@@ -532,8 +554,22 @@ func (r *Runtime[Message]) DispatchEvent(event vt.Event) (EventDispatch, error) 
 		}
 	}
 
+	route := r.treeIndex.route(target, hasTarget)
+	if err := r.ensureActionRoute(route); err != nil {
+		return EventDispatch{}, err
+	}
 	dispatch := EventDispatch{}
-	for index, id := range r.treeIndex.route(target, hasTarget) {
+	for index, id := range route {
+		if r.resolvedActionRoute != nil {
+			if result, matched := r.resolvedActionRoute.matchEvent(index, event); matched {
+				if err := r.applyEventResult(result, &dispatch); err != nil {
+					return dispatch, err
+				}
+				if dispatch.consumed {
+					break
+				}
+			}
+		}
 		record, _ := r.treeIndex.record(id)
 		var result EventResult[Message]
 		var handled bool
@@ -561,6 +597,22 @@ func (r *Runtime[Message]) DispatchEvent(event vt.Event) (EventDispatch, error) 
 		}
 	}
 	return dispatch, nil
+}
+
+func (r *Runtime[Message]) ensureActionRoute(route []NodeID) error {
+	if !r.actionIndex.hasActions {
+		r.resolvedActionRoute = nil
+		return nil
+	}
+	if r.resolvedActionRoute.matchesRoute(route) {
+		return nil
+	}
+	resolved, err := resolveActionRoute(route, &r.actionIndex)
+	if err != nil {
+		return err
+	}
+	r.resolvedActionRoute = resolved
+	return nil
 }
 
 func (r *Runtime[Message]) handleTextInput(id NodeID, event vt.Event) (EventResult[Message], bool) {
@@ -787,7 +839,11 @@ func (r *Runtime[Message]) reconcileSubscriptions() error {
 	return nil
 }
 
-func (r *Runtime[Message]) ensureFocusedVisible(view *Node[Message], index *treeIndex) error {
+func (r *Runtime[Message]) ensureFocusedVisible(
+	view *Node[Message],
+	index *treeIndex,
+	actions *actionIndex[Message],
+) error {
 	if !r.interaction.hasFocus {
 		return nil
 	}
@@ -829,7 +885,7 @@ func (r *Runtime[Message]) ensureFocusedVisible(view *Node[Message], index *tree
 		}
 		r.interaction.requestScroll(id, next)
 		view.prepareInteraction(r.size, r.interaction)
-		if err := view.buildTreeIndex(r.size, r.interaction, index); err != nil {
+		if err := view.buildTreeIndex(r.size, r.interaction, index, actions); err != nil {
 			return err
 		}
 	}
@@ -842,7 +898,8 @@ func (r *Runtime[Message]) ensureTree() error {
 	}
 	view := r.app.View(ViewContext{Size: r.size})
 	index := &r.nextTreeIndex
-	if err := view.buildTreeIndex(r.size, r.interaction, index); err != nil {
+	actions := &r.nextActionIndex
+	if err := view.buildTreeIndex(r.size, r.interaction, index, actions); err != nil {
 		return err
 	}
 	r.interaction.reconcile(index.active, nil, index.focusScope())
@@ -852,15 +909,21 @@ func (r *Runtime[Message]) ensureTree() error {
 	}
 	r.applyPendingInteraction(*index)
 	if view.prepareInteraction(r.size, r.interaction) {
-		if err := view.buildTreeIndex(r.size, r.interaction, index); err != nil {
+		if err := view.buildTreeIndex(r.size, r.interaction, index, actions); err != nil {
 			return err
 		}
 	}
-	if err := r.ensureFocusedVisible(&view, index); err != nil {
+	if err := r.ensureFocusedVisible(&view, index, actions); err != nil {
+		return err
+	}
+	resolved, err := resolveFrameActions(index, actions, r.interaction.focused, r.interaction.hasFocus)
+	if err != nil {
 		return err
 	}
 	r.viewTree = &view
 	r.treeIndex, r.nextTreeIndex = r.nextTreeIndex, r.treeIndex
+	r.actionIndex, r.nextActionIndex = r.nextActionIndex, r.actionIndex
+	r.resolvedActionRoute = resolved
 	return nil
 }
 
@@ -882,7 +945,8 @@ func (r *Runtime[Message]) renderIfDirty(recycleSurface bool) (*Frame, error) {
 	}
 	view := r.app.View(ViewContext{Size: r.size})
 	index := &r.nextTreeIndex
-	if err := view.buildTreeIndex(r.size, r.interaction, index); err != nil {
+	actions := &r.nextActionIndex
+	if err := view.buildTreeIndex(r.size, r.interaction, index, actions); err != nil {
 		return nil, err
 	}
 	r.interaction.reconcile(index.active, r.treeIndex.focusScope(), index.focusScope())
@@ -892,11 +956,15 @@ func (r *Runtime[Message]) renderIfDirty(recycleSurface bool) (*Frame, error) {
 	}
 	r.applyPendingInteraction(*index)
 	if view.prepareInteraction(r.size, r.interaction) {
-		if err := view.buildTreeIndex(r.size, r.interaction, index); err != nil {
+		if err := view.buildTreeIndex(r.size, r.interaction, index, actions); err != nil {
 			return nil, err
 		}
 	}
-	if err := r.ensureFocusedVisible(&view, index); err != nil {
+	if err := r.ensureFocusedVisible(&view, index, actions); err != nil {
+		return nil, err
+	}
+	resolved, err := resolveFrameActions(index, actions, r.interaction.focused, r.interaction.hasFocus)
+	if err != nil {
 		return nil, err
 	}
 	var current *surface.Surface
@@ -924,6 +992,8 @@ func (r *Runtime[Message]) renderIfDirty(recycleSurface bool) (*Frame, error) {
 	r.previousReusable = recycleSurface
 	r.viewTree = &view
 	r.treeIndex, r.nextTreeIndex = r.nextTreeIndex, r.treeIndex
+	r.actionIndex, r.nextActionIndex = r.nextActionIndex, r.actionIndex
+	r.resolvedActionRoute = resolved
 	r.dirty = false
 	r.urgentFrame = false
 	r.lastFrame = now
@@ -933,6 +1003,21 @@ func (r *Runtime[Message]) renderIfDirty(recycleSurface bool) (*Frame, error) {
 		surface:    current,
 		operations: operations,
 	}, nil
+}
+
+func resolveFrameActions[Message any](
+	tree *treeIndex,
+	actions *actionIndex[Message],
+	target NodeID,
+	hasTarget bool,
+) (*resolvedActionRoute[Message], error) {
+	if err := validateActionOwners(tree, actions); err != nil {
+		return nil, err
+	}
+	if !actions.hasActions {
+		return nil, nil
+	}
+	return resolveActionRoute(tree.route(target, hasTarget), actions)
 }
 
 func (r *Runtime[Message]) terminalOperationsIfDirty() ([]vt.TerminalOp, error) {

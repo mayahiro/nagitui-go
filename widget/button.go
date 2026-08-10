@@ -24,7 +24,10 @@ func DefaultButtonStyle() ButtonStyle {
 	}
 }
 
-// Button is a focusable command that emits one message when activated
+// Button is a focusable command with semantic keyboard and raw pointer activation
+//
+// Keyboard activation declares ActivateActionID. Left-button press remains a
+// raw pointer event so keyboard rebinding does not remove it.
 type Button[Message any] struct {
 	id         tui.NodeID
 	label      string
@@ -58,17 +61,34 @@ func (b Button[Message]) Style(style ButtonStyle) Button[Message] {
 	return b
 }
 
+// ActionDescriptor returns the semantic activation descriptor declared by this button
+func (b Button[Message]) ActionDescriptor() tui.ActionDescriptor {
+	availability := tui.ActionEnabled
+	if !b.enabled {
+		availability = tui.ActionDisabledPassThrough
+	}
+	return ActivateActionDescriptor().WithAvailability(availability)
+}
+
 // Node builds the public semantic node for this button
 func (b Button[Message]) Node() tui.Node[Message] {
 	content := "[ " + b.label + " ]"
+	descriptor := b.ActionDescriptor()
 	if !b.enabled {
-		return tui.StyledText[Message](content, b.style.Disabled).WithID(b.id)
+		return tui.StyledText[Message](content, b.style.Disabled).
+			WithID(b.id).
+			OnActions(b.id, []tui.Action[Message]{tui.NewAction[Message](descriptor, nil)})
 	}
 	return tui.StyledText[Message](content, b.style.Normal).
 		Focusable(b.id).
 		WithFocusedStyle(b.style.Focused).
+		OnActions(b.id, []tui.Action[Message]{
+			tui.NewAction(descriptor, func(tui.ActionEvent) tui.EventResult[Message] {
+				return tui.MessageResult(b.onActivate()).Focus(b.id)
+			}),
+		}).
 		OnEvent(b.id, func(event vt.Event) tui.EventResult[Message] {
-			if isActivationEvent(event) {
+			if isPointerActivationEvent(event) {
 				return tui.MessageResult(b.onActivate()).Focus(b.id)
 			}
 			return tui.IgnoreResult[Message]()

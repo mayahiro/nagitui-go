@@ -93,6 +93,11 @@ func (h *Harness[Message]) ScrollState(id tui.NodeID) (tui.ScrollState, bool) {
 	return h.runtime.Interaction().ScrollState(id)
 }
 
+// ActiveActionGroups returns resolved action groups on the active target-to-root route
+func (h *Harness[Message]) ActiveActionGroups() ([]tui.ResolvedActions, error) {
+	return h.runtime.ActiveActionGroups()
+}
+
 // ActiveTasks returns supervised tasks that have not fully finished
 func (h *Harness[Message]) ActiveTasks() int {
 	return h.runtime.ActiveTasks()

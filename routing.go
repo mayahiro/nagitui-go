@@ -211,24 +211,26 @@ func (t *treeIndex) route(target NodeID, hasTarget bool) []NodeID {
 		target = t.activeModal
 		hasTarget = true
 	}
-	parents := make(map[NodeID]*NodeID, len(t.records))
-	for _, record := range t.records {
-		if record.hasParent {
-			parent := record.parent
-			parents[record.id] = &parent
-		} else {
-			parents[record.id] = nil
+	return t.rawRoute(target, hasTarget)
+}
+
+func (t *treeIndex) rawRoute(target NodeID, hasTarget bool) []NodeID {
+	var route []NodeID
+	current := target
+	remaining := len(t.records) + 1
+	for hasTarget && remaining > 0 {
+		remaining--
+		route = append(route, current)
+		record, ok := t.record(current)
+		if !ok || !record.hasParent {
+			break
 		}
+		current = record.parent
 	}
-	var root *NodeID
-	if t.hasRoot {
-		root = &t.root
+	if t.hasRoot && !containsNodeID(route, t.root) {
+		route = append(route, t.root)
 	}
-	var start *NodeID
-	if hasTarget {
-		start = &target
-	}
-	return routePath(parents, root, start)
+	return route
 }
 
 func (t *treeIndex) hitTest(point Point) (NodeID, bool) {

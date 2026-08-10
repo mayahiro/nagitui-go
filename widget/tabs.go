@@ -39,6 +39,10 @@ func DefaultTabsStyle() TabsStyle {
 }
 
 // Tabs is a horizontal, keyboard and pointer selectable set of views
+//
+// Every tab item owns the standard activation action. The root owns the
+// previous, next, first, and last navigation actions. Left-button press stays
+// raw so keyboard rebinding does not remove pointer selection.
 type Tabs[Message any] struct {
 	id       tui.NodeID
 	items    []TabItem
@@ -70,9 +74,28 @@ func (t Tabs[Message]) Style(style TabsStyle) Tabs[Message] {
 	return t
 }
 
+// ItemActionDescriptor returns the semantic activation action declared by every tab item
+//
+// The descriptor is disabled-pass-through when the tabs are disabled or empty.
+func (t Tabs[Message]) ItemActionDescriptor() tui.ActionDescriptor {
+	return tabsItemActionDescriptor(t.enabled && len(t.items) > 0)
+}
+
+// NavigationActionDescriptors returns the ordered semantic navigation actions declared by the root
+//
+// The order is previous, next, first, and last. Every descriptor is
+// disabled-pass-through when the tabs are disabled or empty.
+func (t Tabs[Message]) NavigationActionDescriptors() []tui.ActionDescriptor {
+	descriptors := tabsNavigationActionDescriptors(t.enabled && len(t.items) > 0)
+	return append([]tui.ActionDescriptor(nil), descriptors[:]...)
+}
+
 // Node builds the public semantic node for these tabs
 func (t Tabs[Message]) Node() tui.Node[Message] {
 	selected, hasSelection := navigateSelection(len(t.items), t.selected, navigationNormalize)
+	itemDescriptor := tabsItemActionDescriptor(t.enabled && hasSelection)
+	navigationDescriptors := tabsNavigationActionDescriptors(t.enabled && hasSelection)
+	onSelect := t.onSelect
 	itemIDs := make([]tui.NodeID, len(t.items))
 	children := make([]tui.Node[Message], 0, len(t.items))
 	for index, item := range t.items {
@@ -90,7 +113,11 @@ func (t Tabs[Message]) Node() tui.Node[Message] {
 			style = t.style.Disabled
 		}
 		if !t.enabled {
-			children = append(children, tui.StyledText[Message](content, style).WithID(item.ID))
+			children = append(children, tui.StyledText[Message](content, style).
+				WithID(item.ID).
+				OnActions(item.ID, []tui.Action[Message]{
+					tui.NewAction[Message](itemDescriptor, nil),
+				}))
 			continue
 		}
 		selection := index
@@ -98,55 +125,123 @@ func (t Tabs[Message]) Node() tui.Node[Message] {
 		children = append(children, tui.StyledText[Message](content, style).
 			Focusable(itemID).
 			WithFocusedStyle(t.style.Focused).
+			OnActions(itemID, []tui.Action[Message]{
+				tui.NewAction(itemDescriptor, func(tui.ActionEvent) tui.EventResult[Message] {
+					return tabSelectionResult(isSelected, selection, itemID, onSelect)
+				}),
+			}).
 			OnEvent(itemID, func(event vt.Event) tui.EventResult[Message] {
-				if !isActivationEvent(event) {
+				if !isPointerActivationEvent(event) {
 					return tui.IgnoreResult[Message]()
 				}
-				result := tui.ConsumeResult[Message]().Focus(itemID)
-				if !isSelected {
-					result = result.Emit(t.onSelect(selection))
-				}
-				return result
+				return tabSelectionResult(isSelected, selection, itemID, onSelect)
 			}))
 	}
 
 	root := tui.Row(children...).WithID(t.id)
+	actions := make([]tui.Action[Message], len(navigationDescriptors))
 	if !t.enabled || !hasSelection {
-		return root
+		for index, descriptor := range navigationDescriptors {
+			actions[index] = tui.NewAction[Message](descriptor, nil)
+		}
+		return root.OnActions(t.id, actions)
 	}
-	return root.OnEvent(t.id, func(event vt.Event) tui.EventResult[Message] {
-		next, handled := tabsNavigationEvent(event, len(itemIDs), selected)
-		if !handled {
-			return tui.IgnoreResult[Message]()
-		}
-		result := tui.ConsumeResult[Message]().Focus(itemIDs[next])
-		if next != selected {
-			result = result.Emit(t.onSelect(next))
-		}
-		return result
-	})
+	for index, descriptor := range navigationDescriptors {
+		navigation := tabsNavigationAction(index)
+		actions[index] = tui.NewAction(descriptor, func(tui.ActionEvent) tui.EventResult[Message] {
+			return tabsNavigationResult(navigation, selected, itemIDs, onSelect)
+		})
+	}
+	return root.OnActions(t.id, actions)
 }
 
-func tabsNavigationEvent(event vt.Event, count, selected int) (int, bool) {
-	if event.Kind != vt.EventKey || event.Key.Action == vt.KeyRelease {
-		return 0, false
+type tabsNavigationAction uint8
+
+const (
+	tabsPrevious tabsNavigationAction = iota
+	tabsNext
+	tabsFirst
+	tabsLast
+)
+
+var defaultTabsNavigationActionDescriptors = [4]tui.ActionDescriptor{
+	tui.NewActionDescriptor(
+		SelectionPreviousActionID,
+		selectionPreviousActionLabel,
+		[]tui.KeyBinding{repeatableActionBinding(vt.KeyLeft)},
+	),
+	tui.NewActionDescriptor(
+		SelectionNextActionID,
+		selectionNextActionLabel,
+		[]tui.KeyBinding{repeatableActionBinding(vt.KeyRight)},
+	),
+	tui.NewActionDescriptor(
+		SelectionFirstActionID,
+		selectionFirstActionLabel,
+		[]tui.KeyBinding{repeatableActionBinding(vt.KeyHome)},
+	),
+	tui.NewActionDescriptor(
+		SelectionLastActionID,
+		selectionLastActionLabel,
+		[]tui.KeyBinding{repeatableActionBinding(vt.KeyEnd)},
+	),
+}
+
+func tabsItemActionDescriptor(enabled bool) tui.ActionDescriptor {
+	return ActivateActionDescriptor().WithAvailability(tabsActionAvailability(enabled))
+}
+
+func tabsNavigationActionDescriptors(enabled bool) [4]tui.ActionDescriptor {
+	availability := tabsActionAvailability(enabled)
+	return [4]tui.ActionDescriptor{
+		defaultTabsNavigationActionDescriptors[0].WithAvailability(availability),
+		defaultTabsNavigationActionDescriptors[1].WithAvailability(availability),
+		defaultTabsNavigationActionDescriptors[2].WithAvailability(availability),
+		defaultTabsNavigationActionDescriptors[3].WithAvailability(availability),
 	}
-	modifiers := event.Key.Modifiers
-	if modifiers.Alt || modifiers.Control || modifiers.Meta {
-		return 0, false
+}
+
+func tabsActionAvailability(enabled bool) tui.ActionAvailability {
+	if enabled {
+		return tui.ActionEnabled
 	}
-	action := navigationNormalize
-	switch event.Key.Code {
-	case vt.KeyLeft:
-		action = navigationUp
-	case vt.KeyRight:
-		action = navigationDown
-	case vt.KeyHome:
-		action = navigationHome
-	case vt.KeyEnd:
-		action = navigationEnd
-	default:
-		return 0, false
+	return tui.ActionDisabledPassThrough
+}
+
+func tabSelectionResult[Message any](
+	isSelected bool,
+	index int,
+	focusID tui.NodeID,
+	onSelect func(int) Message,
+) tui.EventResult[Message] {
+	result := tui.ConsumeResult[Message]().Focus(focusID)
+	if !isSelected {
+		result = result.Emit(onSelect(index))
 	}
-	return navigateSelection(count, selected, action)
+	return result
+}
+
+func tabsNavigationResult[Message any](
+	action tabsNavigationAction,
+	selected int,
+	itemIDs []tui.NodeID,
+	onSelect func(int) Message,
+) tui.EventResult[Message] {
+	navigation := navigationNormalize
+	switch action {
+	case tabsPrevious:
+		navigation = navigationUp
+	case tabsNext:
+		navigation = navigationDown
+	case tabsFirst:
+		navigation = navigationHome
+	case tabsLast:
+		navigation = navigationEnd
+	}
+	next, _ := navigateSelection(len(itemIDs), selected, navigation)
+	result := tui.ConsumeResult[Message]().Focus(itemIDs[next])
+	if next != selected {
+		result = result.Emit(onSelect(next))
+	}
+	return result
 }

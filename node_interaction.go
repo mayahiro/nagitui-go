@@ -2,10 +2,16 @@ package tui
 
 import "github.com/mayahiro/nagi-go/vt"
 
-func (n *Node[Message]) buildTreeIndex(size Size, interaction *InteractionState, index *treeIndex) error {
+func (n *Node[Message]) buildTreeIndex(
+	size Size,
+	interaction *InteractionState,
+	index *treeIndex,
+	actions *actionIndex[Message],
+) error {
 	bounds := Rect{Width: size.Width, Height: size.Height}
 	index.reset()
-	return n.buildIndex(bounds, bounds, "", false, true, interaction, index)
+	actions.reset()
+	return n.buildIndex(bounds, bounds, "", false, true, interaction, index, actions)
 }
 
 func (n *Node[Message]) prepareInteraction(size Size, interaction *InteractionState) bool {
@@ -73,6 +79,7 @@ func (n *Node[Message]) buildIndex(
 	hasParent, root bool,
 	interaction *InteractionState,
 	tree *treeIndex,
+	actions *actionIndex[Message],
 ) error {
 	childParent := parent
 	hasChildParent := hasParent
@@ -100,6 +107,7 @@ func (n *Node[Message]) buildIndex(
 		}, root); err != nil {
 			return err
 		}
+		actions.register(n.id, n.keyInteraction)
 		childParent = n.id
 		hasChildParent = true
 	}
@@ -113,29 +121,29 @@ func (n *Node[Message]) buildIndex(
 		var offset uint32
 		for childIndex := range n.children {
 			childRect := layout.childRect(rect, horizontal, childIndex, offset)
-			if err := n.children[childIndex].buildIndex(childRect, clip, childParent, hasChildParent, false, interaction, tree); err != nil {
+			if err := n.children[childIndex].buildIndex(childRect, clip, childParent, hasChildParent, false, interaction, tree, actions); err != nil {
 				return err
 			}
 			offset = saturatingAdd32(offset, layout.allocation(childIndex))
 		}
 	case nodeStack:
 		for child := range n.children {
-			if err := n.children[child].buildIndex(rect, clip, childParent, hasChildParent, false, interaction, tree); err != nil {
+			if err := n.children[child].buildIndex(rect, clip, childParent, hasChildParent, false, interaction, tree, actions); err != nil {
 				return err
 			}
 		}
 	case nodePadding:
 		childRect := insetRect(rect, n.insets.Left, n.insets.Top, n.insets.Right, n.insets.Bottom)
-		return n.child.buildIndex(childRect, clip, childParent, hasChildParent, false, interaction, tree)
+		return n.child.buildIndex(childRect, clip, childParent, hasChildParent, false, interaction, tree, actions)
 	case nodeBorder:
-		return n.child.buildIndex(insetRect(rect, 1, 1, 1, 1), clip, childParent, hasChildParent, false, interaction, tree)
+		return n.child.buildIndex(insetRect(rect, 1, 1, 1, 1), clip, childParent, hasChildParent, false, interaction, tree, actions)
 	case nodeAlign:
-		return n.child.buildIndex(alignedChildRect(rect, n.child, n.horizontal, n.vertical), clip, childParent, hasChildParent, false, interaction, tree)
+		return n.child.buildIndex(alignedChildRect(rect, n.child, n.horizontal, n.vertical), clip, childParent, hasChildParent, false, interaction, tree, actions)
 	case nodeClip:
-		return n.child.buildIndex(rect, clip.Intersection(rect), childParent, hasChildParent, false, interaction, tree)
+		return n.child.buildIndex(rect, clip.Intersection(rect), childParent, hasChildParent, false, interaction, tree, actions)
 	case nodeScrollViewport:
 		childRect := scrollChildRect(rect, n.child, interaction.ScrollOffset(n.id), n.scroll.Axis)
-		return n.child.buildIndex(childRect, clip.Intersection(rect), childParent, hasChildParent, false, interaction, tree)
+		return n.child.buildIndex(childRect, clip.Intersection(rect), childParent, hasChildParent, false, interaction, tree, actions)
 	case nodeVirtualScrollViewport:
 		state := interaction.previewScroll(
 			n.id,
@@ -162,13 +170,14 @@ func (n *Node[Message]) buildIndex(
 			false,
 			interaction,
 			tree,
+			actions,
 		)
 	case nodeModal:
-		return n.child.buildIndex(rect, clip, childParent, hasChildParent, false, interaction, tree)
+		return n.child.buildIndex(rect, clip, childParent, hasChildParent, false, interaction, tree, actions)
 	case nodePanel:
 		insets := panelContentInsets(n.panel)
 		childRect := insetRect(rect, insets.Left, insets.Top, insets.Right, insets.Bottom)
-		return n.child.buildIndex(childRect, clip, childParent, hasChildParent, false, interaction, tree)
+		return n.child.buildIndex(childRect, clip, childParent, hasChildParent, false, interaction, tree, actions)
 	}
 	return nil
 }

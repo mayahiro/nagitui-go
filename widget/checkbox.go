@@ -23,7 +23,10 @@ func DefaultCheckboxStyle() CheckboxStyle {
 	}
 }
 
-// Checkbox is a controlled Boolean input that emits its requested next value
+// Checkbox is a controlled Boolean input that emits its requested opposite value
+//
+// Keyboard activation declares ActivateActionID. Left-button press remains a
+// raw pointer event so keyboard rebinding does not remove it.
 type Checkbox[Message any] struct {
 	id       tui.NodeID
 	label    string
@@ -55,6 +58,15 @@ func (c Checkbox[Message]) Style(style CheckboxStyle) Checkbox[Message] {
 	return c
 }
 
+// ActionDescriptor returns the semantic activation descriptor declared by this checkbox
+func (c Checkbox[Message]) ActionDescriptor() tui.ActionDescriptor {
+	availability := tui.ActionEnabled
+	if !c.enabled {
+		availability = tui.ActionDisabledPassThrough
+	}
+	return ActivateActionDescriptor().WithAvailability(availability)
+}
+
 // Node builds the public semantic node for this checkbox
 func (c Checkbox[Message]) Node() tui.Node[Message] {
 	marker := " "
@@ -62,14 +74,22 @@ func (c Checkbox[Message]) Node() tui.Node[Message] {
 		marker = "x"
 	}
 	content := "[" + marker + "] " + c.label
+	descriptor := c.ActionDescriptor()
 	if !c.enabled {
-		return tui.StyledText[Message](content, c.style.Disabled).WithID(c.id)
+		return tui.StyledText[Message](content, c.style.Disabled).
+			WithID(c.id).
+			OnActions(c.id, []tui.Action[Message]{tui.NewAction[Message](descriptor, nil)})
 	}
 	return tui.StyledText[Message](content, c.style.Normal).
 		Focusable(c.id).
 		WithFocusedStyle(c.style.Focused).
+		OnActions(c.id, []tui.Action[Message]{
+			tui.NewAction(descriptor, func(tui.ActionEvent) tui.EventResult[Message] {
+				return tui.MessageResult(c.onChange(!c.checked)).Focus(c.id)
+			}),
+		}).
 		OnEvent(c.id, func(event vt.Event) tui.EventResult[Message] {
-			if isActivationEvent(event) {
+			if isPointerActivationEvent(event) {
 				return tui.MessageResult(c.onChange(!c.checked)).Focus(c.id)
 			}
 			return tui.IgnoreResult[Message]()

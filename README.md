@@ -29,7 +29,7 @@ go run ./examples/counter
 
 | Package | Responsibility |
 | --- | --- |
-| Module root `tui` | App lifecycle, semantic nodes, layout, events, Effects, Subscriptions, and terminal loop |
+| Module root `tui` | App lifecycle, semantic nodes, scoped key maps, layout, events, Effects, Subscriptions, and terminal loop |
 | `surface` | Geometry, Cells, Surface drawing, composition, diffing, and snapshots |
 | `widget` | 21 standard widgets built from the public TUI API |
 | `tuitest` | Virtual input, resize, time, effects, subscriptions, and frame inspection |
@@ -45,7 +45,8 @@ define behavior shared with the Rust implementation
 ## Testing applications
 
 Package `tuitest` drives messages, terminal input, resize, virtual time,
-Effects, Subscriptions, and frame inspection without a real terminal
+Effects, Subscriptions, frame inspection, and active resolved action queries
+without a real terminal
 
 The shared [event-driven application architecture](https://github.com/mayahiro/nagi/blob/main/docs/EVENT_DRIVEN_APPLICATIONS.md)
 explains how process output and timers enter Nagi without a second UI loop

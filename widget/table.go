@@ -54,6 +54,10 @@ func DefaultTableStyle() TableStyle {
 }
 
 // Table is a sized-column table with one composite focus target
+//
+// The root owns standard activation and vertical selection actions.
+// Left-button press stays raw on each row so keyboard rebinding does not
+// remove pointer selection.
 type Table[Message any] struct {
 	id               tui.NodeID
 	columns          []TableColumn
@@ -120,17 +124,27 @@ func (t Table[Message]) Viewport(viewportID tui.NodeID, bodyHeight tui.Length) T
 	return t
 }
 
+// ActionDescriptors returns the ordered semantic actions declared by this table
+//
+// The order is activate, previous, next, first, and last. Every descriptor is
+// disabled-pass-through when the table is disabled or empty.
+func (t Table[Message]) ActionDescriptors() []tui.ActionDescriptor {
+	descriptors := verticalCollectionActionDescriptors(t.enabled && len(t.rows) > 0)
+	return append([]tui.ActionDescriptor(nil), descriptors[:]...)
+}
+
 // Node builds the public semantic node for this table
 func (t Table[Message]) Node() tui.Node[Message] {
 	rowCount := len(t.rows)
 	selected, hasSelection := navigateSelection(rowCount, t.selected, navigationNormalize)
+	descriptors := verticalCollectionActionDescriptors(t.enabled && hasSelection)
 	headings := make([]string, len(t.columns))
 	for index, column := range t.columns {
 		headings[index] = column.Title
 	}
 	header := tableRowNode[Message]("  ", headings, t.columns, t.columnAlignments, t.style.Header)
 	if t.hasViewport {
-		return t.virtualNode(header, selected, hasSelection)
+		return t.virtualNode(header, selected, hasSelection, descriptors)
 	}
 	rows := make([]tui.Node[Message], 0, len(t.rows))
 	for index, row := range t.rows {
@@ -154,7 +168,7 @@ func (t Table[Message]) Node() tui.Node[Message] {
 		selection := index
 		rowID := row.ID
 		rowNode := node.WithID(rowID).OnEvent(rowID, func(event vt.Event) tui.EventResult[Message] {
-			if !isActivationEvent(event) {
+			if !isPointerActivationEvent(event) {
 				return tui.IgnoreResult[Message]()
 			}
 			return tui.MessageResult(t.onSelect(selection)).Focus(t.id)
@@ -163,20 +177,9 @@ func (t Table[Message]) Node() tui.Node[Message] {
 			rows = append(rows, rowNode)
 			continue
 		}
-		rows = append(rows, tui.Column(rowNode).
-			Focusable(t.id).
-			WithFocusedStyle(t.style.Focused).
-			OnEvent(t.id, func(event vt.Event) tui.EventResult[Message] {
-				next, handled := navigationEvent(event, rowCount, selected)
-				if !handled {
-					return tui.IgnoreResult[Message]()
-				}
-				result := tui.ConsumeResult[Message]().Focus(t.id)
-				if next != selected {
-					result = result.Emit(t.onSelect(next))
-				}
-				return result
-			}))
+		rows = append(rows, tableActionTarget(
+			tui.Column(rowNode), t.id, rowCount, selected, true, t.style.Focused, t.onSelect, descriptors,
+		))
 	}
 
 	children := make([]tui.Node[Message], 0, len(rows)+1)
@@ -186,13 +189,14 @@ func (t Table[Message]) Node() tui.Node[Message] {
 	if t.enabled && hasSelection {
 		return root
 	}
-	return root.WithID(t.id)
+	return root.WithID(t.id).OnActions(t.id, disabledCollectionActions[Message](descriptors))
 }
 
 func (t Table[Message]) virtualNode(
 	header tui.Node[Message],
 	selected int,
 	hasSelection bool,
+	descriptors [5]tui.ActionDescriptor,
 ) tui.Node[Message] {
 	body := tui.VirtualScrollViewportWithOptions(
 		t.viewportID,
@@ -205,7 +209,7 @@ func (t Table[Message]) virtualNode(
 			start, end := virtualRange(viewport, len(t.rows))
 			rows := make([]tui.Node[Message], 0, end-start)
 			for index := start; index < end; index++ {
-				rows = append(rows, t.virtualRow(selected, hasSelection, index))
+				rows = append(rows, t.virtualRow(selected, hasSelection, index, descriptors))
 			}
 			visibleRows := tui.Padding(
 				tui.Column(rows...),
@@ -213,10 +217,8 @@ func (t Table[Message]) virtualNode(
 			)
 			layers := []tui.Node[Message]{visibleRows}
 			if t.enabled && hasSelection && (selected < start || selected >= end) {
-				proxy := t.navigationTarget(
-					tui.Spacer[Message](0, 1),
-					selected,
-					false,
+				proxy := tableActionTarget(
+					tui.Spacer[Message](0, 1), t.id, len(t.rows), selected, false, t.style.Focused, t.onSelect, descriptors,
 				)
 				layers = append(layers, tui.Padding(proxy, tui.Insets{Top: cellCount(selected)}))
 			}
@@ -227,10 +229,15 @@ func (t Table[Message]) virtualNode(
 	if t.enabled && hasSelection {
 		return root
 	}
-	return root.WithID(t.id)
+	return root.WithID(t.id).OnActions(t.id, disabledCollectionActions[Message](descriptors))
 }
 
-func (t Table[Message]) virtualRow(selected int, hasSelection bool, index int) tui.Node[Message] {
+func (t Table[Message]) virtualRow(
+	selected int,
+	hasSelection bool,
+	index int,
+	descriptors [5]tui.ActionDescriptor,
+) tui.Node[Message] {
 	row := t.rows[index]
 	isSelected := hasSelection && index == selected
 	style := t.style.Normal
@@ -251,7 +258,7 @@ func (t Table[Message]) virtualRow(selected int, hasSelection bool, index int) t
 	selection := index
 	rowID := row.ID
 	rowNode := node.WithID(rowID).OnEvent(rowID, func(event vt.Event) tui.EventResult[Message] {
-		if !isActivationEvent(event) {
+		if !isPointerActivationEvent(event) {
 			return tui.IgnoreResult[Message]()
 		}
 		return tui.MessageResult(t.onSelect(selection)).Focus(t.id)
@@ -259,29 +266,65 @@ func (t Table[Message]) virtualRow(selected int, hasSelection bool, index int) t
 	if !isSelected {
 		return rowNode.WithLength(tui.Fixed(1))
 	}
-	return t.navigationTarget(tui.Column(rowNode), index, true).WithLength(tui.Fixed(1))
+	return tableActionTarget(
+		tui.Column(rowNode), t.id, len(t.rows), index, true, t.style.Focused, t.onSelect, descriptors,
+	).WithLength(tui.Fixed(1))
 }
 
-func (t Table[Message]) navigationTarget(
+func tableActionTarget[Message any](
 	node tui.Node[Message],
+	rootID tui.NodeID,
+	rowCount int,
 	selected int,
 	applyFocusedStyle bool,
+	focusedStyle vt.Style,
+	onSelect func(int) Message,
+	descriptors [5]tui.ActionDescriptor,
 ) tui.Node[Message] {
-	node = node.Focusable(t.id).OnEvent(t.id, func(event vt.Event) tui.EventResult[Message] {
-		next, handled := navigationEvent(event, len(t.rows), selected)
-		if !handled {
-			return tui.IgnoreResult[Message]()
-		}
-		result := tui.ConsumeResult[Message]().Focus(t.id)
-		if next != selected {
-			result = result.Emit(t.onSelect(next))
-		}
-		return result
-	})
+	node = node.Focusable(rootID).OnActions(
+		rootID,
+		newTableActions(descriptors, rootID, rowCount, selected, onSelect),
+	)
 	if applyFocusedStyle {
-		node = node.WithFocusedStyle(t.style.Focused)
+		node = node.WithFocusedStyle(focusedStyle)
 	}
 	return node
+}
+
+func newTableActions[Message any](
+	descriptors [5]tui.ActionDescriptor,
+	rootID tui.NodeID,
+	rowCount int,
+	selected int,
+	onSelect func(int) Message,
+) []tui.Action[Message] {
+	actions := make([]tui.Action[Message], len(descriptors))
+	for index, descriptor := range descriptors {
+		action := collectionAction(index)
+		actions[index] = tui.NewAction(descriptor, func(tui.ActionEvent) tui.EventResult[Message] {
+			return tableActionResult(action, rootID, rowCount, selected, onSelect)
+		})
+	}
+	return actions
+}
+
+func tableActionResult[Message any](
+	action collectionAction,
+	rootID tui.NodeID,
+	rowCount int,
+	selected int,
+	onSelect func(int) Message,
+) tui.EventResult[Message] {
+	result := tui.ConsumeResult[Message]().Focus(rootID)
+	navigation, navigates := collectionNavigation(action)
+	if !navigates {
+		return result.Emit(onSelect(selected))
+	}
+	next, _ := navigateSelection(rowCount, selected, navigation)
+	if next != selected {
+		result = result.Emit(onSelect(next))
+	}
+	return result
 }
 
 func cloneTableRows(rows []TableRow) []TableRow {
