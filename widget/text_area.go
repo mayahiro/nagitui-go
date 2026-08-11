@@ -2,7 +2,6 @@ package widget
 
 import (
 	"sort"
-	"unicode"
 
 	celltext "github.com/mayahiro/nagi-go/text"
 	"github.com/mayahiro/nagi-go/vt"
@@ -105,6 +104,9 @@ func DefaultTextAreaStyle() TextAreaStyle {
 }
 
 // TextArea is a controlled multiline editor with grapheme-safe cursor movement
+//
+// Keyboard editing commands are declared as Core nagi.text.* semantic actions.
+// Text and Paste remain raw editing input after local action resolution.
 type TextArea[Message any] struct {
 	id             tui.NodeID
 	state          TextAreaState
@@ -164,36 +166,280 @@ func (a TextArea[Message]) OnRedo(handler func() Message) TextArea[Message] {
 	return a
 }
 
+// ActionDescriptors returns the ordered semantic actions declared by this text area
+//
+// The order is cursor movement, selection extension, select all, backward and
+// forward deletion, line break, undo, and redo. Undo and redo are
+// disabled-pass-through when their corresponding handler is nil. Every
+// descriptor is disabled-pass-through when the text area is disabled.
+func (a TextArea[Message]) ActionDescriptors() []tui.ActionDescriptor {
+	descriptors := textAreaActionDescriptors(a.enabled, a.onUndo != nil, a.onRedo != nil)
+	return append([]tui.ActionDescriptor(nil), descriptors[:]...)
+}
+
 // Node builds the public semantic node for this text area
 func (a TextArea[Message]) Node() tui.Node[Message] {
 	content := textAreaContent[Message](a.state, a.placeholder, a.enabled, a.style, a.selectionStyle)
+	descriptors := textAreaActionDescriptors(a.enabled, a.onUndo != nil, a.onRedo != nil)
 	if !a.enabled {
-		return content.WithID(a.id)
+		actions := disabledTextAreaActions[Message](descriptors)
+		return content.WithID(a.id).OnActions(a.id, actions[:])
 	}
+	context := &textAreaActionContext[Message]{
+		id: a.id, state: a.state, onChange: a.onChange, onUndo: a.onUndo, onRedo: a.onRedo,
+	}
+	actions := newTextAreaActions(descriptors, context)
 	return content.
 		Focusable(a.id).
 		WithFocusedStyle(a.style.Focused).
+		OnActions(a.id, actions[:]).
 		OnEvent(a.id, func(event vt.Event) tui.EventResult[Message] {
-			if historyAction, ok := textAreaHistoryActionForEvent(event); ok {
-				handler := a.onUndo
-				if historyAction == textAreaRedoHistory {
-					handler = a.onRedo
-				}
-				if handler == nil {
-					return tui.IgnoreResult[Message]()
-				}
-				return tui.ConsumeResult[Message]().Focus(a.id).Emit(handler())
-			}
-			next, handled := textAreaEditForEvent(a.state, event)
+			next, handled := rawTextAreaEditForEvent(context.state, event)
 			if !handled {
 				return tui.IgnoreResult[Message]()
 			}
-			result := tui.ConsumeResult[Message]().Focus(a.id)
-			if next != a.state {
-				result = result.Emit(a.onChange(next))
-			}
-			return result
+			return textAreaChangeResult(context, next)
 		})
+}
+
+const textAreaActionCount = 18
+
+type textAreaSemanticAction uint8
+
+const (
+	textAreaCursorLeft textAreaSemanticAction = iota
+	textAreaCursorRight
+	textAreaCursorUp
+	textAreaCursorDown
+	textAreaCursorLineStart
+	textAreaCursorLineEnd
+	textAreaSelectionExtendLeft
+	textAreaSelectionExtendRight
+	textAreaSelectionExtendUp
+	textAreaSelectionExtendDown
+	textAreaSelectionExtendLineStart
+	textAreaSelectionExtendLineEnd
+	textAreaSelectAll
+	textAreaDeleteBackward
+	textAreaDeleteForward
+	textAreaInsertLineBreak
+	textAreaUndo
+	textAreaRedo
+)
+
+var defaultTextAreaActionDescriptors = [textAreaActionCount]tui.ActionDescriptor{
+	textAreaActionDescriptor(
+		tui.TextCursorLeftActionID, "Move cursor left",
+		[]tui.KeyBinding{textAreaActionBinding(vt.KeyLeft, vt.Modifiers{})},
+	),
+	textAreaActionDescriptor(
+		tui.TextCursorRightActionID, "Move cursor right",
+		[]tui.KeyBinding{textAreaActionBinding(vt.KeyRight, vt.Modifiers{})},
+	),
+	textAreaActionDescriptor(
+		tui.TextCursorUpActionID, "Move cursor up",
+		[]tui.KeyBinding{textAreaActionBinding(vt.KeyUp, vt.Modifiers{})},
+	),
+	textAreaActionDescriptor(
+		tui.TextCursorDownActionID, "Move cursor down",
+		[]tui.KeyBinding{textAreaActionBinding(vt.KeyDown, vt.Modifiers{})},
+	),
+	textAreaActionDescriptor(
+		tui.TextCursorLineStartActionID, "Move to line start",
+		[]tui.KeyBinding{textAreaActionBinding(vt.KeyHome, vt.Modifiers{})},
+	),
+	textAreaActionDescriptor(
+		tui.TextCursorLineEndActionID, "Move to line end",
+		[]tui.KeyBinding{textAreaActionBinding(vt.KeyEnd, vt.Modifiers{})},
+	),
+	textAreaActionDescriptor(
+		tui.TextSelectionExtendLeftActionID, "Extend selection left",
+		[]tui.KeyBinding{textAreaActionBinding(vt.KeyLeft, vt.Modifiers{Shift: true})},
+	),
+	textAreaActionDescriptor(
+		tui.TextSelectionExtendRightActionID, "Extend selection right",
+		[]tui.KeyBinding{textAreaActionBinding(vt.KeyRight, vt.Modifiers{Shift: true})},
+	),
+	textAreaActionDescriptor(
+		tui.TextSelectionExtendUpActionID, "Extend selection up",
+		[]tui.KeyBinding{textAreaActionBinding(vt.KeyUp, vt.Modifiers{Shift: true})},
+	),
+	textAreaActionDescriptor(
+		tui.TextSelectionExtendDownActionID, "Extend selection down",
+		[]tui.KeyBinding{textAreaActionBinding(vt.KeyDown, vt.Modifiers{Shift: true})},
+	),
+	textAreaActionDescriptor(
+		tui.TextSelectionExtendLineStartActionID, "Extend selection to line start",
+		[]tui.KeyBinding{textAreaActionBinding(vt.KeyHome, vt.Modifiers{Shift: true})},
+	),
+	textAreaActionDescriptor(
+		tui.TextSelectionExtendLineEndActionID, "Extend selection to line end",
+		[]tui.KeyBinding{textAreaActionBinding(vt.KeyEnd, vt.Modifiers{Shift: true})},
+	),
+	textAreaActionDescriptor(
+		tui.TextSelectAllActionID, "Select all",
+		[]tui.KeyBinding{textAreaCharacterActionBinding('a', vt.Modifiers{Control: true})},
+	),
+	textAreaActionDescriptor(
+		tui.TextDeleteBackwardActionID, "Delete backward",
+		[]tui.KeyBinding{textAreaActionBinding(vt.KeyBackspace, vt.Modifiers{})},
+	),
+	textAreaActionDescriptor(
+		tui.TextDeleteForwardActionID, "Delete forward",
+		[]tui.KeyBinding{textAreaActionBinding(vt.KeyDelete, vt.Modifiers{})},
+	),
+	textAreaActionDescriptor(
+		tui.TextInsertLineBreakActionID, "Insert line break",
+		[]tui.KeyBinding{textAreaActionBinding(vt.KeyEnter, vt.Modifiers{})},
+	),
+	textAreaActionDescriptor(
+		tui.TextUndoActionID, "Undo",
+		[]tui.KeyBinding{textAreaCharacterActionBinding('z', vt.Modifiers{Control: true})},
+	),
+	textAreaActionDescriptor(
+		tui.TextRedoActionID, "Redo",
+		[]tui.KeyBinding{
+			textAreaCharacterActionBinding('y', vt.Modifiers{Control: true}),
+			textAreaCharacterActionBinding('z', vt.Modifiers{Control: true, Shift: true}),
+		},
+	),
+}
+
+func textAreaActionDescriptor(
+	id tui.ActionID,
+	label string,
+	bindings []tui.KeyBinding,
+) tui.ActionDescriptor {
+	return tui.NewActionDescriptor(id, label, bindings)
+}
+
+func textAreaActionBinding(code vt.KeyCode, modifiers vt.Modifiers) tui.KeyBinding {
+	return tui.NewKeyBinding(tui.NewKeyStroke(code, modifiers)).WithRepeatPolicy(tui.RepeatAllow)
+}
+
+func textAreaCharacterActionBinding(character rune, modifiers vt.Modifiers) tui.KeyBinding {
+	return tui.NewKeyBinding(tui.NewCharacterKeyStroke(character, modifiers)).
+		WithRepeatPolicy(tui.RepeatAllow)
+}
+
+func textAreaActionDescriptors(enabled, hasUndo, hasRedo bool) [textAreaActionCount]tui.ActionDescriptor {
+	descriptors := defaultTextAreaActionDescriptors
+	for index := range descriptors {
+		available := enabled
+		if textAreaSemanticAction(index) == textAreaUndo {
+			available = available && hasUndo
+		} else if textAreaSemanticAction(index) == textAreaRedo {
+			available = available && hasRedo
+		}
+		availability := tui.ActionEnabled
+		if !available {
+			availability = tui.ActionDisabledPassThrough
+		}
+		descriptors[index] = descriptors[index].WithAvailability(availability)
+	}
+	return descriptors
+}
+
+type textAreaActionContext[Message any] struct {
+	id       tui.NodeID
+	state    TextAreaState
+	onChange func(TextAreaState) Message
+	onUndo   func() Message
+	onRedo   func() Message
+}
+
+func newTextAreaActions[Message any](
+	descriptors [textAreaActionCount]tui.ActionDescriptor,
+	context *textAreaActionContext[Message],
+) [textAreaActionCount]tui.Action[Message] {
+	var actions [textAreaActionCount]tui.Action[Message]
+	for index, descriptor := range descriptors {
+		action := textAreaSemanticAction(index)
+		actions[index] = tui.NewAction(descriptor, func(tui.ActionEvent) tui.EventResult[Message] {
+			return textAreaActionResult(action, context)
+		})
+	}
+	return actions
+}
+
+func disabledTextAreaActions[Message any](
+	descriptors [textAreaActionCount]tui.ActionDescriptor,
+) [textAreaActionCount]tui.Action[Message] {
+	var actions [textAreaActionCount]tui.Action[Message]
+	for index, descriptor := range descriptors {
+		actions[index] = tui.NewAction[Message](descriptor, nil)
+	}
+	return actions
+}
+
+func textAreaActionResult[Message any](
+	action textAreaSemanticAction,
+	context *textAreaActionContext[Message],
+) tui.EventResult[Message] {
+	switch action {
+	case textAreaUndo:
+		if context.onUndo == nil {
+			return tui.IgnoreResult[Message]()
+		}
+		return tui.ConsumeResult[Message]().Focus(context.id).Emit(context.onUndo())
+	case textAreaRedo:
+		if context.onRedo == nil {
+			return tui.IgnoreResult[Message]()
+		}
+		return tui.ConsumeResult[Message]().Focus(context.id).Emit(context.onRedo())
+	default:
+		return textAreaChangeResult(context, textAreaStateForAction(context.state, action))
+	}
+}
+
+func textAreaChangeResult[Message any](
+	context *textAreaActionContext[Message],
+	next TextAreaState,
+) tui.EventResult[Message] {
+	result := tui.ConsumeResult[Message]().Focus(context.id)
+	if next != context.state {
+		result = result.Emit(context.onChange(next))
+	}
+	return result
+}
+
+func textAreaStateForAction(state TextAreaState, action textAreaSemanticAction) TextAreaState {
+	switch action {
+	case textAreaCursorLeft:
+		return applyTextAreaMovement(state, textAreaLeft, false)
+	case textAreaCursorRight:
+		return applyTextAreaMovement(state, textAreaRight, false)
+	case textAreaCursorUp:
+		return applyTextAreaMovement(state, textAreaUp, false)
+	case textAreaCursorDown:
+		return applyTextAreaMovement(state, textAreaDown, false)
+	case textAreaCursorLineStart:
+		return applyTextAreaMovement(state, textAreaHome, false)
+	case textAreaCursorLineEnd:
+		return applyTextAreaMovement(state, textAreaEnd, false)
+	case textAreaSelectionExtendLeft:
+		return applyTextAreaMovement(state, textAreaLeft, true)
+	case textAreaSelectionExtendRight:
+		return applyTextAreaMovement(state, textAreaRight, true)
+	case textAreaSelectionExtendUp:
+		return applyTextAreaMovement(state, textAreaUp, true)
+	case textAreaSelectionExtendDown:
+		return applyTextAreaMovement(state, textAreaDown, true)
+	case textAreaSelectionExtendLineStart:
+		return applyTextAreaMovement(state, textAreaHome, true)
+	case textAreaSelectionExtendLineEnd:
+		return applyTextAreaMovement(state, textAreaEnd, true)
+	case textAreaSelectAll:
+		return selectAllTextAreaState(state)
+	case textAreaDeleteBackward:
+		return applyTextAreaEdit(state, textAreaBackspace, "")
+	case textAreaDeleteForward:
+		return applyTextAreaEdit(state, textAreaDelete, "")
+	case textAreaInsertLineBreak:
+		return applyTextAreaEdit(state, textAreaInsert, "\n")
+	default:
+		panic("widget: history action does not produce text area state")
+	}
 }
 
 func textAreaContent[Message any](state TextAreaState, placeholder string, enabled bool, style TextAreaStyle, selectionStyle vt.Style) tui.Node[Message] {
@@ -321,55 +567,19 @@ const (
 	textAreaDelete
 )
 
-func textAreaEditForEvent(state TextAreaState, event vt.Event) (TextAreaState, bool) {
+func rawTextAreaEditForEvent(state TextAreaState, event vt.Event) (TextAreaState, bool) {
 	if event.Kind == vt.EventText || event.Kind == vt.EventPaste {
 		return applyTextAreaEdit(state, textAreaInsert, event.Text), true
 	}
-	if event.Kind != vt.EventKey || event.Key.Action == vt.KeyRelease {
-		return TextAreaState{}, false
-	}
-	modifiers := event.Key.Modifiers
-	if modifiers.Alt || modifiers.Meta {
-		return TextAreaState{}, false
-	}
-	if modifiers.Control {
-		if event.Key.Code == vt.KeyCharacter && unicode.ToLower(event.Key.Character) == 'a' {
-			state = normalizeTextAreaState(state)
-			state.cursor = len(state.value)
-			state.selectionAnchor = 0
-			state.hasSelection = state.cursor != 0
-			return state, true
-		}
-		return TextAreaState{}, false
-	}
-	edit := textAreaInsert
-	inserted := ""
-	switch event.Key.Code {
-	case vt.KeyEnter:
-		inserted = "\n"
-	case vt.KeyLeft:
-		edit = textAreaLeft
-	case vt.KeyRight:
-		edit = textAreaRight
-	case vt.KeyUp:
-		edit = textAreaUp
-	case vt.KeyDown:
-		edit = textAreaDown
-	case vt.KeyHome:
-		edit = textAreaHome
-	case vt.KeyEnd:
-		edit = textAreaEnd
-	case vt.KeyBackspace:
-		edit = textAreaBackspace
-	case vt.KeyDelete:
-		edit = textAreaDelete
-	default:
-		return TextAreaState{}, false
-	}
-	if edit >= textAreaLeft && edit <= textAreaEnd {
-		return applyTextAreaMovement(state, edit, modifiers.Shift), true
-	}
-	return applyTextAreaEdit(state, edit, inserted), true
+	return TextAreaState{}, false
+}
+
+func selectAllTextAreaState(state TextAreaState) TextAreaState {
+	state = normalizeTextAreaState(state)
+	state.cursor = len(state.value)
+	state.selectionAnchor = 0
+	state.hasSelection = state.cursor != 0
+	return state
 }
 
 func applyTextAreaEdit(state TextAreaState, edit textAreaEdit, inserted string) TextAreaState {
@@ -504,34 +714,6 @@ func verticalTextAreaCursor(value string, cursor int, down bool) int {
 	}
 	relative := len(celltext.Truncate(targetLine, column, celltext.ModernWidth()))
 	return lines[target].start + relative
-}
-
-type textAreaHistoryAction uint8
-
-const (
-	textAreaUndoHistory textAreaHistoryAction = iota
-	textAreaRedoHistory
-)
-
-func textAreaHistoryActionForEvent(event vt.Event) (textAreaHistoryAction, bool) {
-	if event.Kind != vt.EventKey || event.Key.Action == vt.KeyRelease {
-		return 0, false
-	}
-	modifiers := event.Key.Modifiers
-	if !modifiers.Control || modifiers.Alt || modifiers.Meta || event.Key.Code != vt.KeyCharacter {
-		return 0, false
-	}
-	switch unicode.ToLower(event.Key.Character) {
-	case 'z':
-		if modifiers.Shift {
-			return textAreaRedoHistory, true
-		}
-		return textAreaUndoHistory, true
-	case 'y':
-		return textAreaRedoHistory, true
-	default:
-		return 0, false
-	}
 }
 
 type textAreaRange struct {

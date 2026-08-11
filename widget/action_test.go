@@ -12,7 +12,11 @@ var tabsItemActionDescriptorSink tui.ActionDescriptor
 var tabsNavigationActionDescriptorSink [4]tui.ActionDescriptor
 var verticalCollectionActionDescriptorSink [5]tui.ActionDescriptor
 var treeActionDescriptorSink [7]tui.ActionDescriptor
+var textAreaActionDescriptorSink [textAreaActionCount]tui.ActionDescriptor
 var listHasVisibleItemsSink bool
+var commandPaletteActionDescriptorSink [5]tui.ActionDescriptor
+var commandPaletteCommandActionDescriptorSink tui.ActionDescriptor
+var commandPaletteHasVisibleCommandSink bool
 
 func TestActivateActionDescriptorReuseDoesNotAllocate(t *testing.T) {
 	actionDescriptorSink = ActivateActionDescriptor()
@@ -63,6 +67,50 @@ func TestTreeActionDescriptorDefaultsDoNotAllocate(t *testing.T) {
 	})
 	if allocations != 0 {
 		t.Fatalf("Tree descriptor allocations = %f, want 0", allocations)
+	}
+}
+
+func TestTextAreaActionDescriptorDefaultsDoNotAllocate(t *testing.T) {
+	textAreaActionDescriptorSink = textAreaActionDescriptors(true, true, true)
+	allocations := testing.AllocsPerRun(1_000, func() {
+		textAreaActionDescriptorSink = textAreaActionDescriptors(true, true, true)
+	})
+	if allocations != 0 {
+		t.Fatalf("TextArea descriptor allocations = %f, want 0", allocations)
+	}
+	for _, descriptor := range textAreaActionDescriptorSink {
+		for _, binding := range descriptor.DefaultBindings() {
+			if binding.RepeatPolicy() != tui.RepeatAllow {
+				t.Fatalf("TextArea action %s does not allow repeat", descriptor.ID())
+			}
+		}
+	}
+}
+
+func TestCommandPaletteActionDescriptorDefaultsDoNotAllocate(t *testing.T) {
+	commandPaletteCommandActionDescriptorSink = commandPaletteCommandActionDescriptor(true)
+	commandPaletteActionDescriptorSink = commandPaletteActionDescriptors(true)
+	allocations := testing.AllocsPerRun(1_000, func() {
+		commandPaletteCommandActionDescriptorSink = commandPaletteCommandActionDescriptor(true)
+		commandPaletteActionDescriptorSink = commandPaletteActionDescriptors(true)
+	})
+	if allocations != 0 {
+		t.Fatalf("CommandPalette descriptor allocations = %f, want 0", allocations)
+	}
+}
+
+func TestCommandPaletteDescriptorAvailabilityScanDoesNotAllocate(t *testing.T) {
+	commands := []Command{
+		NewCommand("command-0", "Alpha").WithKeywords("first"),
+		NewCommand("command-1", "Beta").WithKeywords("second"),
+		NewCommand("command-2", "Alpine").WithKeywords("peak"),
+	}
+	commandPaletteHasVisibleCommandSink = hasVisibleCommand(commands, "P")
+	allocations := testing.AllocsPerRun(1_000, func() {
+		commandPaletteHasVisibleCommandSink = hasVisibleCommand(commands, "P")
+	})
+	if allocations != 0 {
+		t.Fatalf("CommandPalette availability scan allocations = %f, want 0", allocations)
 	}
 }
 

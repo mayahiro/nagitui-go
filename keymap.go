@@ -12,6 +12,45 @@ import (
 // ActionID is a stable, key-independent action identity
 type ActionID string
 
+const (
+	// TextCursorLeftActionID is the stable Action ID for moving a text cursor left
+	TextCursorLeftActionID ActionID = "nagi.text.cursor.left"
+	// TextCursorRightActionID is the stable Action ID for moving a text cursor right
+	TextCursorRightActionID ActionID = "nagi.text.cursor.right"
+	// TextCursorUpActionID is the stable Action ID for moving a text cursor up
+	TextCursorUpActionID ActionID = "nagi.text.cursor.up"
+	// TextCursorDownActionID is the stable Action ID for moving a text cursor down
+	TextCursorDownActionID ActionID = "nagi.text.cursor.down"
+	// TextCursorLineStartActionID is the stable Action ID for moving a text cursor to the current line start
+	TextCursorLineStartActionID ActionID = "nagi.text.cursor.line-start"
+	// TextCursorLineEndActionID is the stable Action ID for moving a text cursor to the current line end
+	TextCursorLineEndActionID ActionID = "nagi.text.cursor.line-end"
+	// TextSelectionExtendLeftActionID is the stable Action ID for extending text selection left
+	TextSelectionExtendLeftActionID ActionID = "nagi.text.selection.extend-left"
+	// TextSelectionExtendRightActionID is the stable Action ID for extending text selection right
+	TextSelectionExtendRightActionID ActionID = "nagi.text.selection.extend-right"
+	// TextSelectionExtendUpActionID is the stable Action ID for extending text selection up
+	TextSelectionExtendUpActionID ActionID = "nagi.text.selection.extend-up"
+	// TextSelectionExtendDownActionID is the stable Action ID for extending text selection down
+	TextSelectionExtendDownActionID ActionID = "nagi.text.selection.extend-down"
+	// TextSelectionExtendLineStartActionID is the stable Action ID for extending text selection to the current line start
+	TextSelectionExtendLineStartActionID ActionID = "nagi.text.selection.extend-line-start"
+	// TextSelectionExtendLineEndActionID is the stable Action ID for extending text selection to the current line end
+	TextSelectionExtendLineEndActionID ActionID = "nagi.text.selection.extend-line-end"
+	// TextSelectAllActionID is the stable Action ID for selecting all editable text
+	TextSelectAllActionID ActionID = "nagi.text.select-all"
+	// TextDeleteBackwardActionID is the stable Action ID for deleting text backward
+	TextDeleteBackwardActionID ActionID = "nagi.text.delete.backward"
+	// TextDeleteForwardActionID is the stable Action ID for deleting text forward
+	TextDeleteForwardActionID ActionID = "nagi.text.delete.forward"
+	// TextInsertLineBreakActionID is the stable Action ID for inserting a line break
+	TextInsertLineBreakActionID ActionID = "nagi.text.insert-line-break"
+	// TextUndoActionID is the stable Action ID for undoing a text edit
+	TextUndoActionID ActionID = "nagi.text.undo"
+	// TextRedoActionID is the stable Action ID for redoing a text edit
+	TextRedoActionID ActionID = "nagi.text.redo"
+)
+
 // NewActionID returns an Action ID from an application-defined stable value
 func NewActionID(value string) ActionID {
 	return ActionID(value)

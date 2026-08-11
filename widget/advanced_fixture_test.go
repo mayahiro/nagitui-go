@@ -95,15 +95,20 @@ func TestTextAreaSelectionFixtures(t *testing.T) {
 			actual = applyTextAreaEdit(state, textAreaDelete, "")
 			handled = true
 		case "left":
-			actual, handled = textAreaEditForEvent(state, textAreaFixtureKey(vt.KeyLeft, false, false, 0))
+			actual = applyTextAreaMovement(state, textAreaLeft, false)
+			handled = true
 		case "right":
-			actual, handled = textAreaEditForEvent(state, textAreaFixtureKey(vt.KeyRight, false, false, 0))
+			actual = applyTextAreaMovement(state, textAreaRight, false)
+			handled = true
 		case "shift-left":
-			actual, handled = textAreaEditForEvent(state, textAreaFixtureKey(vt.KeyLeft, true, false, 0))
+			actual = applyTextAreaMovement(state, textAreaLeft, true)
+			handled = true
 		case "shift-right":
-			actual, handled = textAreaEditForEvent(state, textAreaFixtureKey(vt.KeyRight, true, false, 0))
+			actual = applyTextAreaMovement(state, textAreaRight, true)
+			handled = true
 		case "select-all":
-			actual, handled = textAreaEditForEvent(state, textAreaFixtureKey(vt.KeyCharacter, false, true, 'a'))
+			actual = selectAllTextAreaState(state)
+			handled = true
 		default:
 			t.Fatalf("case %s: invalid operation %q", record.ID, record.Field("operation"))
 		}
