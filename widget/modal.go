@@ -44,16 +44,26 @@ func (m Modal[Message]) Style(style ModalStyle) Modal[Message] {
 	return m
 }
 
-// OnEscape emits a message when Escape reaches the modal root
+// OnEscape sets the message handler used by the semantic dismissal action
 //
-// A nil function removes the Escape handler
+// A nil function removes the dismissal handler
 func (m Modal[Message]) OnEscape(handler func() Message) Modal[Message] {
 	m.onEscape = handler
 	return m
 }
 
+// ActionDescriptor returns the semantic dismissal descriptor declared by the modal root
+func (m Modal[Message]) ActionDescriptor() tui.ActionDescriptor {
+	availability := tui.ActionEnabled
+	if m.onEscape == nil {
+		availability = tui.ActionDisabledPassThrough
+	}
+	return DismissActionDescriptor().WithAvailability(availability)
+}
+
 // Node builds the public semantic node for this modal
 func (m Modal[Message]) Node() tui.Node[Message] {
+	descriptor := m.ActionDescriptor()
 	content := m.child
 	if m.title != "" {
 		content = tui.Column(
@@ -64,13 +74,11 @@ func (m Modal[Message]) Node() tui.Node[Message] {
 	panel := tui.Border(content, m.style.Border)
 	centered := tui.Align(panel, tui.AlignCenter, tui.AlignMiddle)
 	modal := tui.Modal(m.id, centered)
-	if m.onEscape == nil {
-		return modal
-	}
-	return modal.OnEvent(m.id, func(event vt.Event) tui.EventResult[Message] {
-		if event.Kind == vt.EventKey && event.Key.Action != vt.KeyRelease && event.Key.Code == vt.KeyEscape {
+	var handler func(tui.ActionEvent) tui.EventResult[Message]
+	if m.onEscape != nil {
+		handler = func(tui.ActionEvent) tui.EventResult[Message] {
 			return tui.MessageResult(m.onEscape())
 		}
-		return tui.IgnoreResult[Message]()
-	})
+	}
+	return modal.OnActions(m.id, []tui.Action[Message]{tui.NewAction(descriptor, handler)})
 }

@@ -67,6 +67,83 @@ func DefaultFilePickerStyle() FilePickerStyle {
 	}
 }
 
+const filePickerActionCount = 8
+
+var defaultFilePickerActionDescriptors = [filePickerActionCount]tui.ActionDescriptor{
+	tui.NewActionDescriptor(
+		ActivateActionID,
+		activateActionLabel,
+		[]tui.KeyBinding{
+			repeatableActionBinding(vt.KeyEnter),
+			tui.NewKeyBinding(tui.NewCharacterKeyStroke(' ', vt.Modifiers{})).
+				WithRepeatPolicy(tui.RepeatAllow),
+			repeatableActionBinding(vt.KeyRight),
+		},
+	),
+	tui.NewActionDescriptor(
+		SelectionPreviousActionID,
+		selectionPreviousActionLabel,
+		[]tui.KeyBinding{repeatableActionBinding(vt.KeyUp)},
+	),
+	tui.NewActionDescriptor(
+		SelectionNextActionID,
+		selectionNextActionLabel,
+		[]tui.KeyBinding{repeatableActionBinding(vt.KeyDown)},
+	),
+	tui.NewActionDescriptor(
+		SelectionFirstActionID,
+		selectionFirstActionLabel,
+		[]tui.KeyBinding{repeatableActionBinding(vt.KeyHome)},
+	),
+	tui.NewActionDescriptor(
+		SelectionLastActionID,
+		selectionLastActionLabel,
+		[]tui.KeyBinding{repeatableActionBinding(vt.KeyEnd)},
+	),
+	tui.NewActionDescriptor(
+		SelectionPreviousPageActionID,
+		selectionPreviousPageActionLabel,
+		[]tui.KeyBinding{repeatableActionBinding(vt.KeyPageUp)},
+	),
+	tui.NewActionDescriptor(
+		SelectionNextPageActionID,
+		selectionNextPageActionLabel,
+		[]tui.KeyBinding{repeatableActionBinding(vt.KeyPageDown)},
+	),
+	tui.NewActionDescriptor(
+		NavigationBackActionID,
+		navigationBackActionLabel,
+		[]tui.KeyBinding{
+			repeatableActionBinding(vt.KeyLeft),
+			repeatableActionBinding(vt.KeyBackspace),
+		},
+	),
+}
+
+type filePickerAction uint8
+
+const (
+	filePickerActivate filePickerAction = iota
+	filePickerPrevious
+	filePickerNext
+	filePickerFirst
+	filePickerLast
+	filePickerPreviousPage
+	filePickerNextPage
+	filePickerBack
+)
+
+var filePickerActions = [filePickerActionCount]filePickerAction{
+	filePickerActivate,
+	filePickerPrevious,
+	filePickerNext,
+	filePickerFirst,
+	filePickerLast,
+	filePickerPreviousPage,
+	filePickerNextPage,
+	filePickerBack,
+}
+
 // FilePicker is a controlled browser over application-supplied entries
 type FilePicker[Message any] struct {
 	id             tui.NodeID
@@ -99,7 +176,9 @@ func (p FilePicker[Message]) OnOpen(handler func(int) Message) FilePicker[Messag
 	return p
 }
 
-// OnBack sets the handler used by Left and Backspace
+// OnBack sets the navigation-back handler
+//
+// Unmodified Left and Backspace are the ordered default bindings.
 func (p FilePicker[Message]) OnBack(handler func() Message) FilePicker[Message] {
 	p.onBack = handler
 	return p
@@ -135,12 +214,32 @@ func (p FilePicker[Message]) Style(style FilePickerStyle) FilePicker[Message] {
 	return p
 }
 
+// ActionDescriptors returns the ordered semantic actions declared by the root
+//
+// Activation and navigation back are disabled-pass-through when their
+// corresponding callbacks are absent.
+func (p FilePicker[Message]) ActionDescriptors() []tui.ActionDescriptor {
+	descriptors := filePickerActionDescriptors(
+		p.enabled && filePickerHasVisibleEntries(p.entries, p.showHidden),
+		p.onOpen != nil,
+		p.onBack != nil,
+	)
+	return append([]tui.ActionDescriptor(nil), descriptors[:]...)
+}
+
 // Node builds the public semantic node for this file picker
 func (p FilePicker[Message]) Node() tui.Node[Message] {
 	visible := filePickerVisibleIndices(p.entries, p.showHidden)
 	selectedPosition, hasSelection := normalizedListSelection(visible, p.selected)
+	descriptors := filePickerActionDescriptors(
+		p.enabled && hasSelection,
+		p.onOpen != nil,
+		p.onBack != nil,
+	)
 	if !hasSelection {
-		return tui.StyledText[Message](p.placeholder, p.style.Placeholder).WithID(p.id)
+		return tui.StyledText[Message](p.placeholder, p.style.Placeholder).
+			WithID(p.id).
+			OnActions(p.id, disabledFilePickerActions[Message](descriptors))
 	}
 	start, end := 0, len(visible)
 	if p.viewportHeight > 0 {
@@ -177,13 +276,26 @@ func (p FilePicker[Message]) Node() tui.Node[Message] {
 			children = append(children, tui.Column(row.WithID(entry.ID)).
 				Focusable(p.id).
 				WithFocusedStyle(p.style.Focused).
-				OnEvent(p.id, p.selectedHandler(visible, selectedPosition)))
+				OnActions(
+					p.id,
+					filePickerSemanticActions(
+						descriptors,
+						visible,
+						selectedPosition,
+						p.viewportHeight,
+						p.id,
+						p.onSelect,
+						p.onOpen,
+						p.onBack,
+					),
+				).
+				OnEvent(p.id, p.selectedPointerHandler(originalIndex)))
 			continue
 		}
 		entryID := entry.ID
 		selection := originalIndex
 		children = append(children, row.WithID(entryID).OnEvent(entryID, func(event vt.Event) tui.EventResult[Message] {
-			if !isActivationEvent(event) {
+			if !isPointerActivationEvent(event) {
 				return tui.IgnoreResult[Message]()
 			}
 			result := tui.ConsumeResult[Message]().Focus(p.id).Emit(p.onSelect(selection))
@@ -198,93 +310,159 @@ func (p FilePicker[Message]) Node() tui.Node[Message] {
 		root = root.WithLength(tui.Fixed(uint32(p.viewportHeight)))
 	}
 	if !p.enabled {
-		return root.WithID(p.id)
+		return root.WithID(p.id).OnActions(p.id, disabledFilePickerActions[Message](descriptors))
 	}
 	return root
 }
 
-func (p FilePicker[Message]) selectedHandler(visible []int, selected int) func(vt.Event) tui.EventResult[Message] {
-	visible = append([]int(nil), visible...)
+func (p FilePicker[Message]) selectedPointerHandler(originalIndex int) func(vt.Event) tui.EventResult[Message] {
 	return func(event vt.Event) tui.EventResult[Message] {
-		if isActivationEvent(event) {
-			result := tui.ConsumeResult[Message]().Focus(p.id)
-			if p.onOpen != nil {
-				result = result.Emit(p.onOpen(visible[selected]))
-			}
-			return result
-		}
-		action, handled := filePickerActionForEvent(selected, len(visible), p.viewportHeight, event)
-		if !handled {
+		if !isPointerActivationEvent(event) {
 			return tui.IgnoreResult[Message]()
 		}
 		result := tui.ConsumeResult[Message]().Focus(p.id)
-		switch action.kind {
-		case filePickerSelect:
-			if action.position != selected {
-				result = result.Emit(p.onSelect(visible[action.position]))
-			}
-		case filePickerOpen:
-			if p.onOpen == nil {
-				return tui.IgnoreResult[Message]()
-			}
-			result = result.Emit(p.onOpen(visible[selected]))
-		case filePickerBack:
-			if p.onBack == nil {
-				return tui.IgnoreResult[Message]()
-			}
-			result = result.Emit(p.onBack())
+		if p.onOpen != nil {
+			result = result.Emit(p.onOpen(originalIndex))
 		}
 		return result
 	}
 }
 
-type filePickerActionKind uint8
-
-const (
-	filePickerSelect filePickerActionKind = iota
-	filePickerOpen
-	filePickerBack
-)
-
-type filePickerAction struct {
-	kind     filePickerActionKind
-	position int
+func filePickerSemanticActions[Message any](
+	descriptors [filePickerActionCount]tui.ActionDescriptor,
+	visible []int,
+	selected int,
+	viewportHeight int,
+	focusID tui.NodeID,
+	onSelect func(int) Message,
+	onOpen func(int) Message,
+	onBack func() Message,
+) []tui.Action[Message] {
+	actions := make([]tui.Action[Message], len(descriptors))
+	for index, descriptor := range descriptors {
+		action := filePickerActions[index]
+		actions[index] = tui.NewAction(descriptor, func(tui.ActionEvent) tui.EventResult[Message] {
+			return filePickerActionResult(
+				action,
+				visible,
+				selected,
+				viewportHeight,
+				focusID,
+				onSelect,
+				onOpen,
+				onBack,
+			)
+		})
+	}
+	return actions
 }
 
-func filePickerActionForEvent(selected, count, viewportHeight int, event vt.Event) (filePickerAction, bool) {
-	if count <= 0 || event.Kind != vt.EventKey || event.Key.Action == vt.KeyRelease {
-		return filePickerAction{}, false
+func disabledFilePickerActions[Message any](
+	descriptors [filePickerActionCount]tui.ActionDescriptor,
+) []tui.Action[Message] {
+	actions := make([]tui.Action[Message], len(descriptors))
+	for index, descriptor := range descriptors {
+		actions[index] = tui.NewAction[Message](descriptor, nil)
 	}
-	modifiers := event.Key.Modifiers
-	if modifiers.Alt || modifiers.Control || modifiers.Meta {
-		return filePickerAction{}, false
+	return actions
+}
+
+func filePickerActionResult[Message any](
+	action filePickerAction,
+	visible []int,
+	selected int,
+	viewportHeight int,
+	focusID tui.NodeID,
+	onSelect func(int) Message,
+	onOpen func(int) Message,
+	onBack func() Message,
+) tui.EventResult[Message] {
+	if len(visible) == 0 {
+		return tui.IgnoreResult[Message]()
+	}
+	selected = min(max(selected, 0), len(visible)-1)
+	result := tui.ConsumeResult[Message]().Focus(focusID)
+	switch action {
+	case filePickerActivate:
+		if onOpen == nil {
+			return tui.IgnoreResult[Message]()
+		}
+		return result.Emit(onOpen(visible[selected]))
+	case filePickerBack:
+		if onBack == nil {
+			return tui.IgnoreResult[Message]()
+		}
+		return result.Emit(onBack())
+	default:
+		position, ok := filePickerPositionForAction(selected, len(visible), viewportHeight, action)
+		if !ok {
+			return tui.IgnoreResult[Message]()
+		}
+		if position != selected {
+			result = result.Emit(onSelect(visible[position]))
+		}
+		return result
+	}
+}
+
+func filePickerPositionForAction(
+	selected, count, viewportHeight int,
+	action filePickerAction,
+) (int, bool) {
+	if count <= 0 {
+		return 0, false
 	}
 	selected = min(max(selected, 0), count-1)
-	switch event.Key.Code {
-	case vt.KeyUp:
-		return filePickerAction{position: max(selected-1, 0)}, true
-	case vt.KeyDown:
-		return filePickerAction{position: min(selected+1, count-1)}, true
-	case vt.KeyHome:
-		return filePickerAction{position: 0}, true
-	case vt.KeyEnd:
-		return filePickerAction{position: count - 1}, true
-	case vt.KeyPageUp, vt.KeyPageDown:
+	switch action {
+	case filePickerPrevious:
+		return max(selected-1, 0), true
+	case filePickerNext:
+		return min(selected+1, count-1), true
+	case filePickerFirst:
+		return 0, true
+	case filePickerLast:
+		return count - 1, true
+	case filePickerPreviousPage, filePickerNextPage:
 		step := viewportHeight
 		if step <= 0 {
 			step = min(count, 10)
 		}
-		if event.Key.Code == vt.KeyPageUp {
-			return filePickerAction{position: max(selected-step, 0)}, true
+		if action == filePickerPreviousPage {
+			return max(selected-step, 0), true
 		}
-		return filePickerAction{position: min(selected+step, count-1)}, true
-	case vt.KeyRight:
-		return filePickerAction{kind: filePickerOpen, position: selected}, true
-	case vt.KeyLeft, vt.KeyBackspace:
-		return filePickerAction{kind: filePickerBack, position: selected}, true
+		return min(selected+step, count-1), true
 	default:
-		return filePickerAction{}, false
+		return 0, false
 	}
+}
+
+func filePickerActionDescriptors(
+	available, hasOpen, hasBack bool,
+) [filePickerActionCount]tui.ActionDescriptor {
+	descriptors := defaultFilePickerActionDescriptors
+	for index, action := range filePickerActions {
+		enabled := available
+		if action == filePickerActivate {
+			enabled = enabled && hasOpen
+		} else if action == filePickerBack {
+			enabled = enabled && hasBack
+		}
+		availability := tui.ActionEnabled
+		if !enabled {
+			availability = tui.ActionDisabledPassThrough
+		}
+		descriptors[index] = descriptors[index].WithAvailability(availability)
+	}
+	return descriptors
+}
+
+func filePickerHasVisibleEntries(entries []FilePickerEntry, showHidden bool) bool {
+	for _, entry := range entries {
+		if showHidden || !entry.Hidden {
+			return true
+		}
+	}
+	return false
 }
 
 func filePickerVisibleIndices(entries []FilePickerEntry, showHidden bool) []int {

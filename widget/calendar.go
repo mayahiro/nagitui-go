@@ -62,6 +62,78 @@ func DefaultCalendarStyle() CalendarStyle {
 	}
 }
 
+const calendarActionCount = 9
+
+var defaultCalendarActionDescriptors = [calendarActionCount]tui.ActionDescriptor{
+	activateActionDescriptor,
+	tui.NewActionDescriptor(
+		SelectionPreviousDayActionID,
+		selectionPreviousDayActionLabel,
+		[]tui.KeyBinding{repeatableActionBinding(vt.KeyLeft)},
+	),
+	tui.NewActionDescriptor(
+		SelectionNextDayActionID,
+		selectionNextDayActionLabel,
+		[]tui.KeyBinding{repeatableActionBinding(vt.KeyRight)},
+	),
+	tui.NewActionDescriptor(
+		SelectionPreviousWeekActionID,
+		selectionPreviousWeekActionLabel,
+		[]tui.KeyBinding{repeatableActionBinding(vt.KeyUp)},
+	),
+	tui.NewActionDescriptor(
+		SelectionNextWeekActionID,
+		selectionNextWeekActionLabel,
+		[]tui.KeyBinding{repeatableActionBinding(vt.KeyDown)},
+	),
+	tui.NewActionDescriptor(
+		SelectionPreviousMonthActionID,
+		selectionPreviousMonthActionLabel,
+		[]tui.KeyBinding{repeatableActionBinding(vt.KeyPageUp)},
+	),
+	tui.NewActionDescriptor(
+		SelectionNextMonthActionID,
+		selectionNextMonthActionLabel,
+		[]tui.KeyBinding{repeatableActionBinding(vt.KeyPageDown)},
+	),
+	tui.NewActionDescriptor(
+		SelectionFirstDayOfMonthActionID,
+		selectionFirstDayOfMonthActionLabel,
+		[]tui.KeyBinding{repeatableActionBinding(vt.KeyHome)},
+	),
+	tui.NewActionDescriptor(
+		SelectionLastDayOfMonthActionID,
+		selectionLastDayOfMonthActionLabel,
+		[]tui.KeyBinding{repeatableActionBinding(vt.KeyEnd)},
+	),
+}
+
+type calendarAction uint8
+
+const (
+	calendarActivate calendarAction = iota
+	calendarPreviousDay
+	calendarNextDay
+	calendarPreviousWeek
+	calendarNextWeek
+	calendarPreviousMonth
+	calendarNextMonth
+	calendarFirstDayOfMonth
+	calendarLastDayOfMonth
+)
+
+var calendarActions = [calendarActionCount]calendarAction{
+	calendarActivate,
+	calendarPreviousDay,
+	calendarNextDay,
+	calendarPreviousWeek,
+	calendarNextWeek,
+	calendarPreviousMonth,
+	calendarNextMonth,
+	calendarFirstDayOfMonth,
+	calendarLastDayOfMonth,
+}
+
 // Calendar is a controlled month grid over proleptic Gregorian dates
 type Calendar[Message any] struct {
 	id           tui.NodeID
@@ -110,8 +182,15 @@ func (c Calendar[Message]) Style(style CalendarStyle) Calendar[Message] {
 	return c
 }
 
+// ActionDescriptors returns the ordered semantic actions declared by the root
+func (c Calendar[Message]) ActionDescriptors() []tui.ActionDescriptor {
+	descriptors := calendarActionDescriptors(c.enabled)
+	return append([]tui.ActionDescriptor(nil), descriptors[:]...)
+}
+
 // Node builds the public semantic node for this calendar
 func (c Calendar[Message]) Node() tui.Node[Message] {
+	descriptors := calendarActionDescriptors(c.enabled)
 	first := NewCalendarDate(c.year, c.month, 1)
 	active := calendarActiveDate(first, c.selected)
 	header := tui.Align(
@@ -130,7 +209,11 @@ func (c Calendar[Message]) Node() tui.Node[Message] {
 		days := make([]tui.Node[Message], 0, 7)
 		for weekday := 0; weekday < 7; weekday++ {
 			position := week*7 + weekday
-			date := addCalendarDays(first, position-offset)
+			date, supported := calendarGridDate(first, position-offset)
+			if !supported {
+				days = append(days, tui.Text[Message]("   ").WithLength(tui.Fixed(3)))
+				continue
+			}
 			inMonth := date.Year == first.Year && date.Month == first.Month
 			if !inMonth && !c.showAdjacent {
 				days = append(days, tui.Text[Message]("   ").WithLength(tui.Fixed(3)))
@@ -161,12 +244,22 @@ func (c Calendar[Message]) Node() tui.Node[Message] {
 					WithLength(tui.Fixed(3)).
 					Focusable(c.id).
 					WithFocusedStyle(c.style.Focused).
-					OnEvent(c.id, c.selectedHandler(first, active)))
+					OnActions(
+						c.id,
+						calendarSemanticActions(
+							descriptors,
+							first,
+							active,
+							c.id,
+							c.onSelect,
+						),
+					).
+					OnEvent(c.id, c.selectedPointerHandler()))
 				continue
 			}
 			selectedDate := date
 			days = append(days, dayNode.WithID(dayID).OnEvent(dayID, func(event vt.Event) tui.EventResult[Message] {
-				if !isActivationEvent(event) {
+				if !isPointerActivationEvent(event) {
 					return tui.IgnoreResult[Message]()
 				}
 				return tui.ConsumeResult[Message]().Focus(c.id).Emit(c.onSelect(selectedDate))
@@ -176,26 +269,63 @@ func (c Calendar[Message]) Node() tui.Node[Message] {
 	}
 	root := tui.Column(rows...)
 	if !c.enabled {
-		return root.WithID(c.id)
+		return root.WithID(c.id).OnActions(c.id, disabledCalendarActions[Message](descriptors))
 	}
 	return root
 }
 
-func (c Calendar[Message]) selectedHandler(displayed, selected CalendarDate) func(vt.Event) tui.EventResult[Message] {
+func (c Calendar[Message]) selectedPointerHandler() func(vt.Event) tui.EventResult[Message] {
 	return func(event vt.Event) tui.EventResult[Message] {
-		if isActivationEvent(event) {
-			return tui.ConsumeResult[Message]().Focus(c.id)
-		}
-		next, handled := calendarDateForEvent(displayed, selected, event)
-		if !handled {
+		if !isPointerActivationEvent(event) {
 			return tui.IgnoreResult[Message]()
 		}
-		result := tui.ConsumeResult[Message]().Focus(c.id)
-		if next != selected {
-			result = result.Emit(c.onSelect(next))
-		}
+		return tui.ConsumeResult[Message]().Focus(c.id)
+	}
+}
+
+func calendarSemanticActions[Message any](
+	descriptors [calendarActionCount]tui.ActionDescriptor,
+	displayed CalendarDate,
+	selected CalendarDate,
+	focusID tui.NodeID,
+	onSelect func(CalendarDate) Message,
+) []tui.Action[Message] {
+	actions := make([]tui.Action[Message], len(descriptors))
+	for index, descriptor := range descriptors {
+		action := calendarActions[index]
+		actions[index] = tui.NewAction(descriptor, func(tui.ActionEvent) tui.EventResult[Message] {
+			return calendarActionResult(action, displayed, selected, focusID, onSelect)
+		})
+	}
+	return actions
+}
+
+func disabledCalendarActions[Message any](
+	descriptors [calendarActionCount]tui.ActionDescriptor,
+) []tui.Action[Message] {
+	actions := make([]tui.Action[Message], len(descriptors))
+	for index, descriptor := range descriptors {
+		actions[index] = tui.NewAction[Message](descriptor, nil)
+	}
+	return actions
+}
+
+func calendarActionResult[Message any](
+	action calendarAction,
+	displayed CalendarDate,
+	selected CalendarDate,
+	focusID tui.NodeID,
+	onSelect func(CalendarDate) Message,
+) tui.EventResult[Message] {
+	result := tui.ConsumeResult[Message]().Focus(focusID)
+	next, ok := calendarDateForAction(displayed, selected, action)
+	if !ok {
 		return result
 	}
+	if next != selected {
+		result = result.Emit(onSelect(next))
+	}
+	return result
 }
 
 func normalizeCalendarDate(date CalendarDate) CalendarDate {
@@ -267,6 +397,16 @@ func addCalendarMonths(date CalendarDate, months int) CalendarDate {
 	return CalendarDate{Year: year, Month: uint8(month), Day: uint8(day)}
 }
 
+func calendarGridDate(first CalendarDate, dayOffset int) (CalendarDate, bool) {
+	if first.Year == 1 && first.Month == 1 && dayOffset < 0 {
+		return CalendarDate{}, false
+	}
+	if first.Year == 9999 && first.Month == 12 && dayOffset >= calendarDaysInMonth(first.Year, int(first.Month)) {
+		return CalendarDate{}, false
+	}
+	return addCalendarDays(first, dayOffset), true
+}
+
 func calendarWeekday(date CalendarDate) int {
 	date = normalizeCalendarDate(date)
 	offsets := [...]int{0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4}
@@ -292,36 +432,41 @@ func calendarWeekdayLabels(start CalendarWeekStart) []string {
 	return []string{"Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"}
 }
 
-func calendarDateForEvent(displayed, selected CalendarDate, event vt.Event) (CalendarDate, bool) {
-	if event.Kind != vt.EventKey || event.Key.Action == vt.KeyRelease {
-		return CalendarDate{}, false
-	}
-	modifiers := event.Key.Modifiers
-	if modifiers.Alt || modifiers.Control || modifiers.Meta {
-		return CalendarDate{}, false
-	}
+func calendarDateForAction(displayed, selected CalendarDate, action calendarAction) (CalendarDate, bool) {
 	displayed = NewCalendarDate(displayed.Year, int(displayed.Month), 1)
 	selected = calendarActiveDate(displayed, selected)
-	switch event.Key.Code {
-	case vt.KeyLeft:
+	switch action {
+	case calendarPreviousDay:
 		return addCalendarDays(selected, -1), true
-	case vt.KeyRight:
+	case calendarNextDay:
 		return addCalendarDays(selected, 1), true
-	case vt.KeyUp:
+	case calendarPreviousWeek:
 		return addCalendarDays(selected, -7), true
-	case vt.KeyDown:
+	case calendarNextWeek:
 		return addCalendarDays(selected, 7), true
-	case vt.KeyPageUp:
+	case calendarPreviousMonth:
 		return addCalendarMonths(selected, -1), true
-	case vt.KeyPageDown:
+	case calendarNextMonth:
 		return addCalendarMonths(selected, 1), true
-	case vt.KeyHome:
+	case calendarFirstDayOfMonth:
 		return displayed, true
-	case vt.KeyEnd:
+	case calendarLastDayOfMonth:
 		return CalendarDate{Year: displayed.Year, Month: displayed.Month, Day: uint8(calendarDaysInMonth(displayed.Year, int(displayed.Month)))}, true
 	default:
 		return CalendarDate{}, false
 	}
+}
+
+func calendarActionDescriptors(enabled bool) [calendarActionCount]tui.ActionDescriptor {
+	availability := tui.ActionEnabled
+	if !enabled {
+		availability = tui.ActionDisabledPassThrough
+	}
+	descriptors := defaultCalendarActionDescriptors
+	for index := range descriptors {
+		descriptors[index] = descriptors[index].WithAvailability(availability)
+	}
+	return descriptors
 }
 
 func calendarDateID(root tui.NodeID, date CalendarDate) tui.NodeID {

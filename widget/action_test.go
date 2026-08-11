@@ -17,6 +17,8 @@ var listHasVisibleItemsSink bool
 var commandPaletteActionDescriptorSink [5]tui.ActionDescriptor
 var commandPaletteCommandActionDescriptorSink tui.ActionDescriptor
 var commandPaletteHasVisibleCommandSink bool
+var paginatorActionDescriptorSink [4]tui.ActionDescriptor
+var filePickerActionDescriptorSink [filePickerActionCount]tui.ActionDescriptor
 
 func TestActivateActionDescriptorReuseDoesNotAllocate(t *testing.T) {
 	actionDescriptorSink = ActivateActionDescriptor()
@@ -25,6 +27,36 @@ func TestActivateActionDescriptorReuseDoesNotAllocate(t *testing.T) {
 	})
 	if allocations != 0 {
 		t.Fatalf("descriptor allocations = %f, want 0", allocations)
+	}
+}
+
+func TestDismissActionDescriptorReuseDoesNotAllocate(t *testing.T) {
+	actionDescriptorSink = DismissActionDescriptor()
+	allocations := testing.AllocsPerRun(1_000, func() {
+		actionDescriptorSink = DismissActionDescriptor()
+	})
+	if allocations != 0 {
+		t.Fatalf("descriptor allocations = %f, want 0", allocations)
+	}
+}
+
+func TestPaginatorActionDescriptorDefaultsDoNotAllocate(t *testing.T) {
+	paginatorActionDescriptorSink = paginatorActionDescriptors(true)
+	allocations := testing.AllocsPerRun(1_000, func() {
+		paginatorActionDescriptorSink = paginatorActionDescriptors(true)
+	})
+	if allocations != 0 {
+		t.Fatalf("Paginator descriptor allocations = %f, want 0", allocations)
+	}
+}
+
+func TestFilePickerActionDescriptorDefaultsDoNotAllocate(t *testing.T) {
+	filePickerActionDescriptorSink = filePickerActionDescriptors(true, true, true)
+	allocations := testing.AllocsPerRun(1_000, func() {
+		filePickerActionDescriptorSink = filePickerActionDescriptors(true, true, true)
+	})
+	if allocations != 0 {
+		t.Fatalf("FilePicker descriptor allocations = %f, want 0", allocations)
 	}
 }
 
