@@ -126,9 +126,33 @@ type interactiveKind uint8
 const (
 	interactiveGeneric interactiveKind = iota
 	interactiveTextInput
-	interactiveScrollViewport
+	interactiveScrollViewportVertical
+	interactiveScrollViewportHorizontal
 	interactiveModal
 )
+
+func scrollInteractiveKind(axis ScrollAxis) interactiveKind {
+	if axis == ScrollAxisHorizontal {
+		return interactiveScrollViewportHorizontal
+	}
+	return interactiveScrollViewportVertical
+}
+
+func (k interactiveKind) scrollAxis() (ScrollAxis, bool) {
+	switch k {
+	case interactiveScrollViewportVertical:
+		return ScrollAxisVertical, true
+	case interactiveScrollViewportHorizontal:
+		return ScrollAxisHorizontal, true
+	default:
+		return 0, false
+	}
+}
+
+func (k interactiveKind) isScrollViewport() bool {
+	_, ok := k.scrollAxis()
+	return ok
+}
 
 type nodeRecord struct {
 	id         NodeID
@@ -207,15 +231,23 @@ func (t *treeIndex) record(id NodeID) (nodeRecord, bool) {
 }
 
 func (t *treeIndex) route(target NodeID, hasTarget bool) []NodeID {
+	return t.routeInto(target, hasTarget, nil)
+}
+
+func (t *treeIndex) routeInto(target NodeID, hasTarget bool, route []NodeID) []NodeID {
 	if t.hasModal && (!hasTarget || !t.isWithin(target, t.activeModal)) {
 		target = t.activeModal
 		hasTarget = true
 	}
-	return t.rawRoute(target, hasTarget)
+	return t.rawRouteInto(target, hasTarget, route)
 }
 
 func (t *treeIndex) rawRoute(target NodeID, hasTarget bool) []NodeID {
-	var route []NodeID
+	return t.rawRouteInto(target, hasTarget, nil)
+}
+
+func (t *treeIndex) rawRouteInto(target NodeID, hasTarget bool, route []NodeID) []NodeID {
+	route = route[:0]
 	current := target
 	remaining := len(t.records) + 1
 	for hasTarget && remaining > 0 {
@@ -261,6 +293,16 @@ func (t *treeIndex) focusScope() []NodeID {
 		}
 	}
 	return focus
+}
+
+func (t *treeIndex) focusActionOwner(focused NodeID, hasFocus bool) (NodeID, bool) {
+	if hasFocus {
+		return focused, true
+	}
+	if t.hasModal {
+		return t.activeModal, true
+	}
+	return t.root, t.hasRoot
 }
 
 func (t *treeIndex) allowsFocus(id NodeID) bool {

@@ -81,33 +81,35 @@ func (f Frame) Operations() []vt.TerminalOp {
 
 // Runtime is a single-goroutine application runtime with a bounded FIFO queue
 type Runtime[Message any] struct {
-	app                  App[Message]
-	clock                Clock
-	size                 Size
-	queue                []queuedMessage[Message]
-	queueCapacity        int
-	dirty                bool
-	urgentFrame          bool
-	minimumFrameInterval time.Duration
-	lastFrame            Timestamp
-	hasLastFrame         bool
-	previousSurface      *surface.Surface
-	previousReusable     bool
-	spareSurface         *surface.Surface
-	interaction          *InteractionState
-	viewTree             *Node[Message]
-	treeIndex            treeIndex
-	nextTreeIndex        treeIndex
-	actionIndex          actionIndex[Message]
-	nextActionIndex      actionIndex[Message]
-	resolvedActionRoute  *resolvedActionRoute[Message]
-	effects              *effectSupervisor[Message]
-	subscriptions        *subscriptionSupervisor[Message]
-	subscriptionsDirty   bool
-	exitRequested        bool
-	pendingFocus         NodeID
-	hasPendingFocus      bool
-	pendingScroll        []pendingScrollRequest
+	app                     App[Message]
+	clock                   Clock
+	size                    Size
+	queue                   []queuedMessage[Message]
+	queueCapacity           int
+	dirty                   bool
+	urgentFrame             bool
+	minimumFrameInterval    time.Duration
+	lastFrame               Timestamp
+	hasLastFrame            bool
+	previousSurface         *surface.Surface
+	previousReusable        bool
+	spareSurface            *surface.Surface
+	interaction             *InteractionState
+	viewTree                *Node[Message]
+	treeIndex               treeIndex
+	nextTreeIndex           treeIndex
+	actionIndex             actionIndex[Message]
+	nextActionIndex         actionIndex[Message]
+	resolvedActionRoute     resolvedActionRoute[Message]
+	nextResolvedActionRoute resolvedActionRoute[Message]
+	hasResolvedActionRoute  bool
+	effects                 *effectSupervisor[Message]
+	subscriptions           *subscriptionSupervisor[Message]
+	subscriptionsDirty      bool
+	exitRequested           bool
+	pendingFocus            NodeID
+	hasPendingFocus         bool
+	pendingScroll           []pendingScrollRequest
 }
 
 type pendingScrollRequest struct {
@@ -412,7 +414,7 @@ func (r *Runtime[Message]) applyPendingInteraction(index treeIndex) {
 	}
 	for _, request := range r.pendingScroll {
 		record, ok := index.record(request.id)
-		if ok && record.kind == interactiveScrollViewport {
+		if ok && record.kind.isScrollViewport() {
 			r.interaction.requestScroll(request.id, request.offset)
 		}
 	}
@@ -497,16 +499,22 @@ func (r *Runtime[Message]) SetScrollOffset(id NodeID, offset ScrollOffset) bool 
 // target-to-root route
 //
 // Groups outside the nearest KeyScopeStopAtScope boundary are omitted. Each
-// projection contains the complete active root-to-target scope path.
+// projection contains the complete active root-to-target scope path. At one
+// Node, a Node-declared group precedes a Core semantic group, so the same owner
+// may occur twice.
 func (r *Runtime[Message]) ActiveActionGroups() ([]ResolvedActions, error) {
 	if err := r.ensureTree(); err != nil {
 		return nil, err
 	}
 	route := r.treeIndex.route(r.interaction.focused, r.interaction.hasFocus)
-	if err := r.ensureActionRoute(route); err != nil {
+	focusOwner, hasFocusOwner := r.treeIndex.focusActionOwner(
+		r.interaction.focused,
+		r.interaction.hasFocus,
+	)
+	if err := r.ensureActionRoute(route, focusOwner, hasFocusOwner); err != nil {
 		return nil, err
 	}
-	if r.resolvedActionRoute == nil {
+	if !r.hasResolvedActionRoute {
 		return nil, nil
 	}
 	return r.resolvedActionRoute.actionGroups(), nil
@@ -518,18 +526,13 @@ func (r *Runtime[Message]) DispatchEvent(event vt.Event) (EventDispatch, error) 
 	if err := r.ensureTree(); err != nil {
 		return EventDispatch{}, err
 	}
-	if event.Kind == vt.EventKey && event.Key.Action != vt.KeyRelease &&
-		event.Key.Code == vt.KeyTab && !event.Key.Modifiers.Alt &&
-		!event.Key.Modifiers.Control && !event.Key.Modifiers.Meta {
-		focused := optionalNodeID(r.interaction.focused, r.interaction.hasFocus)
-		r.interaction.focused, r.interaction.hasFocus = traverseFocus(
-			r.treeIndex.focusScope(),
-			focused,
-			!event.Key.Modifiers.Shift,
-		)
-		r.dirty = true
-		r.urgentFrame = true
-		return EventDispatch{consumed: true, redraw: true}, nil
+	if _, hasFocusOwner := r.treeIndex.focusActionOwner(
+		r.interaction.focused,
+		r.interaction.hasFocus,
+	); !hasFocusOwner {
+		if action, ok := defaultFocusAction(event); ok {
+			return r.dispatchLegacyFocusAction(action), nil
+		}
 	}
 
 	var target NodeID
@@ -555,13 +558,34 @@ func (r *Runtime[Message]) DispatchEvent(event vt.Event) (EventDispatch, error) 
 	}
 
 	route := r.treeIndex.route(target, hasTarget)
-	if err := r.ensureActionRoute(route); err != nil {
+	focusOwner, hasFocusOwner := r.treeIndex.focusActionOwner(
+		r.interaction.focused,
+		r.interaction.hasFocus,
+	)
+	if err := r.ensureActionRoute(route, focusOwner, hasFocusOwner); err != nil {
 		return EventDispatch{}, err
 	}
 	dispatch := EventDispatch{}
 	for index, id := range route {
-		if r.resolvedActionRoute != nil {
-			if result, matched := r.resolvedActionRoute.matchEvent(index, event); matched {
+		if r.hasResolvedActionRoute {
+			if result, matched := r.resolvedActionRoute.matchDeclaredEvent(index, event); matched {
+				if err := r.applyEventResult(result, &dispatch); err != nil {
+					return dispatch, err
+				}
+				if dispatch.consumed {
+					break
+				}
+			}
+			action, matched := r.resolvedActionRoute.matchCoreEvent(index, event)
+			var result EventResult[Message]
+			var handled bool
+			switch matched {
+			case coreActionConsume:
+				result, handled = ConsumeResult[Message](), true
+			case coreActionInvoke:
+				result, handled = r.handleCoreAction(id, action)
+			}
+			if handled {
 				if err := r.applyEventResult(result, &dispatch); err != nil {
 					return dispatch, err
 				}
@@ -576,8 +600,8 @@ func (r *Runtime[Message]) DispatchEvent(event vt.Event) (EventDispatch, error) 
 		switch {
 		case record.kind == interactiveTextInput && index == 0:
 			result, handled = r.handleTextInput(id, event)
-		case record.kind == interactiveScrollViewport:
-			result, handled = r.handleScroll(id, event)
+		case record.kind.isScrollViewport():
+			result, handled = r.handleScrollMouse(id, event)
 		}
 		if handled {
 			if err := r.applyEventResult(result, &dispatch); err != nil {
@@ -599,20 +623,75 @@ func (r *Runtime[Message]) DispatchEvent(event vt.Event) (EventDispatch, error) 
 	return dispatch, nil
 }
 
-func (r *Runtime[Message]) ensureActionRoute(route []NodeID) error {
-	if !r.actionIndex.hasActions {
-		r.resolvedActionRoute = nil
+func (r *Runtime[Message]) ensureActionRoute(
+	route []NodeID,
+	focusOwner NodeID,
+	hasFocusOwner bool,
+) error {
+	if !routeNeedsActionResolution(
+		route,
+		&r.actionIndex,
+		&r.treeIndex,
+		focusOwner,
+		hasFocusOwner,
+	) {
+		r.publishResolvedActionRoute(false)
 		return nil
 	}
-	if r.resolvedActionRoute.matchesRoute(route) {
+	if r.hasResolvedActionRoute && r.resolvedActionRoute.matchesRoute(route, focusOwner, hasFocusOwner) {
 		return nil
 	}
-	resolved, err := resolveActionRoute(route, &r.actionIndex)
+	err := r.nextResolvedActionRoute.resolveInto(
+		route,
+		&r.actionIndex,
+		&r.treeIndex,
+		focusOwner,
+		hasFocusOwner,
+	)
 	if err != nil {
 		return err
 	}
-	r.resolvedActionRoute = resolved
+	r.publishResolvedActionRoute(true)
 	return nil
+}
+
+func (r *Runtime[Message]) publishResolvedActionRoute(active bool) {
+	r.resolvedActionRoute, r.nextResolvedActionRoute =
+		r.nextResolvedActionRoute, r.resolvedActionRoute
+	r.hasResolvedActionRoute = active
+}
+
+func (r *Runtime[Message]) dispatchLegacyFocusAction(action coreAction) EventDispatch {
+	forward := action == coreFocusNext
+	focused := optionalNodeID(r.interaction.focused, r.interaction.hasFocus)
+	r.interaction.focused, r.interaction.hasFocus = traverseFocus(
+		r.treeIndex.focusScope(),
+		focused,
+		forward,
+	)
+	r.dirty = true
+	r.urgentFrame = true
+	return EventDispatch{consumed: true, redraw: true}
+}
+
+func (r *Runtime[Message]) handleCoreAction(
+	id NodeID,
+	action coreAction,
+) (EventResult[Message], bool) {
+	switch action {
+	case coreFocusNext, coreFocusPrevious:
+		focused := optionalNodeID(r.interaction.focused, r.interaction.hasFocus)
+		r.interaction.focused, r.interaction.hasFocus = traverseFocus(
+			r.treeIndex.focusScope(),
+			focused,
+			action == coreFocusNext,
+		)
+		r.dirty = true
+		r.urgentFrame = true
+		return ConsumeResult[Message]().Redraw(), true
+	default:
+		return r.handleScrollAction(id, action)
+	}
 }
 
 func (r *Runtime[Message]) handleTextInput(id NodeID, event vt.Event) (EventResult[Message], bool) {
@@ -673,16 +752,12 @@ func (r *Runtime[Message]) handleTextInput(id NodeID, event vt.Event) (EventResu
 	return result, true
 }
 
-func (r *Runtime[Message]) handleScroll(id NodeID, event vt.Event) (EventResult[Message], bool) {
+func (r *Runtime[Message]) handleScrollMouse(id NodeID, event vt.Event) (EventResult[Message], bool) {
 	state, ok := r.interaction.ScrollState(id)
 	if !ok {
 		return EventResult[Message]{}, false
 	}
 	options, ok := r.viewTree.scrollOptions(id)
-	if !ok {
-		return EventResult[Message]{}, false
-	}
-	viewport, ok := r.treeIndex.record(id)
 	if !ok {
 		return EventResult[Message]{}, false
 	}
@@ -714,41 +789,69 @@ func (r *Runtime[Message]) handleScroll(id NodeID, event vt.Event) (EventResult[
 		default:
 			handled = false
 		}
-	case event.Kind == vt.EventKey && event.Key.Action != vt.KeyRelease:
-		switch event.Key.Code {
-		case vt.KeyPageUp:
-			handled = options.Axis.allowsVertical()
-			if handled {
-				next.Y -= min(next.Y, max(viewport.rect.Height, uint32(1)))
-			}
-		case vt.KeyPageDown:
-			handled = options.Axis.allowsVertical()
-			if handled {
-				next.Y = saturatingAdd32(next.Y, max(viewport.rect.Height, uint32(1)))
-			}
-		case vt.KeyHome:
-			if options.Axis.allowsVertical() {
-				next.Y = 0
-			} else if options.Axis.allowsHorizontal() {
-				next.X = 0
-			} else {
-				handled = false
-			}
-		case vt.KeyEnd:
-			if options.Axis.allowsVertical() {
-				next.Y = state.Maximum.Y
-			} else if options.Axis.allowsHorizontal() {
-				next.X = state.Maximum.X
-			} else {
-				handled = false
-			}
-		default:
-			handled = false
-		}
 	default:
 		handled = false
 	}
 	if !handled {
+		return EventResult[Message]{}, false
+	}
+	state, changed, _ := r.interaction.requestScroll(id, next)
+	r.dirty = true
+	r.urgentFrame = true
+	result := ConsumeResult[Message]().Redraw()
+	if changed {
+		if message, ok := r.viewTree.scrollMessage(id, state); ok {
+			result = result.Emit(message)
+		}
+	}
+	return result, true
+}
+
+func (r *Runtime[Message]) handleScrollAction(
+	id NodeID,
+	action coreAction,
+) (EventResult[Message], bool) {
+	state, ok := r.interaction.ScrollState(id)
+	if !ok {
+		return EventResult[Message]{}, false
+	}
+	options, ok := r.viewTree.scrollOptions(id)
+	if !ok {
+		return EventResult[Message]{}, false
+	}
+	viewport, ok := r.treeIndex.record(id)
+	if !ok {
+		return EventResult[Message]{}, false
+	}
+	next := state.Offset
+	switch action {
+	case coreScrollPageUp:
+		if !options.Axis.allowsVertical() {
+			return EventResult[Message]{}, false
+		}
+		next.Y -= min(next.Y, max(viewport.rect.Height, uint32(1)))
+	case coreScrollPageDown:
+		if !options.Axis.allowsVertical() {
+			return EventResult[Message]{}, false
+		}
+		next.Y = saturatingAdd32(next.Y, max(viewport.rect.Height, uint32(1)))
+	case coreScrollStart:
+		if options.Axis.allowsVertical() {
+			next.Y = 0
+		} else if options.Axis.allowsHorizontal() {
+			next.X = 0
+		} else {
+			return EventResult[Message]{}, false
+		}
+	case coreScrollEnd:
+		if options.Axis.allowsVertical() {
+			next.Y = state.Maximum.Y
+		} else if options.Axis.allowsHorizontal() {
+			next.X = state.Maximum.X
+		} else {
+			return EventResult[Message]{}, false
+		}
+	default:
 		return EventResult[Message]{}, false
 	}
 	state, changed, _ := r.interaction.requestScroll(id, next)
@@ -916,14 +1019,20 @@ func (r *Runtime[Message]) ensureTree() error {
 	if err := r.ensureFocusedVisible(&view, index, actions); err != nil {
 		return err
 	}
-	resolved, err := resolveFrameActions(index, actions, r.interaction.focused, r.interaction.hasFocus)
+	hasResolved, err := resolveFrameActionsInto(
+		index,
+		actions,
+		r.interaction.focused,
+		r.interaction.hasFocus,
+		&r.nextResolvedActionRoute,
+	)
 	if err != nil {
 		return err
 	}
 	r.viewTree = &view
 	r.treeIndex, r.nextTreeIndex = r.nextTreeIndex, r.treeIndex
 	r.actionIndex, r.nextActionIndex = r.nextActionIndex, r.actionIndex
-	r.resolvedActionRoute = resolved
+	r.publishResolvedActionRoute(hasResolved)
 	return nil
 }
 
@@ -963,7 +1072,13 @@ func (r *Runtime[Message]) renderIfDirty(recycleSurface bool) (*Frame, error) {
 	if err := r.ensureFocusedVisible(&view, index, actions); err != nil {
 		return nil, err
 	}
-	resolved, err := resolveFrameActions(index, actions, r.interaction.focused, r.interaction.hasFocus)
+	hasResolved, err := resolveFrameActionsInto(
+		index,
+		actions,
+		r.interaction.focused,
+		r.interaction.hasFocus,
+		&r.nextResolvedActionRoute,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -993,7 +1108,7 @@ func (r *Runtime[Message]) renderIfDirty(recycleSurface bool) (*Frame, error) {
 	r.viewTree = &view
 	r.treeIndex, r.nextTreeIndex = r.nextTreeIndex, r.treeIndex
 	r.actionIndex, r.nextActionIndex = r.nextActionIndex, r.actionIndex
-	r.resolvedActionRoute = resolved
+	r.publishResolvedActionRoute(hasResolved)
 	r.dirty = false
 	r.urgentFrame = false
 	r.lastFrame = now
@@ -1005,19 +1120,25 @@ func (r *Runtime[Message]) renderIfDirty(recycleSurface bool) (*Frame, error) {
 	}, nil
 }
 
-func resolveFrameActions[Message any](
+func resolveFrameActionsInto[Message any](
 	tree *treeIndex,
 	actions *actionIndex[Message],
 	target NodeID,
 	hasTarget bool,
-) (*resolvedActionRoute[Message], error) {
+	resolved *resolvedActionRoute[Message],
+) (bool, error) {
 	if err := validateActionOwners(tree, actions); err != nil {
-		return nil, err
+		return false, err
 	}
-	if !actions.hasActions {
-		return nil, nil
-	}
-	return resolveActionRoute(tree.route(target, hasTarget), actions)
+	focusOwner, hasFocusOwner := tree.focusActionOwner(target, hasTarget)
+	return resolved.resolveTreeRouteInto(
+		target,
+		hasTarget,
+		actions,
+		tree,
+		focusOwner,
+		hasFocusOwner,
+	)
 }
 
 func (r *Runtime[Message]) terminalOperationsIfDirty() ([]vt.TerminalOp, error) {

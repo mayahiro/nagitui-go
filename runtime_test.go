@@ -188,7 +188,7 @@ func TestDispatchRouteCacheHasNoPerEventActionResolutionAllocation(t *testing.T)
 		Code: vt.KeyCharacter, Character: 'x', Action: vt.KeyPress,
 	}}
 	for _, withAction := range []bool{false, true} {
-		name := "actionless"
+		name := "cached-core-action"
 		if withAction {
 			name = "cached-action"
 		}

@@ -86,6 +86,7 @@ func TestListAndTableActionsMatchSharedFixtures(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				groups = nodeDeclaredActionGroups(groups)
 				if len(groups) != 1 || groups[0].Owner() != tui.NewNodeID("root") {
 					t.Fatalf("active action groups = %#v", groups)
 				}

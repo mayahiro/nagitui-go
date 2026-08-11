@@ -83,6 +83,7 @@ func TestTabsActionsMatchSharedFixtures(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				groups = nodeDeclaredActionGroups(groups)
 				if len(groups) != 2 {
 					t.Fatalf("active action groups = %d, want 2", len(groups))
 				}

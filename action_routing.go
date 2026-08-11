@@ -76,8 +76,17 @@ func validateActionOwners[Message any](tree *treeIndex, actions *actionIndex[Mes
 }
 
 type resolvedActionRoute[Message any] struct {
-	route  []NodeID
-	groups []*resolvedActionGroup[Message]
+	route         []NodeID
+	focusOwner    NodeID
+	hasFocusOwner bool
+	groups        []resolvedRouteGroups[Message]
+}
+
+type resolvedRouteGroups[Message any] struct {
+	declared    resolvedActionGroup[Message]
+	hasDeclared bool
+	core        resolvedCoreActionGroup
+	hasCore     bool
 }
 
 type resolvedActionGroup[Message any] struct {
@@ -85,22 +94,56 @@ type resolvedActionGroup[Message any] struct {
 	resolved ResolvedActions
 }
 
-func resolveActionRoute[Message any](
+type resolvedCoreActionGroup struct {
+	actions  []coreAction
+	resolved ResolvedActions
+}
+
+func (r *resolvedActionRoute[Message]) resolveInto(
 	route []NodeID,
 	actions *actionIndex[Message],
-) (*resolvedActionRoute[Message], error) {
-	scopes := scopesForRoute(actions, route)
-	allowed := len(route)
-	for index, id := range route {
-		record, ok := actions.record(id)
-		if ok && record.scope != nil && record.scope.propagation == KeyScopeStopAtScope {
-			allowed = index + 1
-			break
-		}
+	tree *treeIndex,
+	focusOwner NodeID,
+	hasFocusOwner bool,
+) error {
+	r.route = append(r.route[:0], route...)
+	return r.resolveGroups(actions, tree, focusOwner, hasFocusOwner)
+}
+
+func (r *resolvedActionRoute[Message]) resolveTreeRouteInto(
+	target NodeID,
+	hasTarget bool,
+	actions *actionIndex[Message],
+	tree *treeIndex,
+	focusOwner NodeID,
+	hasFocusOwner bool,
+) (bool, error) {
+	r.route = tree.routeInto(target, hasTarget, r.route)
+	if !routeNeedsActionResolution(r.route, actions, tree, focusOwner, hasFocusOwner) {
+		r.focusOwner = ""
+		r.hasFocusOwner = false
+		r.clearGroups()
+		return false, nil
 	}
-	resolved := &resolvedActionRoute[Message]{
-		route:  append([]NodeID(nil), route...),
-		groups: make([]*resolvedActionGroup[Message], len(route)),
+	if err := r.resolveGroups(actions, tree, focusOwner, hasFocusOwner); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (r *resolvedActionRoute[Message]) resolveGroups(
+	actions *actionIndex[Message],
+	tree *treeIndex,
+	focusOwner NodeID,
+	hasFocusOwner bool,
+) error {
+	scopes := scopesForRoute(actions, r.route)
+	allowed := allowedActionRouteLength(r.route, actions)
+	r.clearGroups()
+	if cap(r.groups) < len(r.route) {
+		r.groups = make([]resolvedRouteGroups[Message], len(r.route))
+	} else {
+		r.groups = r.groups[:len(r.route)]
 	}
 	// Records follow semantic tree order, fixing which conflict is returned
 	// when more than one active group is invalid
@@ -109,24 +152,60 @@ func resolveActionRoute[Message any](
 		if len(owner.actions) == 0 {
 			continue
 		}
-		routeIndex := indexNodeID(route[:allowed], owner.id)
+		routeIndex := indexNodeID(r.route[:allowed], owner.id)
 		if routeIndex < 0 {
 			continue
 		}
 		group, err := ResolveActions(owner.id, owner.descriptors, scopes)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		resolved.groups[routeIndex] = &resolvedActionGroup[Message]{
+		r.groups[routeIndex].declared = resolvedActionGroup[Message]{
 			actions:  owner.actions,
 			resolved: group,
 		}
+		r.groups[routeIndex].hasDeclared = true
 	}
-	return resolved, nil
+	for routeIndex, owner := range r.route[:allowed] {
+		record, _ := tree.record(owner)
+		scrollAxis, hasScroll := record.kind.scrollAxis()
+		group, ok := coreActionGroupFor(
+			hasFocusOwner && owner == focusOwner,
+			scrollAxis,
+			hasScroll,
+		)
+		if !ok {
+			continue
+		}
+		resolvedGroup, err := resolveCoreActionGroup(owner, group, scopes)
+		if err != nil {
+			return err
+		}
+		r.groups[routeIndex].core = resolvedCoreActionGroup{
+			actions:  group.actions,
+			resolved: resolvedGroup,
+		}
+		r.groups[routeIndex].hasCore = true
+	}
+	r.focusOwner = focusOwner
+	r.hasFocusOwner = hasFocusOwner
+	return nil
 }
 
-func (r *resolvedActionRoute[Message]) matchesRoute(route []NodeID) bool {
-	if r == nil || len(r.route) != len(route) {
+func (r *resolvedActionRoute[Message]) clearGroups() {
+	for index := range r.groups {
+		r.groups[index] = resolvedRouteGroups[Message]{}
+	}
+	r.groups = r.groups[:0]
+}
+
+func (r *resolvedActionRoute[Message]) matchesRoute(
+	route []NodeID,
+	focusOwner NodeID,
+	hasFocusOwner bool,
+) bool {
+	if r == nil || len(r.route) != len(route) ||
+		r.hasFocusOwner != hasFocusOwner || hasFocusOwner && r.focusOwner != focusOwner {
 		return false
 	}
 	for index := range route {
@@ -137,18 +216,18 @@ func (r *resolvedActionRoute[Message]) matchesRoute(route []NodeID) bool {
 	return true
 }
 
-func (r *resolvedActionRoute[Message]) matchEvent(
+func (r *resolvedActionRoute[Message]) matchDeclaredEvent(
 	routeIndex int,
 	event vt.Event,
 ) (EventResult[Message], bool) {
-	if routeIndex < 0 || routeIndex >= len(r.groups) || r.groups[routeIndex] == nil {
+	if routeIndex < 0 || routeIndex >= len(r.groups) || !r.groups[routeIndex].hasDeclared {
 		return EventResult[Message]{}, false
 	}
 	stroke, ok := KeyStrokeFromEvent(event)
 	if !ok {
 		return EventResult[Message]{}, false
 	}
-	group := r.groups[routeIndex]
+	group := &r.groups[routeIndex].declared
 	for actionIndex, resolved := range group.resolved.actions {
 		matched := false
 		for _, binding := range resolved.bindings {
@@ -175,14 +254,85 @@ func (r *resolvedActionRoute[Message]) matchEvent(
 	return EventResult[Message]{}, false
 }
 
+type coreActionMatch uint8
+
+const (
+	coreActionNone coreActionMatch = iota
+	coreActionConsume
+	coreActionInvoke
+)
+
+func (r *resolvedActionRoute[Message]) matchCoreEvent(
+	routeIndex int,
+	event vt.Event,
+) (coreAction, coreActionMatch) {
+	if routeIndex < 0 || routeIndex >= len(r.groups) || !r.groups[routeIndex].hasCore {
+		return 0, coreActionNone
+	}
+	group := &r.groups[routeIndex].core
+	for actionIndex, resolved := range group.resolved.actions {
+		matched := false
+		for _, binding := range resolved.bindings {
+			if binding.Matches(event) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+		switch resolved.availability {
+		case ActionEnabled:
+			return group.actions[actionIndex], coreActionInvoke
+		case ActionDisabledConsume:
+			return 0, coreActionConsume
+		case ActionDisabledPassThrough:
+			continue
+		}
+	}
+	return 0, coreActionNone
+}
+
 func (r *resolvedActionRoute[Message]) actionGroups() []ResolvedActions {
-	groups := make([]ResolvedActions, 0, len(r.groups))
+	groups := make([]ResolvedActions, 0, len(r.groups)*2)
 	for _, group := range r.groups {
-		if group != nil {
-			groups = append(groups, group.resolved)
+		if group.hasDeclared {
+			groups = append(groups, group.declared.resolved)
+		}
+		if group.hasCore {
+			groups = append(groups, group.core.resolved)
 		}
 	}
 	return groups
+}
+
+func routeNeedsActionResolution[Message any](
+	route []NodeID,
+	actions *actionIndex[Message],
+	tree *treeIndex,
+	focusOwner NodeID,
+	hasFocusOwner bool,
+) bool {
+	if actions.hasActions {
+		return true
+	}
+	for _, id := range route[:allowedActionRouteLength(route, actions)] {
+		record, _ := tree.record(id)
+		if hasFocusOwner && id == focusOwner || record.kind.isScrollViewport() {
+			return true
+		}
+	}
+	return false
+}
+
+func allowedActionRouteLength[Message any](route []NodeID, actions *actionIndex[Message]) int {
+	for index, id := range route {
+		record, ok := actions.record(id)
+		if ok && record.scope != nil && record.scope.propagation == KeyScopeStopAtScope {
+			return index + 1
+		}
+	}
+	return len(route)
 }
 
 func scopesForRoute[Message any](actions *actionIndex[Message], targetToRoot []NodeID) []KeyScope {

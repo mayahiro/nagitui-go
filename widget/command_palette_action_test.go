@@ -136,6 +136,7 @@ func TestCommandPaletteActionsMatchSharedFixtures(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			groups = nodeDeclaredActionGroups(groups)
 			owners := make([]string, len(groups))
 			for index, group := range groups {
 				owners[index] = string(group.Owner())

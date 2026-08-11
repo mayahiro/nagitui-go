@@ -100,6 +100,7 @@ func TestModalActionsMatchSharedFixtures(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			groups = nodeDeclaredActionGroups(groups)
 			owners := make([]string, len(groups))
 			var modalGroup *tui.ResolvedActions
 			for index := range groups {

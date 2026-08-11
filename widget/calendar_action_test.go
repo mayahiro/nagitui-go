@@ -104,6 +104,7 @@ func TestCalendarActionsMatchSharedFixtures(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				groups = nodeDeclaredActionGroups(groups)
 				if len(groups) != 1 || groups[0].Owner() != tui.NewNodeID("calendar") {
 					t.Fatalf("action groups = %#v", groups)
 				}

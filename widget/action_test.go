@@ -20,6 +20,19 @@ var commandPaletteHasVisibleCommandSink bool
 var paginatorActionDescriptorSink [4]tui.ActionDescriptor
 var filePickerActionDescriptorSink [filePickerActionCount]tui.ActionDescriptor
 
+func nodeDeclaredActionGroups(groups []tui.ResolvedActions) []tui.ResolvedActions {
+	declared := make([]tui.ResolvedActions, 0, len(groups))
+	for _, group := range groups {
+		actions := group.Actions()
+		if len(actions) != 0 &&
+			(actions[0].ID() == tui.FocusNextActionID || actions[0].ID() == tui.ScrollPageUpActionID) {
+			continue
+		}
+		declared = append(declared, group)
+	}
+	return declared
+}
+
 func TestActivateActionDescriptorReuseDoesNotAllocate(t *testing.T) {
 	actionDescriptorSink = ActivateActionDescriptor()
 	allocations := testing.AllocsPerRun(1_000, func() {

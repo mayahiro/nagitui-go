@@ -327,6 +327,429 @@ func TestScopedKeyRoutingFixtures(t *testing.T) {
 	}
 }
 
+type fixtureCoreNavigation struct {
+	scenario string
+	updates  []string
+}
+
+func (*fixtureCoreNavigation) Init() Effect[string] { return NoneEffect[string]() }
+func (*fixtureCoreNavigation) Subscriptions() Subscription[string] {
+	return NoneSubscription[string]()
+}
+func (a *fixtureCoreNavigation) Update(message string) Effect[string] {
+	a.updates = append(a.updates, message)
+	return NoneEffect[string]()
+}
+func (a *fixtureCoreNavigation) View(ViewContext) Node[string] {
+	if strings.HasPrefix(a.scenario, "focus-") {
+		return fixtureFocusNavigationView(a.scenario)
+	}
+	return fixtureScrollNavigationView(a.scenario)
+}
+
+func fixtureFocusNavigationView(scenario string) Node[string] {
+	first := Text[string]("a").Focusable("a")
+	switch scenario {
+	case "focus-unbind-raw":
+		first = first.OnEvent("a", func(vt.Event) EventResult[string] {
+			return MessageResult("raw")
+		})
+	case "focus-declared-shadow":
+		first = first.OnActions("a", []Action[string]{fixtureCoreAction(vt.KeyTab, false)})
+	case "focus-declared-ignore":
+		first = first.OnActions("a", []Action[string]{fixtureCoreAction(vt.KeyTab, true)})
+	}
+	content := Column(first, Text[string]("b").Focusable("b"))
+	switch scenario {
+	case "focus-rebind":
+		keyMap, err := NewKeyMap().Rebind(FocusNextActionID, []KeyBinding{fixtureKeyBinding('x')})
+		if err != nil {
+			panic(err)
+		}
+		return content.WithKeyScope(NewKeyScope("root", keyMap))
+	case "focus-unbind-raw":
+		keyMap, err := NewKeyMap().Rebind(FocusNextActionID, nil)
+		if err != nil {
+			panic(err)
+		}
+		return content.WithKeyScope(NewKeyScope("root", keyMap))
+	case "focus-modal-no-focus":
+		return Padding(Modal("modal", content), Insets{})
+	default:
+		return content
+	}
+}
+
+func fixtureScrollNavigationView(scenario string) Node[string] {
+	if scenario == "scroll-stop-boundary" || scenario == "scroll-wheel-through-stop" {
+		child := Text[string]("child").Focusable("child")
+		scope := Padding(child, Insets{}).
+			WithKeyScope(NewKeyScope("scope", NewKeyMap()).WithPropagation(KeyScopeStopAtScope)).
+			WithLength(Fixed(2))
+		content := Column(
+			scope,
+			Text[string]("o0\no1\no2\no3").WithLength(Fixed(4)),
+		)
+		return ScrollViewportWithOptions(
+			"outer",
+			content,
+			fixtureCoreScrollOptions(ScrollAxisVertical, "outer-scroll"),
+		).OnEvent("outer", func(vt.Event) EventResult[string] {
+			return MessageResult("outer-raw")
+		})
+	}
+
+	innerAxis := ScrollAxisVertical
+	if scenario == "scroll-horizontal-pass" {
+		innerAxis = ScrollAxisHorizontal
+	}
+	innerContent := Text[string]("i0\ni1\ni2\ni3\ni4\ni5")
+	if innerAxis == ScrollAxisHorizontal {
+		innerContent = Text[string]("abcdefghijklmnop")
+	}
+	inner := ScrollViewportWithOptions(
+		"inner",
+		innerContent,
+		fixtureCoreScrollOptions(innerAxis, "inner-scroll"),
+	).WithLength(Fixed(2))
+	switch scenario {
+	case "scroll-unbind-raw", "scroll-modified-raw":
+		inner = inner.OnEvent("inner", func(vt.Event) EventResult[string] {
+			return MessageResult("raw")
+		})
+	case "scroll-declared-shadow":
+		inner = inner.OnActions("inner", []Action[string]{fixtureCoreAction(vt.KeyPageDown, false)})
+	case "scroll-declared-ignore":
+		inner = inner.OnActions("inner", []Action[string]{fixtureCoreAction(vt.KeyPageDown, true)})
+	}
+	content := Column(
+		inner,
+		Text[string]("o0\no1\no2\no3").WithLength(Fixed(4)),
+	)
+	outer := ScrollViewportWithOptions(
+		"outer",
+		content,
+		fixtureCoreScrollOptions(ScrollAxisVertical, "outer-scroll"),
+	)
+	switch scenario {
+	case "scroll-rebind":
+		keyMap, err := NewKeyMap().Rebind(ScrollPageDownActionID, []KeyBinding{fixtureKeyBinding('x')})
+		if err != nil {
+			panic(err)
+		}
+		outer = outer.WithKeyScope(NewKeyScope("outer", keyMap))
+	case "scroll-unbind-raw":
+		keyMap, err := NewKeyMap().Rebind(ScrollPageDownActionID, nil)
+		if err != nil {
+			panic(err)
+		}
+		outer = outer.WithKeyScope(NewKeyScope("outer", keyMap))
+	}
+	return outer
+}
+
+func fixtureCoreScrollOptions(axis ScrollAxis, message string) ScrollViewportOptions[string] {
+	return ScrollViewportOptions[string]{
+		Axis: axis,
+		OnScroll: func(ScrollState) string {
+			return message
+		},
+	}
+}
+
+func fixtureCoreAction(code vt.KeyCode, ignored bool) Action[string] {
+	descriptor := NewActionDescriptor(
+		"app.declared",
+		"Declared",
+		[]KeyBinding{NewKeyBinding(NewKeyStroke(code, vt.Modifiers{}))},
+	)
+	return NewAction(descriptor, func(ActionEvent) EventResult[string] {
+		if ignored {
+			return IgnoreResult[string]().Emit("declared")
+		}
+		return MessageResult("declared")
+	})
+}
+
+func TestCoreNavigationActionsMatchSharedFixtures(t *testing.T) {
+	records, err := conformance.Load(
+		"interaction/core-navigation-runtime.txt",
+		"core-navigation-runtime",
+		"event",
+		"focus",
+		"expected-focus",
+		"inner",
+		"outer",
+		"expected-inner",
+		"expected-outer",
+		"messages",
+		"consumed",
+		"groups",
+	)
+	if errors.Is(err, conformance.ErrNoFixtureRoot) {
+		t.Skip(err)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, record := range records {
+		t.Run(record.ID, func(t *testing.T) {
+			app := &fixtureCoreNavigation{scenario: record.ID}
+			runtime, err := NewRuntimeWithClock[string](
+				app,
+				NewRuntimeConfig(Size{Width: 8, Height: 3}),
+				NewVirtualClock(),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(runtime.Close)
+			if _, err := runtime.RenderIfDirty(); err != nil {
+				t.Fatal(err)
+			}
+			if focus := record.Field("focus"); focus != "none" {
+				if focused, err := runtime.RequestFocus(NodeID(focus)); err != nil || !focused {
+					t.Fatalf("RequestFocus = %t, %v", focused, err)
+				}
+			}
+			for _, field := range []string{"inner", "outer"} {
+				if offset, ok := fixtureOptionalRuntimeNumber(t, record.Field(field)); ok {
+					if !runtime.SetScrollOffset(NodeID(field), ScrollOffset{Y: offset}) {
+						t.Fatalf("SetScrollOffset(%s) failed", field)
+					}
+				}
+			}
+			if _, err := runtime.RenderIfDirty(); err != nil {
+				t.Fatal(err)
+			}
+
+			groups, err := runtime.ActiveActionGroups()
+			if err != nil {
+				t.Fatal(err)
+			}
+			owners := make([]string, len(groups))
+			for index := range groups {
+				owners[index] = groups[index].Owner().String()
+			}
+			if expected := runtimeFixtureList(record.Field("groups")); !slices.Equal(owners, expected) {
+				t.Fatalf("groups = %v, want %v", owners, expected)
+			}
+
+			dispatch, err := runtime.DispatchEvent(fixtureCoreNavigationEvent(t, record.Field("event")))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := runtime.ProcessPending(); err != nil {
+				t.Fatal(err)
+			}
+			if want := record.Field("consumed") == "true"; dispatch.Consumed() != want {
+				t.Fatalf("Consumed = %t, want %t", dispatch.Consumed(), want)
+			}
+			focused, hasFocus := runtime.Interaction().Focused()
+			actualFocus := "none"
+			if hasFocus {
+				actualFocus = focused.String()
+			}
+			if actualFocus != record.Field("expected-focus") {
+				t.Fatalf("focus = %s, want %s", actualFocus, record.Field("expected-focus"))
+			}
+			for _, field := range []string{"inner", "outer"} {
+				expectedField := "expected-" + field
+				if expected, ok := fixtureOptionalRuntimeNumber(t, record.Field(expectedField)); ok {
+					if actual := runtime.Interaction().ScrollOffset(NodeID(field)).Y; actual != expected {
+						t.Fatalf("%s offset = %d, want %d", field, actual, expected)
+					}
+				}
+			}
+			if expected := runtimeFixtureList(record.Field("messages")); !slices.Equal(app.updates, expected) {
+				t.Fatalf("updates = %v, want %v", app.updates, expected)
+			}
+		})
+	}
+}
+
+func fixtureCoreNavigationEvent(t *testing.T, value string) vt.Event {
+	t.Helper()
+	switch value {
+	case "tab":
+		return fixtureNamedKeyEvent(vt.KeyTab, vt.Modifiers{})
+	case "shift-tab":
+		return fixtureNamedKeyEvent(vt.KeyTab, vt.Modifiers{Shift: true})
+	case "repeat-tab":
+		return fixtureKeyEventWithAction(vt.KeyTab, vt.Modifiers{}, vt.KeyRepeat)
+	case "release-tab":
+		return fixtureKeyEventWithAction(vt.KeyTab, vt.Modifiers{}, vt.KeyRelease)
+	case "ctrl-tab":
+		return fixtureNamedKeyEvent(vt.KeyTab, vt.Modifiers{Control: true})
+	case "page-up":
+		return fixtureNamedKeyEvent(vt.KeyPageUp, vt.Modifiers{})
+	case "page-down":
+		return fixtureNamedKeyEvent(vt.KeyPageDown, vt.Modifiers{})
+	case "repeat-page-down":
+		return fixtureKeyEventWithAction(vt.KeyPageDown, vt.Modifiers{}, vt.KeyRepeat)
+	case "unknown-page-down":
+		return fixtureKeyEventWithAction(vt.KeyPageDown, vt.Modifiers{}, vt.KeyActionUnknown)
+	case "release-page-down":
+		return fixtureKeyEventWithAction(vt.KeyPageDown, vt.Modifiers{}, vt.KeyRelease)
+	case "home":
+		return fixtureNamedKeyEvent(vt.KeyHome, vt.Modifiers{})
+	case "end":
+		return fixtureNamedKeyEvent(vt.KeyEnd, vt.Modifiers{})
+	case "ctrl-page-down":
+		return fixtureNamedKeyEvent(vt.KeyPageDown, vt.Modifiers{Control: true})
+	case "key/x":
+		return vt.Event{Kind: vt.EventKey, Key: vt.KeyEvent{
+			Code: vt.KeyCharacter, Character: 'x', Action: vt.KeyPress,
+			Text: "x", HasText: true, Protocol: vt.KeyProtocolLegacy,
+		}}
+	case "wheel-down":
+		return vt.Event{Kind: vt.EventMouse, Mouse: vt.MouseEvent{
+			Kind: vt.MouseScroll, Button: vt.MouseWheelDown,
+		}}
+	default:
+		t.Fatalf("unknown core navigation event %q", value)
+		return vt.Event{}
+	}
+}
+
+func fixtureNamedKeyEvent(code vt.KeyCode, modifiers vt.Modifiers) vt.Event {
+	return fixtureKeyEventWithAction(code, modifiers, vt.KeyPress)
+}
+
+func fixtureKeyEventWithAction(code vt.KeyCode, modifiers vt.Modifiers, action vt.KeyAction) vt.Event {
+	return vt.Event{Kind: vt.EventKey, Key: vt.KeyEvent{
+		Code: code, Modifiers: modifiers, Action: action, Protocol: vt.KeyProtocolLegacy,
+	}}
+}
+
+func fixtureOptionalRuntimeNumber(t *testing.T, value string) (uint32, bool) {
+	t.Helper()
+	if value == "-" {
+		return 0, false
+	}
+	return runtimeFixtureNumber(t, value), true
+}
+
+type fixtureConflictingCoreActions struct{}
+
+func (*fixtureConflictingCoreActions) Init() Effect[struct{}] { return NoneEffect[struct{}]() }
+func (*fixtureConflictingCoreActions) Update(struct{}) Effect[struct{}] {
+	return NoneEffect[struct{}]()
+}
+func (*fixtureConflictingCoreActions) Subscriptions() Subscription[struct{}] {
+	return NoneSubscription[struct{}]()
+}
+func (*fixtureConflictingCoreActions) View(ViewContext) Node[struct{}] {
+	keyMap, err := NewKeyMap().
+		Rebind(FocusNextActionID, []KeyBinding{fixtureKeyBinding('x')})
+	if err != nil {
+		panic(err)
+	}
+	keyMap, err = keyMap.Rebind(ScrollPageDownActionID, []KeyBinding{fixtureKeyBinding('x')})
+	if err != nil {
+		panic(err)
+	}
+	return ScrollViewport("viewport", Text[struct{}]("a\nb\nc")).
+		WithKeyScope(NewKeyScope("viewport", keyMap))
+}
+
+func TestRuntimeRejectsSameOwnerCoreActionConflicts(t *testing.T) {
+	runtime, err := NewRuntimeWithClock[struct{}](
+		&fixtureConflictingCoreActions{},
+		NewRuntimeConfig(Size{Width: 8, Height: 1}),
+		NewVirtualClock(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(runtime.Close)
+	frame, err := runtime.RenderIfDirty()
+	if frame != nil {
+		t.Fatal("conflicting frame was published")
+	}
+	var conflict *BindingConflictError
+	if !errors.As(err, &conflict) {
+		t.Fatalf("RenderIfDirty error = %v, want BindingConflictError", err)
+	}
+	if conflict.Kind() != ConflictAmbiguousBinding || conflict.Owner() != "viewport" {
+		t.Fatalf("conflict = kind %d owner %s", conflict.Kind(), conflict.Owner())
+	}
+	if actions := conflict.Actions(); !reflect.DeepEqual(
+		actions,
+		[]ActionID{FocusNextActionID, ScrollPageDownActionID},
+	) {
+		t.Fatalf("conflict actions = %v", actions)
+	}
+}
+
+type fixtureFutureFocusConflict struct{}
+
+func (*fixtureFutureFocusConflict) Init() Effect[struct{}] { return NoneEffect[struct{}]() }
+func (*fixtureFutureFocusConflict) Update(struct{}) Effect[struct{}] {
+	return NoneEffect[struct{}]()
+}
+func (*fixtureFutureFocusConflict) Subscriptions() Subscription[struct{}] {
+	return NoneSubscription[struct{}]()
+}
+func (*fixtureFutureFocusConflict) View(ViewContext) Node[struct{}] {
+	keyMap, err := NewKeyMap().
+		Rebind(FocusNextActionID, []KeyBinding{fixtureKeyBinding('x')})
+	if err != nil {
+		panic(err)
+	}
+	keyMap, err = keyMap.Rebind(FocusPreviousActionID, []KeyBinding{fixtureKeyBinding('x')})
+	if err != nil {
+		panic(err)
+	}
+	return Column(
+		Text[struct{}]("a").Focusable("a"),
+		Text[struct{}]("b").
+			Focusable("b").
+			WithKeyScope(NewKeyScope("b", keyMap)).
+			OnEvent("b", func(vt.Event) EventResult[struct{}] {
+				return MessageResult(struct{}{})
+			}),
+	)
+}
+
+func TestNewlyFocusedCoreRouteIsResolvedBeforeNextHandler(t *testing.T) {
+	runtime, err := NewRuntimeWithClock[struct{}](
+		&fixtureFutureFocusConflict{},
+		NewRuntimeConfig(Size{Width: 8, Height: 2}),
+		NewVirtualClock(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(runtime.Close)
+	if _, err := runtime.RenderIfDirty(); err != nil {
+		t.Fatal(err)
+	}
+	if focused, err := runtime.RequestFocus("a"); err != nil || !focused {
+		t.Fatalf("RequestFocus = %t, %v", focused, err)
+	}
+	if _, err := runtime.DispatchEvent(fixtureNamedKeyEvent(vt.KeyTab, vt.Modifiers{})); err != nil {
+		t.Fatal(err)
+	}
+	if focused, ok := runtime.Interaction().Focused(); !ok || focused != "b" {
+		t.Fatalf("focus = %s, %t", focused, ok)
+	}
+
+	_, err = runtime.DispatchEvent(vt.Event{Kind: vt.EventKey, Key: vt.KeyEvent{
+		Code: vt.KeyCharacter, Character: 'z', Action: vt.KeyPress,
+	}})
+	var conflict *BindingConflictError
+	if !errors.As(err, &conflict) {
+		t.Fatalf("DispatchEvent error = %v, want BindingConflictError", err)
+	}
+	if conflict.Owner() != "b" {
+		t.Fatalf("conflict owner = %s", conflict.Owner())
+	}
+	if runtime.QueuedMessages() != 0 {
+		t.Fatalf("queued messages = %d, want 0", runtime.QueuedMessages())
+	}
+}
+
 type fixtureConflictingActions struct{}
 
 func (*fixtureConflictingActions) Init() Effect[struct{}] { return NoneEffect[struct{}]() }

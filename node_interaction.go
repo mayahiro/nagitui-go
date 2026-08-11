@@ -89,9 +89,9 @@ func (n *Node[Message]) buildIndex(
 		case nodeTextInput:
 			kind = interactiveTextInput
 		case nodeScrollViewport:
-			kind = interactiveScrollViewport
+			kind = scrollInteractiveKind(n.scroll.Axis)
 		case nodeVirtualScrollViewport:
-			kind = interactiveScrollViewport
+			kind = scrollInteractiveKind(n.scroll.Axis)
 		case nodeModal:
 			kind = interactiveModal
 		}

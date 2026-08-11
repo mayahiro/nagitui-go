@@ -13,6 +13,18 @@ import (
 type ActionID string
 
 const (
+	// FocusNextActionID is the stable Action ID for moving focus forward
+	FocusNextActionID ActionID = "nagi.focus.next"
+	// FocusPreviousActionID is the stable Action ID for moving focus backward
+	FocusPreviousActionID ActionID = "nagi.focus.previous"
+	// ScrollPageUpActionID is the stable Action ID for scrolling one page toward the start
+	ScrollPageUpActionID ActionID = "nagi.scroll.page-up"
+	// ScrollPageDownActionID is the stable Action ID for scrolling one page toward the end
+	ScrollPageDownActionID ActionID = "nagi.scroll.page-down"
+	// ScrollStartActionID is the stable Action ID for scrolling to the enabled-axis beginning
+	ScrollStartActionID ActionID = "nagi.scroll.start"
+	// ScrollEndActionID is the stable Action ID for scrolling to the enabled-axis end
+	ScrollEndActionID ActionID = "nagi.scroll.end"
 	// TextCursorLeftActionID is the stable Action ID for moving a text cursor left
 	TextCursorLeftActionID ActionID = "nagi.text.cursor.left"
 	// TextCursorRightActionID is the stable Action ID for moving a text cursor right

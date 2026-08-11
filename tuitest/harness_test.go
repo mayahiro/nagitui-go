@@ -115,11 +115,14 @@ func TestHarnessObservesActiveActionProjection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(groups) != 1 || groups[0].Owner() != "owner" {
+	if len(groups) != 2 || groups[0].Owner() != "owner" || groups[1].Owner() != "owner" {
 		t.Fatalf("groups = %v", groups)
 	}
 	if actions := groups[0].Actions(); len(actions) != 1 || actions[0].ID() != "app.action" {
 		t.Fatalf("actions = %v", actions)
+	}
+	if actions := groups[1].Actions(); len(actions) != 2 || actions[0].ID() != tui.FocusNextActionID {
+		t.Fatalf("core actions = %v", actions)
 	}
 }
 
