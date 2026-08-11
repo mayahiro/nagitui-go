@@ -2,9 +2,9 @@
 
 [日本語](README_ja.md)
 
-Nagi TUI for Go provides a native cell-based TUI runtime, Unicode-aware
-semantic nodes, 27 standard widgets, supervised asynchronous work,
-subscriptions, and deterministic test support
+Nagi TUI for Go provides immutable Terminal Presentation Rules, a native
+cell-based TUI runtime, Unicode-aware semantic nodes, 27 standard widgets,
+supervised asynchronous work, subscriptions, and deterministic test support
 
 ## Requirements
 
@@ -29,10 +29,11 @@ go run ./examples/counter
 
 | Package | Responsibility |
 | --- | --- |
-| Module root `tui` | App lifecycle, semantic nodes, scoped key maps, layout, events, Effects, Subscriptions, and terminal loop |
+| Module root `tui` | Terminal Presentation Rules, App lifecycle, semantic nodes, scoped key maps, layout, events, Effects, Subscriptions, and terminal loop |
 | `surface` | Geometry, Cells, Surface drawing, composition, diffing, and snapshots |
 | `widget` | 27 standard widgets built from the public TUI API |
 | `tuitest` | Virtual input, resize, time, effects, subscriptions, and frame inspection |
+| `github.com/mayahiro/nagi-go/content` | Shared source-neutral Content used by Terminal Presentation Rules |
 | `github.com/mayahiro/nagi-go/text` | Shared Unicode 17 text primitives |
 | `github.com/mayahiro/nagi-go/vt` | Shared typed terminal input/output, Color, Attributes, and Style |
 
@@ -57,6 +58,7 @@ Run commands from the Go repository root in a real terminal
 
 | Example | Command |
 | --- | --- |
+| [Terminal Presentation Rules](examples/presentation/README.md) | `go run ./examples/presentation` |
 | [Counter](examples/counter/README.md) | `go run ./examples/counter` |
 | [Command palette](examples/command-palette/README.md) | `go run ./examples/command-palette` |
 | [Async search](examples/async-search/README.md) | `go run ./examples/async-search` |

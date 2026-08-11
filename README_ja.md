@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-Nagi TUI Go実装はnative Cell-based TUI runtime、Unicode対応semantic Node、27個の標準Widget、supervised async work、Subscription、決定的test supportを提供します
+Nagi TUI Go実装はimmutableなTerminal Presentation Rules、native Cell-based TUI runtime、Unicode対応semantic Node、27個の標準Widget、supervised async work、Subscription、決定的test supportを提供します
 
 ## 要件
 
@@ -27,10 +27,11 @@ go run ./examples/counter
 
 | Package | 責務 |
 | --- | --- |
-| Module root `tui` | App lifecycle、semantic Node、Scoped KeyMap、layout、event、Effect、Subscription、terminal loop |
+| Module root `tui` | Terminal Presentation Rules、App lifecycle、semantic Node、Scoped KeyMap、layout、event、Effect、Subscription、terminal loop |
 | `surface` | Geometry、Cell、Surface描画、composition、diff、snapshot |
 | `widget` | Public TUI APIから構築した27個の標準Widget |
 | `tuitest` | Virtual input、resize、time、Effect、Subscription、frame検査 |
+| `github.com/mayahiro/nagi-go/content` | Terminal Presentation Rulesが使用する共有source-neutral Content |
 | `github.com/mayahiro/nagi-go/text` | 共有Unicode 17 text primitive |
 | `github.com/mayahiro/nagi-go/vt` | 共有typed terminal input／output、Color、Attributes、Style |
 
@@ -50,6 +51,7 @@ Go repository rootから実terminalで実行します
 
 | Example | Command |
 | --- | --- |
+| [Terminal Presentation Rules](examples/presentation/README.md) | `go run ./examples/presentation` |
 | [Counter](examples/counter/README.md) | `go run ./examples/counter` |
 | [Command palette](examples/command-palette/README.md) | `go run ./examples/command-palette` |
 | [Async search](examples/async-search/README.md) | `go run ./examples/async-search` |
