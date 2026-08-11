@@ -1024,6 +1024,7 @@ func (r *Runtime[Message]) ensureTree() error {
 		return nil
 	}
 	view := r.app.View(ViewContext{Size: r.size})
+	view.prepareVirtualFlows(r.size, r.interaction)
 	index := &r.nextTreeIndex
 	actions := &r.nextActionIndex
 	if err := view.buildTreeIndex(r.size, r.interaction, index, actions); err != nil {
@@ -1086,6 +1087,7 @@ func (r *Runtime[Message]) renderIfDirty(recycleSurface bool) (*Frame, error) {
 		return nil, nil
 	}
 	view := r.app.View(ViewContext{Size: r.size})
+	view.prepareVirtualFlows(r.size, r.interaction)
 	index := &r.nextTreeIndex
 	actions := &r.nextActionIndex
 	if err := view.buildTreeIndex(r.size, r.interaction, index, actions); err != nil {

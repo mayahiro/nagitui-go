@@ -29,6 +29,10 @@ const (
 	TextCursorLeftActionID ActionID = "nagi.text.cursor.left"
 	// TextCursorRightActionID is the stable Action ID for moving a text cursor right
 	TextCursorRightActionID ActionID = "nagi.text.cursor.right"
+	// TextCursorWordLeftActionID is the stable Action ID for moving a text cursor to the previous word
+	TextCursorWordLeftActionID ActionID = "nagi.text.cursor.word-left"
+	// TextCursorWordRightActionID is the stable Action ID for moving a text cursor to the next word
+	TextCursorWordRightActionID ActionID = "nagi.text.cursor.word-right"
 	// TextCursorUpActionID is the stable Action ID for moving a text cursor up
 	TextCursorUpActionID ActionID = "nagi.text.cursor.up"
 	// TextCursorDownActionID is the stable Action ID for moving a text cursor down
@@ -37,10 +41,18 @@ const (
 	TextCursorLineStartActionID ActionID = "nagi.text.cursor.line-start"
 	// TextCursorLineEndActionID is the stable Action ID for moving a text cursor to the current line end
 	TextCursorLineEndActionID ActionID = "nagi.text.cursor.line-end"
+	// TextCursorDocumentStartActionID is the stable Action ID for moving a text cursor to the document start
+	TextCursorDocumentStartActionID ActionID = "nagi.text.cursor.document-start"
+	// TextCursorDocumentEndActionID is the stable Action ID for moving a text cursor to the document end
+	TextCursorDocumentEndActionID ActionID = "nagi.text.cursor.document-end"
 	// TextSelectionExtendLeftActionID is the stable Action ID for extending text selection left
 	TextSelectionExtendLeftActionID ActionID = "nagi.text.selection.extend-left"
 	// TextSelectionExtendRightActionID is the stable Action ID for extending text selection right
 	TextSelectionExtendRightActionID ActionID = "nagi.text.selection.extend-right"
+	// TextSelectionExtendWordLeftActionID is the stable Action ID for extending text selection to the previous word
+	TextSelectionExtendWordLeftActionID ActionID = "nagi.text.selection.extend-word-left"
+	// TextSelectionExtendWordRightActionID is the stable Action ID for extending text selection to the next word
+	TextSelectionExtendWordRightActionID ActionID = "nagi.text.selection.extend-word-right"
 	// TextSelectionExtendUpActionID is the stable Action ID for extending text selection up
 	TextSelectionExtendUpActionID ActionID = "nagi.text.selection.extend-up"
 	// TextSelectionExtendDownActionID is the stable Action ID for extending text selection down
@@ -49,8 +61,16 @@ const (
 	TextSelectionExtendLineStartActionID ActionID = "nagi.text.selection.extend-line-start"
 	// TextSelectionExtendLineEndActionID is the stable Action ID for extending text selection to the current line end
 	TextSelectionExtendLineEndActionID ActionID = "nagi.text.selection.extend-line-end"
-	// TextSelectAllActionID is the stable Action ID for selecting all editable text
+	// TextSelectionExtendDocumentStartActionID is the stable Action ID for extending text selection to the document start
+	TextSelectionExtendDocumentStartActionID ActionID = "nagi.text.selection.extend-document-start"
+	// TextSelectionExtendDocumentEndActionID is the stable Action ID for extending text selection to the document end
+	TextSelectionExtendDocumentEndActionID ActionID = "nagi.text.selection.extend-document-end"
+	// TextSelectAllActionID is the stable Action ID for selecting one complete semantic text document
 	TextSelectAllActionID ActionID = "nagi.text.select-all"
+	// TextCopySelectionActionID is the stable Action ID for copying the current semantic text selection
+	TextCopySelectionActionID ActionID = "nagi.text.copy-selection"
+	// TextCopyDocumentActionID is the stable Action ID for copying one complete semantic text document
+	TextCopyDocumentActionID ActionID = "nagi.text.copy-document"
 	// TextDeleteBackwardActionID is the stable Action ID for deleting text backward
 	TextDeleteBackwardActionID ActionID = "nagi.text.delete.backward"
 	// TextDeleteForwardActionID is the stable Action ID for deleting text forward

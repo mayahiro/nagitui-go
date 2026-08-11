@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-Nagi TUI Go実装はnative Cell-based TUI runtime、Unicode対応semantic Node、25個の標準Widget、supervised async work、Subscription、決定的test supportを提供します
+Nagi TUI Go実装はnative Cell-based TUI runtime、Unicode対応semantic Node、27個の標準Widget、supervised async work、Subscription、決定的test supportを提供します
 
 ## 要件
 
@@ -29,7 +29,7 @@ go run ./examples/counter
 | --- | --- |
 | Module root `tui` | App lifecycle、semantic Node、Scoped KeyMap、layout、event、Effect、Subscription、terminal loop |
 | `surface` | Geometry、Cell、Surface描画、composition、diff、snapshot |
-| `widget` | Public TUI APIから構築した25個の標準Widget |
+| `widget` | Public TUI APIから構築した27個の標準Widget |
 | `tuitest` | Virtual input、resize、time、Effect、Subscription、frame検査 |
 | `github.com/mayahiro/nagi-go/text` | 共有Unicode 17 text primitive |
 | `github.com/mayahiro/nagi-go/vt` | 共有typed terminal input／output、Color、Attributes、Style |
@@ -55,6 +55,7 @@ Go repository rootから実terminalで実行します
 | [Async search](examples/async-search/README.md) | `go run ./examples/async-search` |
 | [Event-driven log viewer](examples/log-viewer/README.md) | `go run ./examples/log-viewer` |
 | [Virtual scroll](examples/virtual-scroll/README.md) | `go run ./examples/virtual-scroll` |
+| [Variable-height feed](examples/virtual-feed/README.md) | `go run ./examples/virtual-feed` |
 | [Widget gallery](examples/widget-gallery/README.md) | `go run ./examples/widget-gallery` |
 | [Extended widget gallery](examples/extended-widget-gallery/README.md) | `go run ./examples/extended-widget-gallery` |
 | [Dashboard](examples/dashboard/README.md) | `go run ./examples/dashboard` |
@@ -69,9 +70,13 @@ Terminal inputとoutputはterminalへ接続されている必要があります�
 
 `ScrollViewport`はeagerなchild treeをclipしてscrollします。大規模dataでは`VirtualScrollViewport`を使用し、content全体のCell extentを宣言して現在表示する範囲または上限付きoverscanの`VirtualFragment`だけを構築できます。`Node.RevealDescendant`はfocusを移動せずstable descendant IDを表示範囲内に保ち、virtual targetは現在のfragment内に存在する必要があります
 
+`VirtualFlow`は可変item heightとstable anchorをappend、prepend、削除、streaming更新、幅変更にまたがって保持し、visible fragmentとCell単位の上限付きoverscanだけを構築します。Intrinsic高は0のためlayout `Length`を割り当てます。`widget.VirtualFeed`はdomain stateを所有せず、末尾追従とApplication制御のempty、loading、unread slotを追加します
+
 `TextArea`はdefaultでno-wrap挙動を維持します。`SoftWrap`はvisual-line navigationを追加し、`BoundaryNavigation`はvisual boundaryのUpとDownをpass-throughへ切り替えられ、`Viewport`はTab stopを増やさずapplication suppliedのcaret IDへ追従します
 
 `Composer`は`TextArea`へcontrolled submitとhistory recall、自動row境界、任意のvalidation content、挿入制限を加えます。Applicationはmessageの意味、history persistence、sensitive value policyを引き続き所有します
+
+`SelectableText`はimmutableなstyled contentへgrapheme境界に揃えたcontrolled keyboard selectionを加えます。Copy actionはApplication Messageを発行し、clipboard I/O、pointer selection、redaction policyはApplicationの責務として維持します
 
 `Disclosure`はexpanded stateをApplicationに維持し、expanded時だけbodyを構築します。Core Modal scopeはdefaultでentry時に最初のdescendantへfocusし、close時に以前のfocusへ戻り、両方のtargetを設定できます
 

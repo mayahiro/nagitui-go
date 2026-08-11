@@ -19,6 +19,10 @@ type identifiedVirtualViewportBenchmarkApp struct {
 	rowIDs []NodeID
 }
 
+type virtualFlowBenchmarkApp struct {
+	items VirtualFlowItems
+}
+
 func warmViewportBenchmark(b *testing.B, runtime *Runtime[struct{}]) {
 	b.Helper()
 	for range 2 {
@@ -201,6 +205,62 @@ func (a *identifiedVirtualViewportBenchmarkApp) View(ViewContext) Node[struct{}]
 
 func BenchmarkScrollViewportVirtualIdentified100K(b *testing.B) {
 	runtime, err := NewRuntime[struct{}](newIdentifiedVirtualViewportBenchmarkApp(), Size{Width: 80, Height: 24})
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(runtime.Close)
+	warmViewportBenchmark(b, runtime)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		runtime.RequestFrame()
+		if _, err := runtime.RenderIfDirty(); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func newVirtualFlowBenchmarkApp() *virtualFlowBenchmarkApp {
+	items := make([]VirtualFlowItem, benchmarkRows)
+	for index := range items {
+		items[index] = NewVirtualFlowItem(NodeID("flow-row-" + strconv.Itoa(index)))
+	}
+	order, err := NewVirtualFlowItems(items)
+	if err != nil {
+		panic(err)
+	}
+	return &virtualFlowBenchmarkApp{items: order}
+}
+
+func (*virtualFlowBenchmarkApp) Init() Effect[struct{}] {
+	return NoneEffect[struct{}]()
+}
+
+func (*virtualFlowBenchmarkApp) Update(struct{}) Effect[struct{}] {
+	return NoneEffect[struct{}]()
+}
+
+func (*virtualFlowBenchmarkApp) Subscriptions() Subscription[struct{}] {
+	return NoneSubscription[struct{}]()
+}
+
+func (a *virtualFlowBenchmarkApp) View(ViewContext) Node[struct{}] {
+	source := NewVirtualFlowSource(a.items, func(context VirtualFlowItemContext) Node[struct{}] {
+		if context.Index%2 == 0 {
+			return Column(Text[struct{}]("row"), Text[struct{}]("row"))
+		}
+		return Text[struct{}]("row")
+	}).EstimatedHeight(func(context VirtualFlowItemContext) uint32 {
+		if context.Index%2 == 0 {
+			return 2
+		}
+		return 1
+	})
+	return VirtualFlow("virtual-flow", source)
+}
+
+func BenchmarkVirtualFlowVariableHeight100K(b *testing.B) {
+	runtime, err := NewRuntime[struct{}](newVirtualFlowBenchmarkApp(), Size{Width: 80, Height: 24})
 	if err != nil {
 		b.Fatal(err)
 	}

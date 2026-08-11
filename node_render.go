@@ -58,6 +58,19 @@ func (n Node[Message]) render(target *surface.Surface, rect, clip Rect, interact
 				interaction,
 			)
 		}
+	case nodeVirtualFlow:
+		if n.payload != nil && n.payload.virtualFlow != nil && n.payload.virtualFlow.cache.valid {
+			frame := &n.payload.virtualFlow.cache
+			for index := range frame.items {
+				item := &frame.items[index]
+				item.node.render(
+					target,
+					virtualFlowItemRect(rect, frame.offset, item.origin, item.height),
+					clip.Intersection(rect),
+					interaction,
+				)
+			}
+		}
 	case nodeModal:
 		n.child.render(target, rect, clip, interaction)
 	case nodePanel:
@@ -275,6 +288,139 @@ func scrollChildRect[Message any](viewport Rect, child *Node[Message], requested
 		X:      clampInt64ToInt32(int64(viewport.X) - int64(offset.X)),
 		Y:      clampInt64ToInt32(int64(viewport.Y) - int64(offset.Y)),
 		Width:  width,
+		Height: height,
+	}
+}
+
+func virtualFlowIntrinsicSize(constraints layoutConstraints) Size {
+	width := uint32(0)
+	if constraints.width.bounded {
+		width = constraints.width.value
+	}
+	return Size{Width: width}
+}
+
+func prepareVirtualFlowNode[Message any](
+	id NodeID,
+	flow *virtualFlowNodePayload[Message],
+	rect Rect,
+	interaction *InteractionState,
+) bool {
+	type frameSignature struct {
+		valid         bool
+		rect          Rect
+		offset        uint32
+		contentHeight uint32
+		generation    uint64
+		first         int
+		end           int
+	}
+	previousSignature := frameSignature{}
+	reusable := make(map[int]Node[Message])
+	if flow.cache.valid {
+		frame := &flow.cache
+		previousSignature = frameSignature{
+			valid: true, rect: frame.rect, offset: frame.offset,
+			contentHeight: frame.contentHeight, generation: frame.generation,
+			first: -1, end: -1,
+		}
+		if len(frame.items) > 0 {
+			previousSignature.first = frame.items[0].index
+			previousSignature.end = frame.items[len(frame.items)-1].index + 1
+		}
+		if frame.rect.Width == rect.Width {
+			for _, item := range frame.items {
+				reusable[item.index] = item.node
+			}
+		}
+	}
+
+	options := flow.options
+	window := prepareVirtualFlow(
+		interaction,
+		id,
+		flow.source,
+		rect.Width,
+		rect.Height,
+		options.Overscan,
+		options.StickToEnd,
+	)
+	for {
+		for index := window.builtStart; index < window.builtEnd; index++ {
+			if _, exists := reusable[index]; !exists {
+				reusable[index] = flow.source.build(index, rect.Width)
+			}
+		}
+		measurements := make([]virtualFlowMeasurement, 0, window.builtEnd-window.builtStart)
+		for index := window.builtStart; index < window.builtEnd; index++ {
+			_, _, measured, ok := virtualFlowItemLayout(interaction, id, index)
+			if !ok || measured {
+				continue
+			}
+			node := reusable[index]
+			height := max(node.measure(layoutConstraints{
+				width: layoutLimit{value: rect.Width, bounded: true},
+			}).Height, 1)
+			measurements = append(measurements, virtualFlowMeasurement{index: index, height: height})
+		}
+		if len(measurements) == 0 {
+			break
+		}
+		next, ok := applyVirtualFlowMeasurements(
+			interaction,
+			id,
+			measurements,
+			rect.Height,
+			options.Overscan,
+			options.StickToEnd,
+		)
+		if !ok {
+			break
+		}
+		window = next
+	}
+
+	items := make([]virtualFlowBuiltItem[Message], 0, window.builtEnd-window.builtStart)
+	childChanged := false
+	for index := window.builtStart; index < window.builtEnd; index++ {
+		node, exists := reusable[index]
+		if !exists {
+			node = flow.source.build(index, rect.Width)
+		}
+		origin, height, _, ok := virtualFlowItemLayout(interaction, id, index)
+		if !ok {
+			continue
+		}
+		childChanged = node.prepareAt(
+			virtualFlowItemRect(rect, window.offset, origin, height),
+			interaction,
+		) || childChanged
+		items = append(items, virtualFlowBuiltItem[Message]{
+			index: index, origin: origin, height: height, node: node,
+		})
+	}
+	flow.cache = virtualFlowFrame[Message]{
+		valid: true, rect: rect, offset: window.offset,
+		contentHeight: window.contentHeight, generation: window.generation,
+		items: items,
+	}
+	currentSignature := frameSignature{
+		valid: true, rect: rect, offset: window.offset,
+		contentHeight: window.contentHeight, generation: window.generation,
+		first: -1, end: -1,
+	}
+	if len(items) > 0 {
+		currentSignature.first = items[0].index
+		currentSignature.end = items[len(items)-1].index + 1
+	}
+	return previousSignature != currentSignature || childChanged
+}
+
+func virtualFlowItemRect(viewport Rect, offset, origin, height uint32) Rect {
+	return Rect{
+		X:      viewport.X,
+		Y:      clampInt64ToInt32(int64(viewport.Y) + int64(origin) - int64(offset)),
+		Width:  viewport.Width,
 		Height: height,
 	}
 }

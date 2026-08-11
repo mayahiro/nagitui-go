@@ -180,6 +180,29 @@ type nodePayload[Message any] struct {
 	virtualSize    Size
 	virtualBuilder func(VirtualViewport) VirtualFragment[Message]
 	virtualCache   virtualCacheState[Message]
+	virtualFlow    *virtualFlowNodePayload[Message]
+}
+
+type virtualFlowNodePayload[Message any] struct {
+	source  VirtualFlowSource[Message]
+	options VirtualFlowOptions[Message]
+	cache   virtualFlowFrame[Message]
+}
+
+type virtualFlowFrame[Message any] struct {
+	valid         bool
+	rect          Rect
+	offset        uint32
+	contentHeight uint32
+	generation    uint64
+	items         []virtualFlowBuiltItem[Message]
+}
+
+type virtualFlowBuiltItem[Message any] struct {
+	index  int
+	origin uint32
+	height uint32
+	node   Node[Message]
 }
 
 // Node is a semantic view node rebuilt by an application for each frame
@@ -233,6 +256,7 @@ const (
 	nodeClip
 	nodeScrollViewport
 	nodeVirtualScrollViewport
+	nodeVirtualFlow
 	nodeModal
 	nodePanel
 )
@@ -470,6 +494,36 @@ func VirtualScrollViewportWithOptions[Message any](
 	}
 }
 
+// VirtualFlow returns a vertical viewport for stable variable-height items
+//
+// Only items intersecting the visible range and bounded Cell overscan are
+// built. Item heights are measured from their Nodes and retained by the
+// runtime across semantic frames. The viewport has zero intrinsic height;
+// assign it a layout Length or place it where the parent supplies a rectangle.
+func VirtualFlow[Message any](
+	id NodeID,
+	source VirtualFlowSource[Message],
+) Node[Message] {
+	return VirtualFlowWithOptions(id, source, DefaultVirtualFlowOptions[Message]())
+}
+
+// VirtualFlowWithOptions returns a variable-height flow with configured scrolling
+//
+// The viewport has zero intrinsic height; assign it a layout Length or place
+// it where the parent supplies a rectangle.
+func VirtualFlowWithOptions[Message any](
+	id NodeID,
+	source VirtualFlowSource[Message],
+	options VirtualFlowOptions[Message],
+) Node[Message] {
+	return Node[Message]{
+		kind: nodeVirtualFlow, id: id, hasID: true, focusable: true,
+		payload: &nodePayload[Message]{
+			virtualFlow: &virtualFlowNodePayload[Message]{source: source, options: options},
+		},
+	}
+}
+
 // Modal marks a subtree as the active modal routing and focus scope
 //
 // The default focus lifecycle selects the first focusable descendant on entry
@@ -569,7 +623,7 @@ func (n Node[Message]) WithKeyScope(scope KeyScope) Node[Message] {
 // fragment of a virtual ScrollViewport. A later call replaces the target. On
 // other node kinds this metadata has no effect.
 func (n Node[Message]) RevealDescendant(target NodeID) Node[Message] {
-	if n.kind != nodeScrollViewport && n.kind != nodeVirtualScrollViewport {
+	if n.kind != nodeScrollViewport && n.kind != nodeVirtualScrollViewport && n.kind != nodeVirtualFlow {
 		return n
 	}
 	n.keyInteraction = cloneNodeKeyInteraction(n.keyInteraction)
@@ -663,6 +717,8 @@ func (n Node[Message]) measure(constraints layoutConstraints) Size {
 		measured = n.child.measure(constraints)
 	case nodeVirtualScrollViewport:
 		measured = n.payload.virtualSize
+	case nodeVirtualFlow:
+		measured = virtualFlowIntrinsicSize(constraints)
 	default:
 		panic("nagi-tui: invalid node kind")
 	}

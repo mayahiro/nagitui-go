@@ -18,6 +18,10 @@ func (n *Node[Message]) prepareInteraction(size Size, interaction *InteractionSt
 	return n.prepareAt(Rect{Width: size.Width, Height: size.Height}, interaction)
 }
 
+func (n *Node[Message]) prepareVirtualFlows(size Size, interaction *InteractionState) {
+	n.prepareVirtualFlowsAt(Rect{Width: size.Width, Height: size.Height}, interaction)
+}
+
 func (n *Node[Message]) handleEvent(id NodeID, event vt.Event) (EventResult[Message], bool) {
 	node := n.find(id)
 	if node == nil || node.handler == nil {
@@ -37,7 +41,18 @@ func (n *Node[Message]) textInputMessage(id NodeID, value string) (Message, bool
 
 func (n *Node[Message]) scrollOptions(id NodeID) (ScrollViewportOptions[Message], bool) {
 	node := n.find(id)
-	if node == nil || (node.kind != nodeScrollViewport && node.kind != nodeVirtualScrollViewport) {
+	if node == nil {
+		return ScrollViewportOptions[Message]{}, false
+	}
+	if node.kind == nodeVirtualFlow {
+		options := node.payload.virtualFlow.options
+		return ScrollViewportOptions[Message]{
+			Axis:                 ScrollAxisVertical,
+			EnsureFocusedVisible: options.EnsureFocusedVisible,
+			OnScroll:             options.OnScroll,
+		}, true
+	}
+	if node.kind != nodeScrollViewport && node.kind != nodeVirtualScrollViewport {
 		return ScrollViewportOptions[Message]{}, false
 	}
 	return node.scroll, true
@@ -69,6 +84,14 @@ func (n *Node[Message]) find(id NodeID) *Node[Message] {
 		if n.payload != nil && n.payload.virtualCache.valid {
 			return n.payload.virtualCache.fragment.Node.find(id)
 		}
+	case nodeVirtualFlow:
+		if n.payload != nil && n.payload.virtualFlow != nil && n.payload.virtualFlow.cache.valid {
+			for index := range n.payload.virtualFlow.cache.items {
+				if found := n.payload.virtualFlow.cache.items[index].node.find(id); found != nil {
+					return found
+				}
+			}
+		}
 	}
 	return nil
 }
@@ -98,6 +121,8 @@ func (n *Node[Message]) buildIndex(
 			kind = scrollInteractiveKind(n.scroll.Axis)
 		case nodeVirtualScrollViewport:
 			kind = scrollInteractiveKind(n.scroll.Axis)
+		case nodeVirtualFlow:
+			kind = scrollInteractiveKind(ScrollAxisVertical)
 		case nodeModal:
 			kind = interactiveModal
 		}
@@ -196,6 +221,29 @@ func (n *Node[Message]) buildIndex(
 			tree,
 			actions,
 		)
+	case nodeVirtualFlow:
+		if n.payload == nil || n.payload.virtualFlow == nil || !n.payload.virtualFlow.cache.valid {
+			return nil
+		}
+		frame := &n.payload.virtualFlow.cache
+		for index := range frame.items {
+			item := &frame.items[index]
+			if err := item.node.buildIndex(
+				virtualFlowItemRect(rect, frame.offset, item.origin, item.height),
+				clip.Intersection(rect),
+				childParent,
+				hasChildParent,
+				false,
+				focusFallback,
+				hasFocusFallback,
+				interaction,
+				tree,
+				actions,
+			); err != nil {
+				return err
+			}
+		}
+		return nil
 	case nodeModal:
 		return n.child.buildIndex(rect, clip, childParent, hasChildParent, false, focusFallback, hasFocusFallback, interaction, tree, actions)
 	case nodePanel:
@@ -204,6 +252,71 @@ func (n *Node[Message]) buildIndex(
 		return n.child.buildIndex(childRect, clip, childParent, hasChildParent, false, focusFallback, hasFocusFallback, interaction, tree, actions)
 	}
 	return nil
+}
+
+func (n *Node[Message]) prepareVirtualFlowsAt(rect Rect, interaction *InteractionState) {
+	switch n.kind {
+	case nodeVirtualFlow:
+		prepareVirtualFlowNode(n.id, n.payload.virtualFlow, rect, interaction)
+	case nodeRow, nodeColumn:
+		horizontal := n.kind == nodeRow
+		layout := n.resolvedLinearLayout(rect, horizontal)
+		var offset uint32
+		for index := range n.children {
+			childRect := layout.childRect(rect, horizontal, index, offset)
+			n.children[index].prepareVirtualFlowsAt(childRect, interaction)
+			offset = saturatingAdd32(offset, layout.allocation(index))
+		}
+	case nodeStack:
+		for index := range n.children {
+			n.children[index].prepareVirtualFlowsAt(rect, interaction)
+		}
+	case nodePadding:
+		n.child.prepareVirtualFlowsAt(
+			insetRect(rect, n.insets.Left, n.insets.Top, n.insets.Right, n.insets.Bottom),
+			interaction,
+		)
+	case nodeBorder:
+		n.child.prepareVirtualFlowsAt(insetRect(rect, 1, 1, 1, 1), interaction)
+	case nodeAlign:
+		n.child.prepareVirtualFlowsAt(
+			alignedChildRect(rect, n.child, n.horizontal, n.vertical),
+			interaction,
+		)
+	case nodeClip, nodeModal:
+		n.child.prepareVirtualFlowsAt(rect, interaction)
+	case nodePanel:
+		insets := panelContentInsets(n.panel)
+		n.child.prepareVirtualFlowsAt(
+			insetRect(rect, insets.Left, insets.Top, insets.Right, insets.Bottom),
+			interaction,
+		)
+	case nodeScrollViewport:
+		n.child.prepareVirtualFlowsAt(
+			scrollChildRect(rect, n.child, interaction.ScrollOffset(n.id), n.scroll.Axis),
+			interaction,
+		)
+	case nodeVirtualScrollViewport:
+		state := interaction.previewScroll(
+			n.id,
+			virtualScrollMaximum(n.payload.virtualSize, rect, n.scroll.Axis),
+			n.scroll.Axis,
+			n.scroll.StickToEnd,
+		)
+		if fragment, ok := ensureVirtualFragment(
+			n.payload.virtualSize,
+			n.scroll.Axis,
+			n.payload.virtualBuilder,
+			&n.payload.virtualCache,
+			rect,
+			state.Offset,
+		); ok {
+			fragment.fragment.Node.prepareVirtualFlowsAt(
+				virtualFragmentRect(rect, fragment),
+				interaction,
+			)
+		}
+	}
 }
 
 func (n *Node[Message]) prepareAt(rect Rect, interaction *InteractionState) bool {
@@ -247,6 +360,8 @@ func (n *Node[Message]) prepareAt(rect Rect, interaction *InteractionState) bool
 		cacheChanged := wasValid != n.payload.virtualCache.valid ||
 			n.payload.virtualCache.valid && previousRequest != n.payload.virtualCache.request
 		return cacheChanged || childChanged
+	case nodeVirtualFlow:
+		return prepareVirtualFlowNode(n.id, n.payload.virtualFlow, rect, interaction)
 	}
 
 	changed := false

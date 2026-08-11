@@ -33,6 +33,12 @@ func NewTextSpan(text string, style vt.Style) TextSpan {
 	return TextSpan{Text: text, Style: style}
 }
 
+// WithStyle returns this span with a replacement style
+func (s TextSpan) WithStyle(style vt.Style) TextSpan {
+	s.Style = style
+	return s
+}
+
 // ParagraphOptions controls paragraph wrapping and horizontal alignment
 //
 // The zero value uses word wrapping and start alignment.

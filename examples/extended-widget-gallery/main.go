@@ -11,39 +11,48 @@ import (
 )
 
 type message struct {
-	kind     string
-	index    int
-	value    bool
-	text     string
-	textArea widget.TextAreaState
-	composer widget.ComposerState
+	kind        string
+	index       int
+	value       bool
+	text        string
+	textArea    widget.TextAreaState
+	composer    widget.ComposerState
+	selectable  widget.SelectableTextState
+	copyRequest widget.TextCopyRequest
 }
 
 type gallery struct {
-	page         int
-	feature      bool
-	mode         int
-	theme        int
-	notes        widget.TextAreaState
-	composer     widget.ComposerState
-	history      []string
-	row          int
-	tree         int
-	treeExpanded bool
-	detailsOpen  bool
-	query        string
-	command      int
-	lastAction   string
-	dialogOpen   bool
+	page              int
+	feature           bool
+	mode              int
+	theme             int
+	notes             widget.TextAreaState
+	composer          widget.ComposerState
+	history           []string
+	row               int
+	tree              int
+	treeExpanded      bool
+	detailsOpen       bool
+	selectableContent widget.SelectableTextContent
+	selectableState   widget.SelectableTextState
+	query             string
+	command           int
+	lastAction        string
+	dialogOpen        bool
 }
 
 func newGallery() *gallery {
 	return &gallery{
 		feature: true, treeExpanded: true,
-		notes:      widget.NewTextAreaStateAtEnd("Multiline notes\nremain application state"),
-		composer:   widget.NewComposerStateAtEnd("Draft message"),
-		history:    []string{"Earlier message"},
-		lastAction: "None",
+		notes:    widget.NewTextAreaStateAtEnd("Multiline notes\nremain application state"),
+		composer: widget.NewComposerStateAtEnd("Draft message"),
+		history:  []string{"Earlier message"},
+		selectableContent: widget.NewSelectableTextContent([]tui.TextSpan{
+			tui.NewTextSpan("Selectable", vt.Style{Bold: true}),
+			tui.NewTextSpan(" text keeps application-owned selection.", vt.Style{}),
+		}),
+		selectableState: widget.NewSelectableTextStateWithSelection(10, 0),
+		lastAction:      "None",
 	}
 }
 
@@ -86,6 +95,14 @@ func (a *gallery) Update(received message) tui.Effect[message] {
 		}
 	case "toggle-details":
 		a.detailsOpen = received.value
+	case "selectable":
+		a.selectableState = received.selectable
+	case "copy-text":
+		kind := "selection"
+		if received.copyRequest.Kind == widget.TextCopyDocument {
+			kind = "document"
+		}
+		a.lastAction = "Copied " + kind + ": " + strings.ReplaceAll(received.copyRequest.Text, "\n", " / ")
 	case "query":
 		a.query = received.text
 	case "command":
@@ -264,6 +281,21 @@ func (a *gallery) dataPage() tui.Node[message] {
 			tui.Text[message]("Viewport: "),
 			widget.NewScrollbar[message](100, 30, offset, 24).Orientation(widget.ScrollbarHorizontal).Node(),
 		),
+		tui.Text[message]("SelectableText: Shift-arrows select, Ctrl-C copies, Ctrl-Shift-C copies all"),
+		tui.Border(
+			widget.NewSelectableText(
+				tui.NewNodeID("selectable-text"),
+				a.selectableContent,
+				a.selectableState,
+				func(state widget.SelectableTextState) message {
+					return message{kind: "selectable", selectable: state}
+				},
+			).OnCopy(func(request widget.TextCopyRequest) message {
+				return message{kind: "copy-text", copyRequest: request}
+			}).Node(),
+			vt.Style{},
+		),
+		tui.Text[message]("Last action: "+a.lastAction),
 	)
 }
 

@@ -3,7 +3,7 @@
 [日本語](README_ja.md)
 
 Nagi TUI for Go provides a native cell-based TUI runtime, Unicode-aware
-semantic nodes, 25 standard widgets, supervised asynchronous work,
+semantic nodes, 27 standard widgets, supervised asynchronous work,
 subscriptions, and deterministic test support
 
 ## Requirements
@@ -31,7 +31,7 @@ go run ./examples/counter
 | --- | --- |
 | Module root `tui` | App lifecycle, semantic nodes, scoped key maps, layout, events, Effects, Subscriptions, and terminal loop |
 | `surface` | Geometry, Cells, Surface drawing, composition, diffing, and snapshots |
-| `widget` | 25 standard widgets built from the public TUI API |
+| `widget` | 27 standard widgets built from the public TUI API |
 | `tuitest` | Virtual input, resize, time, effects, subscriptions, and frame inspection |
 | `github.com/mayahiro/nagi-go/text` | Shared Unicode 17 text primitives |
 | `github.com/mayahiro/nagi-go/vt` | Shared typed terminal input/output, Color, Attributes, and Style |
@@ -62,6 +62,7 @@ Run commands from the Go repository root in a real terminal
 | [Async search](examples/async-search/README.md) | `go run ./examples/async-search` |
 | [Event-driven log viewer](examples/log-viewer/README.md) | `go run ./examples/log-viewer` |
 | [Virtual scroll](examples/virtual-scroll/README.md) | `go run ./examples/virtual-scroll` |
+| [Variable-height feed](examples/virtual-feed/README.md) | `go run ./examples/virtual-feed` |
 | [Widget gallery](examples/widget-gallery/README.md) | `go run ./examples/widget-gallery` |
 | [Extended widget gallery](examples/extended-widget-gallery/README.md) | `go run ./examples/extended-widget-gallery` |
 | [Dashboard](examples/dashboard/README.md) | `go run ./examples/dashboard` |
@@ -83,6 +84,13 @@ only the current visible or bounded-overscan `VirtualFragment`.
 `Node.RevealDescendant` keeps a stable descendant ID visible without moving
 focus; virtual targets must be present in the current fragment
 
+`VirtualFlow` retains variable item heights and stable anchors across append,
+prepend, removal, streaming updates, and width changes while constructing only
+the visible fragment and Cell-bounded overscan. It has zero intrinsic height,
+so assign a layout `Length`. `widget.VirtualFeed` adds end following and
+application-controlled empty, loading, and unread slots without owning domain
+state
+
 `TextArea` keeps no-wrap behavior by default. `SoftWrap` adds visual-line
 navigation, `BoundaryNavigation` can pass Up and Down through at visual
 boundaries, and `Viewport` follows an application-identified caret without an
@@ -92,6 +100,10 @@ extra Tab stop
 optional validation content, and insertion limits over `TextArea`. Applications
 retain ownership of message meaning, history persistence, and sensitive-value
 policy
+
+`SelectableText` adds controlled grapheme-aligned keyboard selection over
+immutable styled content. Copy actions emit application messages; clipboard
+I/O, pointer selection, and redaction policy remain application concerns
 
 `Disclosure` keeps expanded state in the application and constructs its body
 only while expanded. Core Modal scopes focus their first descendant on entry

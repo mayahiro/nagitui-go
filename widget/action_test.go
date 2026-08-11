@@ -14,6 +14,7 @@ var verticalCollectionActionDescriptorSink [5]tui.ActionDescriptor
 var treeActionDescriptorSink [7]tui.ActionDescriptor
 var textAreaActionDescriptorSink [textAreaActionCount]tui.ActionDescriptor
 var composerLeadingActionDescriptorSink [3]tui.ActionDescriptor
+var selectableTextActionDescriptorSink [selectableTextActionCount]tui.ActionDescriptor
 var listHasVisibleItemsSink bool
 var commandPaletteActionDescriptorSink [5]tui.ActionDescriptor
 var commandPaletteCommandActionDescriptorSink tui.ActionDescriptor
@@ -154,6 +155,22 @@ func TestComposerLeadingActionDescriptorDefaultsDoNotAllocate(t *testing.T) {
 	})
 	if allocations != 0 {
 		t.Fatalf("Composer leading descriptor allocations = %f, want 0", allocations)
+	}
+}
+
+func TestSelectableTextActionDescriptorDefaultsDoNotAllocate(t *testing.T) {
+	content := NewPlainSelectableTextContent("one two")
+	state := NewSelectableTextStateWithSelection(7, 4)
+	selectableTextActionDescriptorSink = selectableTextActionDescriptors(
+		true, true, true, content, state,
+	)
+	allocations := testing.AllocsPerRun(1_000, func() {
+		selectableTextActionDescriptorSink = selectableTextActionDescriptors(
+			true, true, true, content, state,
+		)
+	})
+	if allocations != 0 {
+		t.Fatalf("SelectableText descriptor allocations = %f, want 0", allocations)
 	}
 }
 

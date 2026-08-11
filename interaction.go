@@ -74,6 +74,7 @@ type InteractionState struct {
 	hasCapture      bool
 	textInputs      map[NodeID]*TextInputState
 	scrolls         map[NodeID]*scrollInteraction
+	virtualFlows    map[NodeID]*virtualFlowInteraction
 	modalFocusStack []modalFocusFrame
 }
 
@@ -101,8 +102,9 @@ type focusLifecycleTransition struct {
 // NewInteractionState returns empty Interaction State
 func NewInteractionState() *InteractionState {
 	return &InteractionState{
-		textInputs: make(map[NodeID]*TextInputState),
-		scrolls:    make(map[NodeID]*scrollInteraction),
+		textInputs:   make(map[NodeID]*TextInputState),
+		scrolls:      make(map[NodeID]*scrollInteraction),
+		virtualFlows: make(map[NodeID]*virtualFlowInteraction),
 	}
 }
 
@@ -138,6 +140,15 @@ func (s *InteractionState) ScrollState(id NodeID) (ScrollState, bool) {
 		return ScrollState{}, false
 	}
 	return scroll.state, true
+}
+
+// VirtualFlowState returns resolved variable-height flow state for a node
+func (s *InteractionState) VirtualFlowState(id NodeID) (VirtualFlowState, bool) {
+	flow, ok := s.virtualFlows[id]
+	if !ok || !flow.hasState {
+		return VirtualFlowState{}, false
+	}
+	return flow.state, true
 }
 
 func (s *InteractionState) ensureTextInput(id NodeID, value string) {
@@ -261,6 +272,11 @@ func (s *InteractionState) reconcile(
 	for id := range s.scrolls {
 		if _, ok := active[id]; !ok {
 			delete(s.scrolls, id)
+		}
+	}
+	for id := range s.virtualFlows {
+		if _, ok := active[id]; !ok {
+			delete(s.virtualFlows, id)
 		}
 	}
 }
