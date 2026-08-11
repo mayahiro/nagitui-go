@@ -3,8 +3,14 @@ package tui
 import "github.com/mayahiro/nagi-go/vt"
 
 type nodeKeyInteraction[Message any] struct {
-	actions []Action[Message]
-	scope   *nodeKeyScope
+	actions          []Action[Message]
+	scope            *nodeKeyScope
+	revealTarget     NodeID
+	hasRevealTarget  bool
+	modalFocus       ModalFocusOptions
+	hasModalFocus    bool
+	focusFallback    NodeID
+	hasFocusFallback bool
 }
 
 type nodeKeyScope struct {

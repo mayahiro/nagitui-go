@@ -942,57 +942,81 @@ func (r *Runtime[Message]) reconcileSubscriptions() error {
 	return nil
 }
 
-func (r *Runtime[Message]) ensureFocusedVisible(
+func (r *Runtime[Message]) ensureRevealTargetsVisible(
 	view *Node[Message],
 	index *treeIndex,
 	actions *actionIndex[Message],
 ) error {
-	if !r.interaction.hasFocus {
-		return nil
-	}
-	focused := r.interaction.focused
-	route := index.route(focused, true)
-	var scrolls []NodeID
-	for _, id := range route {
-		options, ok := view.scrollOptions(id)
-		if ok && options.EnsureFocusedVisible {
-			scrolls = append(scrolls, id)
+	if r.interaction.hasFocus {
+		focused := r.interaction.focused
+		route := index.route(focused, true)
+		for _, viewport := range route {
+			if index.hasExplicitReveal(viewport) {
+				continue
+			}
+			options, ok := view.scrollOptions(viewport)
+			if ok && options.EnsureFocusedVisible {
+				if err := r.ensureTargetVisible(view, index, actions, viewport, focused); err != nil {
+					return err
+				}
+			}
 		}
 	}
-	for _, id := range scrolls {
-		target, ok := index.record(focused)
-		if !ok {
+
+	remaining := len(index.revealTargets)
+	for remaining > 0 {
+		remaining = min(remaining, len(index.revealTargets))
+		if remaining == 0 {
 			break
 		}
-		viewport, ok := index.record(id)
-		if !ok {
-			continue
-		}
-		options, ok := view.scrollOptions(id)
-		if !ok {
-			continue
-		}
-		state, ok := r.interaction.ScrollState(id)
-		if !ok {
-			continue
-		}
-		next := state.Offset
-		if options.Axis.allowsHorizontal() {
-			next.X = visibleAxisOffset(next.X, viewport.rect.X, viewport.rect.Width, target.rect.X, target.rect.Width)
-		}
-		if options.Axis.allowsVertical() {
-			next.Y = visibleAxisOffset(next.Y, viewport.rect.Y, viewport.rect.Height, target.rect.Y, target.rect.Height)
-		}
-		if next == state.Offset {
-			continue
-		}
-		r.interaction.requestScroll(id, next)
-		view.prepareInteraction(r.size, r.interaction)
-		if err := view.buildTreeIndex(r.size, r.interaction, index, actions); err != nil {
+		remaining--
+		target := index.revealTargets[remaining]
+		if err := r.ensureTargetVisible(view, index, actions, target.viewport, target.target); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func (r *Runtime[Message]) ensureTargetVisible(
+	view *Node[Message],
+	index *treeIndex,
+	actions *actionIndex[Message],
+	viewportID NodeID,
+	targetID NodeID,
+) error {
+	if !index.isWithin(targetID, viewportID) {
+		return nil
+	}
+	target, ok := index.record(targetID)
+	if !ok {
+		return nil
+	}
+	viewport, ok := index.record(viewportID)
+	if !ok {
+		return nil
+	}
+	options, ok := view.scrollOptions(viewportID)
+	if !ok {
+		return nil
+	}
+	state, ok := r.interaction.ScrollState(viewportID)
+	if !ok {
+		return nil
+	}
+	next := state.Offset
+	if options.Axis.allowsHorizontal() {
+		next.X = visibleAxisOffset(next.X, viewport.rect.X, viewport.rect.Width, target.rect.X, target.rect.Width)
+	}
+	if options.Axis.allowsVertical() {
+		next.Y = visibleAxisOffset(next.Y, viewport.rect.Y, viewport.rect.Height, target.rect.Y, target.rect.Height)
+	}
+	if next == state.Offset {
+		return nil
+	}
+	r.interaction.requestScroll(viewportID, next)
+	view.prepareInteraction(r.size, r.interaction)
+	return view.buildTreeIndex(r.size, r.interaction, index, actions)
 }
 
 func (r *Runtime[Message]) ensureTree() error {
@@ -1005,7 +1029,16 @@ func (r *Runtime[Message]) ensureTree() error {
 	if err := view.buildTreeIndex(r.size, r.interaction, index, actions); err != nil {
 		return err
 	}
-	r.interaction.reconcile(index.active, nil, index.focusScope())
+	r.interaction.reconcile(
+		index.active,
+		nil,
+		index.focusScope(),
+		index.activeModal,
+		index.hasModal,
+		index.activeModalFocus,
+		"",
+		false,
+	)
 	if r.interaction.hasCapture && !index.allowsInteraction(r.interaction.pointerCapture) {
 		r.interaction.pointerCapture = ""
 		r.interaction.hasCapture = false
@@ -1016,7 +1049,7 @@ func (r *Runtime[Message]) ensureTree() error {
 			return err
 		}
 	}
-	if err := r.ensureFocusedVisible(&view, index, actions); err != nil {
+	if err := r.ensureRevealTargetsVisible(&view, index, actions); err != nil {
 		return err
 	}
 	hasResolved, err := resolveFrameActionsInto(
@@ -1058,7 +1091,20 @@ func (r *Runtime[Message]) renderIfDirty(recycleSurface bool) (*Frame, error) {
 	if err := view.buildTreeIndex(r.size, r.interaction, index, actions); err != nil {
 		return nil, err
 	}
-	r.interaction.reconcile(index.active, r.treeIndex.focusScope(), index.focusScope())
+	focusFallback, hasFocusFallback := NodeID(""), false
+	if r.interaction.hasFocus {
+		focusFallback, hasFocusFallback = r.treeIndex.focusFallback(r.interaction.focused)
+	}
+	r.interaction.reconcile(
+		index.active,
+		r.treeIndex.focusScope(),
+		index.focusScope(),
+		index.activeModal,
+		index.hasModal,
+		index.activeModalFocus,
+		focusFallback,
+		hasFocusFallback,
+	)
 	if r.interaction.hasCapture && !index.allowsInteraction(r.interaction.pointerCapture) {
 		r.interaction.pointerCapture = ""
 		r.interaction.hasCapture = false
@@ -1069,7 +1115,7 @@ func (r *Runtime[Message]) renderIfDirty(recycleSurface bool) (*Frame, error) {
 			return nil, err
 		}
 	}
-	if err := r.ensureFocusedVisible(&view, index, actions); err != nil {
+	if err := r.ensureRevealTargetsVisible(&view, index, actions); err != nil {
 		return nil, err
 	}
 	hasResolved, err := resolveFrameActionsInto(

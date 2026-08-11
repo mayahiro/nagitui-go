@@ -68,12 +68,34 @@ type preparedScroll struct {
 
 // InteractionState is runtime-owned UI continuity keyed by stable Node IDs
 type InteractionState struct {
-	focused        NodeID
-	hasFocus       bool
-	pointerCapture NodeID
-	hasCapture     bool
-	textInputs     map[NodeID]*TextInputState
-	scrolls        map[NodeID]*scrollInteraction
+	focused         NodeID
+	hasFocus        bool
+	pointerCapture  NodeID
+	hasCapture      bool
+	textInputs      map[NodeID]*TextInputState
+	scrolls         map[NodeID]*scrollInteraction
+	modalFocusStack []modalFocusFrame
+}
+
+type modalFocusFrame struct {
+	id          NodeID
+	returnFocus NodeID
+	hasReturn   bool
+}
+
+type focusLifecycleKind uint8
+
+const (
+	focusLifecycleStable focusLifecycleKind = iota
+	focusLifecycleEnter
+	focusLifecycleExit
+)
+
+type focusLifecycleTransition struct {
+	kind      focusLifecycleKind
+	initial   ModalInitialFocus
+	target    NodeID
+	hasTarget bool
 }
 
 // NewInteractionState returns empty Interaction State
@@ -212,8 +234,19 @@ func resolvePreparedScroll(
 	return preparedScroll{state: state, followingEnd: followingEnd}
 }
 
-func (s *InteractionState) reconcile(active map[NodeID]struct{}, previous, current []NodeID) {
-	s.focused, s.hasFocus = reconcileFocus(previous, current, optionalNodeID(s.focused, s.hasFocus))
+func (s *InteractionState) reconcile(
+	active map[NodeID]struct{},
+	previous, current []NodeID,
+	activeModal NodeID,
+	hasModal bool,
+	modalFocus ModalFocusOptions,
+	focusFallback NodeID,
+	hasFocusFallback bool,
+) {
+	transition := s.reconcileModalFocus(active, activeModal, hasModal, modalFocus)
+	s.focused, s.hasFocus = s.reconcileLifecycleFocus(
+		transition, previous, current, focusFallback, hasFocusFallback,
+	)
 	if s.hasCapture {
 		if _, ok := active[s.pointerCapture]; !ok {
 			s.pointerCapture = ""
@@ -230,6 +263,100 @@ func (s *InteractionState) reconcile(active map[NodeID]struct{}, previous, curre
 			delete(s.scrolls, id)
 		}
 	}
+}
+
+func (s *InteractionState) reconcileLifecycleFocus(
+	transition focusLifecycleTransition,
+	previous, current []NodeID,
+	focusFallback NodeID,
+	hasFocusFallback bool,
+) (NodeID, bool) {
+	switch transition.kind {
+	case focusLifecycleEnter:
+		switch transition.initial.kind {
+		case modalInitialFocusFirst:
+			if len(current) > 0 {
+				return current[0], true
+			}
+			return "", false
+		case modalInitialFocusTarget:
+			if containsNodeID(current, transition.initial.target) {
+				return transition.initial.target, true
+			}
+			if len(current) > 0 {
+				return current[0], true
+			}
+			return "", false
+		case modalInitialFocusNone:
+			return "", false
+		}
+	case focusLifecycleExit:
+		if !transition.hasTarget {
+			return "", false
+		}
+		if containsNodeID(current, transition.target) {
+			return transition.target, true
+		}
+		return reconcileFocus(previous, current, optionalNodeID(s.focused, s.hasFocus))
+	}
+	if s.hasFocus && !containsNodeID(current, s.focused) &&
+		hasFocusFallback && containsNodeID(current, focusFallback) {
+		return focusFallback, true
+	}
+	return reconcileFocus(previous, current, optionalNodeID(s.focused, s.hasFocus))
+}
+
+func (s *InteractionState) reconcileModalFocus(
+	active map[NodeID]struct{},
+	activeModal NodeID,
+	hasModal bool,
+	options ModalFocusOptions,
+) focusLifecycleTransition {
+	if !hasModal {
+		if len(s.modalFocusStack) == 0 {
+			return focusLifecycleTransition{kind: focusLifecycleStable}
+		}
+		frame := s.modalFocusStack[0]
+		s.modalFocusStack = s.modalFocusStack[:0]
+		return focusLifecycleTransition{
+			kind: focusLifecycleExit, target: frame.returnFocus, hasTarget: frame.hasReturn,
+		}
+	}
+
+	for position := range s.modalFocusStack {
+		if s.modalFocusStack[position].id != activeModal {
+			continue
+		}
+		if position+1 == len(s.modalFocusStack) {
+			return focusLifecycleTransition{kind: focusLifecycleStable}
+		}
+		frame := s.modalFocusStack[position+1]
+		s.modalFocusStack = s.modalFocusStack[:position+1]
+		return focusLifecycleTransition{
+			kind: focusLifecycleExit, target: frame.returnFocus, hasTarget: frame.hasReturn,
+		}
+	}
+
+	previousFocus, hasPreviousFocus := s.focused, s.hasFocus
+	for len(s.modalFocusStack) > 0 {
+		last := s.modalFocusStack[len(s.modalFocusStack)-1]
+		if _, stillPresent := active[last.id]; stillPresent {
+			break
+		}
+		previousFocus, hasPreviousFocus = last.returnFocus, last.hasReturn
+		s.modalFocusStack = s.modalFocusStack[:len(s.modalFocusStack)-1]
+	}
+	frame := modalFocusFrame{id: activeModal}
+	switch options.ReturnFocus.kind {
+	case modalReturnFocusPrevious:
+		frame.returnFocus, frame.hasReturn = previousFocus, hasPreviousFocus
+	case modalReturnFocusTarget:
+		frame.returnFocus, frame.hasReturn = options.ReturnFocus.target, true
+	case modalReturnFocusNone:
+		frame.hasReturn = false
+	}
+	s.modalFocusStack = append(s.modalFocusStack, frame)
+	return focusLifecycleTransition{kind: focusLifecycleEnter, initial: options.Initial}
 }
 
 func normalizeScrollOffset(axis ScrollAxis, offset ScrollOffset) ScrollOffset {

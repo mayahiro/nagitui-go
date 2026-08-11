@@ -157,6 +157,176 @@ func TestTextInputRuntimeFixtures(t *testing.T) {
 	}
 }
 
+type fixtureModalFocusApp struct {
+	view   string
+	first  ModalFocusOptions
+	second ModalFocusOptions
+}
+
+func (*fixtureModalFocusApp) Init() Effect[string] { return NoneEffect[string]() }
+func (*fixtureModalFocusApp) Update(string) Effect[string] {
+	return NoneEffect[string]()
+}
+func (*fixtureModalFocusApp) Subscriptions() Subscription[string] {
+	return NoneSubscription[string]()
+}
+func (a *fixtureModalFocusApp) View(ViewContext) Node[string] {
+	background := fixtureModalFocusBackground()
+	switch a.view {
+	case "base":
+		return background
+	case "a":
+		return Stack(background, fixtureModalFocusNode("a", a.first, false))
+	case "a-empty":
+		return Stack(background, fixtureModalFocusNode("a", a.first, true))
+	case "b":
+		return Stack(background, fixtureModalFocusNode("b", a.second, false))
+	case "a+b":
+		return Stack(
+			background,
+			fixtureModalFocusNode("a", a.first, false),
+			fixtureModalFocusNode("b", a.second, false),
+		)
+	case "a>b":
+		return Stack(
+			background,
+			ModalWithFocus(
+				"modal-a",
+				Column(
+					fixtureModalFocusContent("a"),
+					fixtureModalFocusNode("b", a.second, false),
+				),
+				a.first,
+			),
+		)
+	default:
+		panic("unknown modal focus fixture view " + a.view)
+	}
+}
+
+func TestModalFocusLifecycleFixtures(t *testing.T) {
+	records, err := conformance.Load(
+		"interaction/modal-focus-lifecycle.txt",
+		"modal-focus-lifecycle",
+		"views", "focus", "a-initial", "a-return", "b-initial", "b-return", "expected",
+	)
+	if errors.Is(err, conformance.ErrNoFixtureRoot) {
+		t.Skip(err)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, record := range records {
+		record := record
+		t.Run(record.ID, func(t *testing.T) {
+			views := runtimeFixtureList(record.Field("views"))
+			expected := runtimeFixtureList(record.Field("expected"))
+			if len(views) != len(expected) {
+				t.Fatalf("views = %d, expected = %d", len(views), len(expected))
+			}
+			app := &fixtureModalFocusApp{
+				view: views[0],
+				first: fixtureModalFocusOptions(
+					record.Field("a-initial"), record.Field("a-return"),
+				),
+				second: fixtureModalFocusOptions(
+					record.Field("b-initial"), record.Field("b-return"),
+				),
+			}
+			runtime, err := NewRuntimeWithClock(
+				app,
+				NewRuntimeConfig(Size{Width: 30, Height: 8}),
+				NewVirtualClock(),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer runtime.Close()
+			if _, err := runtime.RenderIfDirty(); err != nil {
+				t.Fatal(err)
+			}
+			if focus := record.Field("focus"); focus != "none" {
+				focused, err := runtime.RequestFocus(NodeID(focus))
+				if err != nil || !focused {
+					t.Fatalf("initial focus = %t, %v", focused, err)
+				}
+			}
+			assertFixtureModalFocus(t, runtime.Interaction(), expected[0], 0)
+
+			for step := 1; step < len(views); step++ {
+				app.view = views[step]
+				runtime.RequestFrame()
+				if _, err := runtime.RenderIfDirty(); err != nil {
+					t.Fatal(err)
+				}
+				assertFixtureModalFocus(t, runtime.Interaction(), expected[step], step)
+			}
+		})
+	}
+}
+
+func fixtureModalFocusBackground() Node[string] {
+	return Column(
+		Text[string]("background first").Focusable("background-first"),
+		Text[string]("opener").Focusable("opener"),
+		Text[string]("background target").Focusable("background-target"),
+	)
+}
+
+func fixtureModalFocusContent(prefix string) Node[string] {
+	return Column(
+		Text[string](prefix+" first").Focusable(NodeID(prefix+"-first")),
+		Text[string](prefix+" target").Focusable(NodeID(prefix+"-target")),
+	)
+}
+
+func fixtureModalFocusNode(prefix string, focus ModalFocusOptions, empty bool) Node[string] {
+	child := Text[string](prefix + " empty")
+	if !empty {
+		child = fixtureModalFocusContent(prefix)
+	}
+	return ModalWithFocus(NodeID("modal-"+prefix), child, focus)
+}
+
+func fixtureModalFocusOptions(initial, returnFocus string) ModalFocusOptions {
+	options := DefaultModalFocusOptions()
+	switch {
+	case initial == "first":
+		options.Initial = ModalInitialFocusFirst()
+	case initial == "none":
+		options.Initial = ModalInitialFocusNone()
+	case strings.HasPrefix(initial, "target/"):
+		options.Initial = ModalInitialFocusTarget(NodeID(strings.TrimPrefix(initial, "target/")))
+	default:
+		panic("invalid modal initial focus " + initial)
+	}
+	switch {
+	case returnFocus == "previous":
+		options.ReturnFocus = ModalReturnFocusPrevious()
+	case returnFocus == "none":
+		options.ReturnFocus = ModalReturnFocusNone()
+	case strings.HasPrefix(returnFocus, "target/"):
+		options.ReturnFocus = ModalReturnFocusTarget(NodeID(strings.TrimPrefix(returnFocus, "target/")))
+	default:
+		panic("invalid modal return focus " + returnFocus)
+	}
+	return options
+}
+
+func assertFixtureModalFocus(t *testing.T, interaction *InteractionState, expected string, step int) {
+	t.Helper()
+	actual, hasFocus := interaction.Focused()
+	if expected == "none" {
+		if hasFocus {
+			t.Fatalf("step %d focus = %q, want none", step, actual)
+		}
+		return
+	}
+	if !hasFocus || actual != NodeID(expected) {
+		t.Fatalf("step %d focus = %q, %t, want %q", step, actual, hasFocus, expected)
+	}
+}
+
 type fixtureKeyRouting struct {
 	scenario string
 	updates  []string
@@ -374,7 +544,9 @@ func fixtureFocusNavigationView(scenario string) Node[string] {
 		}
 		return content.WithKeyScope(NewKeyScope("root", keyMap))
 	case "focus-modal-no-focus":
-		return Padding(Modal("modal", content), Insets{})
+		focus := DefaultModalFocusOptions()
+		focus.Initial = ModalInitialFocusNone()
+		return Padding(ModalWithFocus("modal", content, focus), Insets{})
 	default:
 		return content
 	}
@@ -455,6 +627,132 @@ func fixtureCoreScrollOptions(axis ScrollAxis, message string) ScrollViewportOpt
 			return message
 		},
 	}
+}
+
+type fixtureRevealRuntime struct {
+	lines       uint32
+	viewport    uint32
+	priorReveal NodeID
+	hasPrior    bool
+	reveal      NodeID
+	hasReveal   bool
+	focus       NodeID
+	hasFocus    bool
+	ensureFocus bool
+	stickToEnd  bool
+	updates     []string
+}
+
+func (*fixtureRevealRuntime) Init() Effect[string] { return NoneEffect[string]() }
+func (a *fixtureRevealRuntime) Update(message string) Effect[string] {
+	a.updates = append(a.updates, message)
+	return NoneEffect[string]()
+}
+func (*fixtureRevealRuntime) Subscriptions() Subscription[string] {
+	return NoneSubscription[string]()
+}
+func (a *fixtureRevealRuntime) View(ViewContext) Node[string] {
+	rows := make([]Node[string], a.lines)
+	for index := range a.lines {
+		id := NodeID("row-" + strconv.FormatUint(uint64(index), 10))
+		row := Text[string](strconv.FormatUint(uint64(index), 10)).WithID(id)
+		if a.hasFocus && a.focus == id {
+			row = row.Focusable(id)
+		}
+		rows[index] = row.WithLength(Fixed(1))
+	}
+	viewport := ScrollViewportWithOptions(
+		"viewport",
+		Column(rows...),
+		ScrollViewportOptions[string]{
+			Axis:                 ScrollAxisVertical,
+			StickToEnd:           a.stickToEnd,
+			EnsureFocusedVisible: a.ensureFocus,
+			OnScroll:             func(ScrollState) string { return "user-scroll" },
+		},
+	)
+	if a.hasPrior {
+		viewport = viewport.RevealDescendant(a.priorReveal)
+	}
+	if a.hasReveal {
+		viewport = viewport.RevealDescendant(a.reveal)
+	}
+	return Column(
+		viewport.WithLength(Fixed(a.viewport)),
+		Text[string]("outside").WithID("outside").WithLength(Fixed(1)),
+	)
+}
+
+func TestExplicitRevealTargetFixtures(t *testing.T) {
+	records, err := conformance.Load(
+		"interaction/reveal-runtime.txt",
+		"interaction-reveal-runtime",
+		"lines",
+		"viewport",
+		"prior-reveal",
+		"reveal",
+		"focus",
+		"ensure-focus",
+		"stick-end",
+		"expected-offset",
+		"expected-top",
+	)
+	if errors.Is(err, conformance.ErrNoFixtureRoot) {
+		t.Skip(err)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, record := range records {
+		t.Run(record.ID, func(t *testing.T) {
+			viewport := runtimeFixtureNumber(t, record.Field("viewport"))
+			app := &fixtureRevealRuntime{
+				lines:       runtimeFixtureNumber(t, record.Field("lines")),
+				viewport:    viewport,
+				ensureFocus: record.Field("ensure-focus") == "true",
+				stickToEnd:  record.Field("stick-end") == "true",
+			}
+			app.priorReveal, app.hasPrior = runtimeFixtureOptionalNodeID(record.Field("prior-reveal"))
+			app.reveal, app.hasReveal = runtimeFixtureOptionalNodeID(record.Field("reveal"))
+			app.focus, app.hasFocus = runtimeFixtureOptionalNodeID(record.Field("focus"))
+			runtime, err := NewRuntimeWithClock[string](
+				app,
+				NewRuntimeConfig(Size{Width: 8, Height: viewport + 1}),
+				NewVirtualClock(),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			frame, err := runtime.RenderIfDirty()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if app.hasFocus {
+				if focused, err := runtime.RequestFocus(app.focus); err != nil || !focused {
+					t.Fatalf("RequestFocus = %t, %v", focused, err)
+				}
+				frame, err = runtime.RenderIfDirty()
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			expectedOffset := runtimeFixtureNumber(t, record.Field("expected-offset"))
+			if offset := runtime.Interaction().ScrollOffset("viewport"); offset.Y != expectedOffset {
+				t.Fatalf("offset = %+v, want Y %d", offset, expectedOffset)
+			}
+			assertNodeCell(t, frame.Surface(), 0, 0, record.Field("expected-top"))
+			if runtime.QueuedMessages() != 0 || len(app.updates) != 0 {
+				t.Fatalf("automatic reveal emitted user-scroll message: queued=%d updates=%v", runtime.QueuedMessages(), app.updates)
+			}
+		})
+	}
+}
+
+func runtimeFixtureOptionalNodeID(value string) (NodeID, bool) {
+	if value == "-" {
+		return "", false
+	}
+	return NodeID(value), true
 }
 
 func fixtureCoreAction(code vt.KeyCode, ignored bool) Action[string] {

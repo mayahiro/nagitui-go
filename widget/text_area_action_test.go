@@ -145,7 +145,10 @@ func TestTextAreaActionsMatchSharedFixtures(t *testing.T) {
 			expectedState := textAreaActionFixtureState(
 				t, record.Text("expected"), record.Field("expected-cursor"), record.Field("expected-anchor"),
 			)
-			if app.state != expectedState {
+			actualState := app.state
+			actualState.preferredColumn = 0
+			actualState.hasPreferred = false
+			if actualState != expectedState {
 				t.Errorf("state = %#v, want %#v", app.state, expectedState)
 			}
 			if dispatch.Messages() != len(expectedMessages) {

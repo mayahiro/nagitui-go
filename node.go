@@ -86,6 +86,84 @@ type VirtualFragment[Message any] struct {
 	Node Node[Message]
 }
 
+type modalInitialFocusKind uint8
+
+const (
+	modalInitialFocusFirst modalInitialFocusKind = iota
+	modalInitialFocusTarget
+	modalInitialFocusNone
+)
+
+// ModalInitialFocus selects focus when a modal becomes active
+//
+// The zero value selects the first focusable node in the modal scope.
+type ModalInitialFocus struct {
+	kind   modalInitialFocusKind
+	target NodeID
+}
+
+// ModalInitialFocusFirst selects the first focusable node in a modal scope
+func ModalInitialFocusFirst() ModalInitialFocus {
+	return ModalInitialFocus{kind: modalInitialFocusFirst}
+}
+
+// ModalInitialFocusTarget selects a stable node and falls back to the first focusable node
+func ModalInitialFocusTarget(id NodeID) ModalInitialFocus {
+	return ModalInitialFocus{kind: modalInitialFocusTarget, target: id}
+}
+
+// ModalInitialFocusNone leaves a modal scope unfocused
+func ModalInitialFocusNone() ModalInitialFocus {
+	return ModalInitialFocus{kind: modalInitialFocusNone}
+}
+
+type modalReturnFocusKind uint8
+
+const (
+	modalReturnFocusPrevious modalReturnFocusKind = iota
+	modalReturnFocusTarget
+	modalReturnFocusNone
+)
+
+// ModalReturnFocus selects focus when a modal stops being active
+//
+// The zero value returns to the node focused immediately before modal entry.
+type ModalReturnFocus struct {
+	kind   modalReturnFocusKind
+	target NodeID
+}
+
+// ModalReturnFocusPrevious returns to the node focused before modal entry
+func ModalReturnFocusPrevious() ModalReturnFocus {
+	return ModalReturnFocus{kind: modalReturnFocusPrevious}
+}
+
+// ModalReturnFocusTarget selects a stable node after a modal closes
+func ModalReturnFocusTarget(id NodeID) ModalReturnFocus {
+	return ModalReturnFocus{kind: modalReturnFocusTarget, target: id}
+}
+
+// ModalReturnFocusNone leaves the resumed scope unfocused
+func ModalReturnFocusNone() ModalReturnFocus {
+	return ModalReturnFocus{kind: modalReturnFocusNone}
+}
+
+// ModalFocusOptions contains entry and return focus policies for one modal scope
+type ModalFocusOptions struct {
+	// Initial is applied when the modal becomes active
+	Initial ModalInitialFocus
+	// ReturnFocus is applied when the modal stops being active
+	ReturnFocus ModalReturnFocus
+}
+
+// DefaultModalFocusOptions returns first-on-entry and previous-on-close policies
+func DefaultModalFocusOptions() ModalFocusOptions {
+	return ModalFocusOptions{
+		Initial:     ModalInitialFocusFirst(),
+		ReturnFocus: ModalReturnFocusPrevious(),
+	}
+}
+
 // NewVirtualFragment returns a fragment beginning at origin
 func NewVirtualFragment[Message any](origin ScrollOffset, node Node[Message]) VirtualFragment[Message] {
 	return VirtualFragment[Message]{Origin: origin, Node: node}
@@ -393,8 +471,19 @@ func VirtualScrollViewportWithOptions[Message any](
 }
 
 // Modal marks a subtree as the active modal routing and focus scope
+//
+// The default focus lifecycle selects the first focusable descendant on entry
+// and returns to the previously focused node on close.
 func Modal[Message any](id NodeID, child Node[Message]) Node[Message] {
-	return Node[Message]{kind: nodeModal, child: &child, id: id, hasID: true}
+	return ModalWithFocus(id, child, DefaultModalFocusOptions())
+}
+
+// ModalWithFocus returns a modal scope with explicit entry and return focus policies
+func ModalWithFocus[Message any](id NodeID, child Node[Message], focus ModalFocusOptions) Node[Message] {
+	return Node[Message]{
+		kind: nodeModal, child: &child, id: id, hasID: true,
+		keyInteraction: &nodeKeyInteraction[Message]{modalFocus: focus, hasModalFocus: true},
+	}
 }
 
 // WithID attaches a stable semantic identity without changing focus behavior
@@ -425,6 +514,18 @@ func (n Node[Message]) TabStop(enabled bool) Node[Message] {
 func (n Node[Message]) WithFocusedStyle(style vt.Style) Node[Message] {
 	n.focusedStyle = style
 	n.hasFocusedStyle = true
+	return n
+}
+
+// FocusFallback prefers a stable focus target when a focused node in this subtree disappears
+//
+// The target must remain focusable in the next frame and belong to the active
+// modal scope. Nested declarations override outer declarations. When the
+// target is unavailable, normal deterministic reconciliation is used.
+func (n Node[Message]) FocusFallback(target NodeID) Node[Message] {
+	n.keyInteraction = cloneNodeKeyInteraction(n.keyInteraction)
+	n.keyInteraction.focusFallback = target
+	n.keyInteraction.hasFocusFallback = true
 	return n
 }
 
@@ -462,6 +563,21 @@ func (n Node[Message]) WithKeyScope(scope KeyScope) Node[Message] {
 	return n
 }
 
+// RevealDescendant keeps an identified descendant visible inside this ScrollViewport
+//
+// The target must be present below an eager ScrollViewport or in the current
+// fragment of a virtual ScrollViewport. A later call replaces the target. On
+// other node kinds this metadata has no effect.
+func (n Node[Message]) RevealDescendant(target NodeID) Node[Message] {
+	if n.kind != nodeScrollViewport && n.kind != nodeVirtualScrollViewport {
+		return n
+	}
+	n.keyInteraction = cloneNodeKeyInteraction(n.keyInteraction)
+	n.keyInteraction.revealTarget = target
+	n.keyInteraction.hasRevealTarget = true
+	return n
+}
+
 func cloneNodeKeyInteraction[Message any](
 	interaction *nodeKeyInteraction[Message],
 ) *nodeKeyInteraction[Message] {
@@ -470,6 +586,12 @@ func cloneNodeKeyInteraction[Message any](
 		return cloned
 	}
 	cloned.actions = interaction.actions
+	cloned.revealTarget = interaction.revealTarget
+	cloned.hasRevealTarget = interaction.hasRevealTarget
+	cloned.modalFocus = interaction.modalFocus
+	cloned.hasModalFocus = interaction.hasModalFocus
+	cloned.focusFallback = interaction.focusFallback
+	cloned.hasFocusFallback = interaction.hasFocusFallback
 	if interaction.scope != nil {
 		scope := *interaction.scope
 		cloned.scope = &scope

@@ -62,6 +62,18 @@ const ExpandActionID tui.ActionID = "nagi.expand"
 // DismissActionID is the stable Action ID for dismissing the current transient surface
 const DismissActionID tui.ActionID = "nagi.dismiss"
 
+// ConfirmActionID is the stable Action ID for invoking a dialog's explicit default action
+const ConfirmActionID tui.ActionID = "nagi.confirm"
+
+// ComposerSubmitActionID is the stable Action ID for submitting a Composer value
+const ComposerSubmitActionID tui.ActionID = "nagi.composer.submit"
+
+// HistoryPreviousActionID is the stable Action ID for recalling the previous history entry
+const HistoryPreviousActionID tui.ActionID = "nagi.history.previous"
+
+// HistoryNextActionID is the stable Action ID for recalling the next history entry
+const HistoryNextActionID tui.ActionID = "nagi.history.next"
+
 const (
 	activateActionLabel                 = "Activate"
 	selectionPreviousActionLabel        = "Previous"
@@ -96,6 +108,14 @@ var dismissActionDescriptor = tui.NewActionDescriptor(
 	DismissActionID,
 	"Dismiss",
 	[]tui.KeyBinding{repeatableActionBinding(vt.KeyEscape)},
+)
+
+var confirmActionDescriptor = tui.NewActionDescriptor(
+	ConfirmActionID,
+	"Confirm",
+	[]tui.KeyBinding{
+		tui.NewKeyBinding(tui.NewKeyStroke(vt.KeyEnter, vt.Modifiers{})),
+	},
 )
 
 var defaultVerticalCollectionActionDescriptors = [4]tui.ActionDescriptor{
@@ -145,6 +165,14 @@ func ActivateActionDescriptor() tui.ActionDescriptor {
 // enabled to preserve standard transient-surface behavior.
 func DismissActionDescriptor() tui.ActionDescriptor {
 	return dismissActionDescriptor
+}
+
+// ConfirmActionDescriptor returns the enabled standard dialog-confirmation descriptor
+//
+// Exact unmodified Enter is the default binding. Explicit repeat events are
+// ignored by this root action.
+func ConfirmActionDescriptor() tui.ActionDescriptor {
+	return confirmActionDescriptor
 }
 
 func repeatableActionBinding(code vt.KeyCode) tui.KeyBinding {

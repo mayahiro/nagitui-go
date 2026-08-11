@@ -1379,3 +1379,59 @@ func TestFocusedDescendantIsRevealedWhenRequested(t *testing.T) {
 	}
 	assertNodeCell(t, frame.Surface(), 0, 1, "4")
 }
+
+type nestedRevealApp struct{}
+
+func (*nestedRevealApp) Init() Effect[struct{}] { return NoneEffect[struct{}]() }
+func (*nestedRevealApp) Update(struct{}) Effect[struct{}] {
+	return NoneEffect[struct{}]()
+}
+func (*nestedRevealApp) Subscriptions() Subscription[struct{}] {
+	return NoneSubscription[struct{}]()
+}
+func (*nestedRevealApp) View(ViewContext) Node[struct{}] {
+	rows := make([]Node[struct{}], 5)
+	for index := range rows {
+		row := Text[struct{}](strconv.Itoa(index))
+		if index == 4 {
+			row = row.WithID("target")
+		}
+		rows[index] = row.WithLength(Fixed(1))
+	}
+	inner := ScrollViewportWithOptions(
+		"inner",
+		Column(rows...),
+		ScrollViewportOptions[struct{}]{Axis: ScrollAxisVertical},
+	).RevealDescendant("target").WithLength(Fixed(2))
+	return ScrollViewportWithOptions(
+		"outer",
+		Column(
+			Text[struct{}]("header").WithLength(Fixed(2)),
+			inner,
+		),
+		ScrollViewportOptions[struct{}]{Axis: ScrollAxisVertical},
+	).RevealDescendant("target")
+}
+
+func TestNestedExplicitRevealAdjustsInnerBeforeOuter(t *testing.T) {
+	runtime, err := NewRuntimeWithClock[struct{}](
+		&nestedRevealApp{},
+		NewRuntimeConfig(Size{Width: 8, Height: 3}),
+		NewVirtualClock(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	frame, err := runtime.RenderIfDirty()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if offset := runtime.Interaction().ScrollOffset("inner"); offset != (ScrollOffset{Y: 3}) {
+		t.Fatalf("inner offset = %+v", offset)
+	}
+	if offset := runtime.Interaction().ScrollOffset("outer"); offset != (ScrollOffset{Y: 1}) {
+		t.Fatalf("outer offset = %+v", offset)
+	}
+	assertNodeCell(t, frame.Surface(), 0, 2, "4")
+}

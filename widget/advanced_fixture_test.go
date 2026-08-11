@@ -63,6 +63,8 @@ func TestTextAreaEditFixtures(t *testing.T) {
 			edit,
 			record.Text("text"),
 		)
+		actual.preferredColumn = 0
+		actual.hasPreferred = false
 		expected := NewTextAreaState(record.Text("expected"), fixtureInt(t, record.Field("expected-cursor")))
 		if actual != expected {
 			t.Errorf("case %s: state = %#v, want %#v", record.ID, actual, expected)

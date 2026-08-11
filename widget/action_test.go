@@ -13,6 +13,7 @@ var tabsNavigationActionDescriptorSink [4]tui.ActionDescriptor
 var verticalCollectionActionDescriptorSink [5]tui.ActionDescriptor
 var treeActionDescriptorSink [7]tui.ActionDescriptor
 var textAreaActionDescriptorSink [textAreaActionCount]tui.ActionDescriptor
+var composerLeadingActionDescriptorSink [3]tui.ActionDescriptor
 var listHasVisibleItemsSink bool
 var commandPaletteActionDescriptorSink [5]tui.ActionDescriptor
 var commandPaletteCommandActionDescriptorSink tui.ActionDescriptor
@@ -47,6 +48,16 @@ func TestDismissActionDescriptorReuseDoesNotAllocate(t *testing.T) {
 	actionDescriptorSink = DismissActionDescriptor()
 	allocations := testing.AllocsPerRun(1_000, func() {
 		actionDescriptorSink = DismissActionDescriptor()
+	})
+	if allocations != 0 {
+		t.Fatalf("descriptor allocations = %f, want 0", allocations)
+	}
+}
+
+func TestConfirmActionDescriptorReuseDoesNotAllocate(t *testing.T) {
+	actionDescriptorSink = ConfirmActionDescriptor()
+	allocations := testing.AllocsPerRun(1_000, func() {
+		actionDescriptorSink = ConfirmActionDescriptor()
 	})
 	if allocations != 0 {
 		t.Fatalf("descriptor allocations = %f, want 0", allocations)
@@ -116,9 +127,13 @@ func TestTreeActionDescriptorDefaultsDoNotAllocate(t *testing.T) {
 }
 
 func TestTextAreaActionDescriptorDefaultsDoNotAllocate(t *testing.T) {
-	textAreaActionDescriptorSink = textAreaActionDescriptors(true, true, true)
+	textAreaActionDescriptorSink = textAreaActionDescriptors(
+		true, true, true, TextAreaBoundaryConsume, TextAreaState{}, 0, false,
+	)
 	allocations := testing.AllocsPerRun(1_000, func() {
-		textAreaActionDescriptorSink = textAreaActionDescriptors(true, true, true)
+		textAreaActionDescriptorSink = textAreaActionDescriptors(
+			true, true, true, TextAreaBoundaryConsume, TextAreaState{}, 0, false,
+		)
 	})
 	if allocations != 0 {
 		t.Fatalf("TextArea descriptor allocations = %f, want 0", allocations)
@@ -129,6 +144,16 @@ func TestTextAreaActionDescriptorDefaultsDoNotAllocate(t *testing.T) {
 				t.Fatalf("TextArea action %s does not allow repeat", descriptor.ID())
 			}
 		}
+	}
+}
+
+func TestComposerLeadingActionDescriptorDefaultsDoNotAllocate(t *testing.T) {
+	composerLeadingActionDescriptorSink = composerLeadingActionDescriptors(true, true, true, true)
+	allocations := testing.AllocsPerRun(1_000, func() {
+		composerLeadingActionDescriptorSink = composerLeadingActionDescriptors(true, true, true, true)
+	})
+	if allocations != 0 {
+		t.Fatalf("Composer leading descriptor allocations = %f, want 0", allocations)
 	}
 }
 

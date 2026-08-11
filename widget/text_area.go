@@ -15,6 +15,8 @@ type TextAreaState struct {
 	selectionAnchor  int
 	hasSelection     bool
 	horizontalOffset int
+	preferredColumn  int
+	hasPreferred     bool
 }
 
 // NewTextAreaState returns state with cursor clamped down to a grapheme boundary
@@ -81,6 +83,23 @@ func (s TextAreaState) HorizontalOffset() int {
 	return max(s.horizontalOffset, 0)
 }
 
+// PreferredColumn returns the terminal-cell column retained across vertical
+// movement
+func (s TextAreaState) PreferredColumn() (int, bool) {
+	return s.preferredColumn, s.hasPreferred
+}
+
+// TextAreaBoundaryNavigation controls vertical movement at the first and last
+// visual line
+type TextAreaBoundaryNavigation uint8
+
+const (
+	// TextAreaBoundaryConsume consumes a boundary action without emitting state
+	TextAreaBoundaryConsume TextAreaBoundaryNavigation = iota
+	// TextAreaBoundaryBubble lets an ancestor action handle boundary movement
+	TextAreaBoundaryBubble
+)
+
 // TextAreaStyle contains the visual styles used by a TextArea
 type TextAreaStyle struct {
 	// Normal is used by editable text
@@ -114,10 +133,22 @@ type TextArea[Message any] struct {
 	enabled        bool
 	style          TextAreaStyle
 	selectionStyle vt.Style
+	wrapWidth      int
+	hasWrap        bool
+	boundary       TextAreaBoundaryNavigation
+	viewport       *textAreaViewport
 	onChange       func(TextAreaState) Message
 	onUndo         func() Message
 	onRedo         func() Message
 }
+
+type textAreaViewport struct {
+	id      tui.NodeID
+	caretID tui.NodeID
+	height  tui.Length
+}
+
+type textAreaInsertionPolicy func(TextAreaState, string) (string, bool)
 
 // NewTextArea returns a text area using application-owned editing state
 //
@@ -154,6 +185,38 @@ func (a TextArea[Message]) SelectionStyle(style vt.Style) TextArea[Message] {
 	return a
 }
 
+// NoWrap uses logical lines with the application-owned horizontal offset
+func (a TextArea[Message]) NoWrap() TextArea[Message] {
+	a.hasWrap = false
+	a.wrapWidth = 0
+	return a
+}
+
+// SoftWrap wraps visual lines at a terminal-cell width without changing text
+//
+// A non-positive width is normalized to one Cell. Applications should
+// recompute the width from ViewContext after a resize.
+func (a TextArea[Message]) SoftWrap(width int) TextArea[Message] {
+	a.hasWrap = true
+	a.wrapWidth = max(width, 1)
+	return a
+}
+
+// BoundaryNavigation sets how Up and Down behave at visual-line boundaries
+func (a TextArea[Message]) BoundaryNavigation(navigation TextAreaBoundaryNavigation) TextArea[Message] {
+	a.boundary = navigation
+	return a
+}
+
+// Viewport wraps the editor in a vertical viewport that follows its caret
+//
+// viewportID, caretID, and the TextArea root ID must be distinct stable IDs.
+// The viewport is not an additional Tab stop.
+func (a TextArea[Message]) Viewport(viewportID, caretID tui.NodeID, height tui.Length) TextArea[Message] {
+	a.viewport = &textAreaViewport{id: viewportID, caretID: caretID, height: height}
+	return a
+}
+
 // OnUndo sets the message emitted for Control-Z
 func (a TextArea[Message]) OnUndo(handler func() Message) TextArea[Message] {
 	a.onUndo = handler
@@ -171,35 +234,92 @@ func (a TextArea[Message]) OnRedo(handler func() Message) TextArea[Message] {
 // The order is cursor movement, selection extension, select all, backward and
 // forward deletion, line break, undo, and redo. Undo and redo are
 // disabled-pass-through when their corresponding handler is nil. Every
-// descriptor is disabled-pass-through when the text area is disabled.
+// descriptor is disabled-pass-through when the text area is disabled. Bubble
+// mode also disables Up or Down at its corresponding visual edge.
 func (a TextArea[Message]) ActionDescriptors() []tui.ActionDescriptor {
-	descriptors := textAreaActionDescriptors(a.enabled, a.onUndo != nil, a.onRedo != nil)
+	descriptors := textAreaActionDescriptors(
+		a.enabled, a.onUndo != nil, a.onRedo != nil,
+		a.boundary, a.state, a.wrapWidth, a.hasWrap,
+	)
 	return append([]tui.ActionDescriptor(nil), descriptors[:]...)
 }
 
 // Node builds the public semantic node for this text area
 func (a TextArea[Message]) Node() tui.Node[Message] {
-	content := textAreaContent[Message](a.state, a.placeholder, a.enabled, a.style, a.selectionStyle)
-	descriptors := textAreaActionDescriptors(a.enabled, a.onUndo != nil, a.onRedo != nil)
+	descriptors := textAreaActionDescriptors(
+		a.enabled, a.onUndo != nil, a.onRedo != nil,
+		a.boundary, a.state, a.wrapWidth, a.hasWrap,
+	)
+	return a.nodeWithActions(descriptors, nil, nil)
+}
+
+func (a TextArea[Message]) nodeWithActions(
+	descriptors [textAreaActionCount]tui.ActionDescriptor,
+	leadingActions []tui.Action[Message],
+	insertionPolicy textAreaInsertionPolicy,
+) tui.Node[Message] {
+	var caretID tui.NodeID
+	hasCaretID := a.viewport != nil
+	if hasCaretID {
+		caretID = a.viewport.caretID
+	}
+	content := textAreaContent[Message](
+		a.state, a.placeholder, a.enabled, a.style, a.selectionStyle,
+		a.wrapWidth, a.hasWrap, caretID, hasCaretID,
+	)
 	if !a.enabled {
-		actions := disabledTextAreaActions[Message](descriptors)
-		return content.WithID(a.id).OnActions(a.id, actions[:])
+		textActions := disabledTextAreaActions[Message](descriptors)
+		actions := textActions[:]
+		if len(leadingActions) != 0 {
+			actions = append(append(
+				make([]tui.Action[Message], 0, len(leadingActions)+len(textActions)),
+				leadingActions...,
+			), textActions[:]...)
+		}
+		node := content.WithID(a.id).OnActions(a.id, actions)
+		return textAreaViewportNode(node, a.viewport)
 	}
 	context := &textAreaActionContext[Message]{
-		id: a.id, state: a.state, onChange: a.onChange, onUndo: a.onUndo, onRedo: a.onRedo,
+		id: a.id, state: a.state, wrapWidth: a.wrapWidth, hasWrap: a.hasWrap,
+		onChange: a.onChange, onUndo: a.onUndo, onRedo: a.onRedo,
+		insertionPolicy: insertionPolicy,
 	}
-	actions := newTextAreaActions(descriptors, context)
-	return content.
+	textActions := newTextAreaActions(descriptors, context)
+	actions := textActions[:]
+	if len(leadingActions) != 0 {
+		actions = append(append(
+			make([]tui.Action[Message], 0, len(leadingActions)+len(textActions)),
+			leadingActions...,
+		), textActions[:]...)
+	}
+	node := content.
 		Focusable(a.id).
 		WithFocusedStyle(a.style.Focused).
-		OnActions(a.id, actions[:]).
+		OnActions(a.id, actions).
 		OnEvent(a.id, func(event vt.Event) tui.EventResult[Message] {
-			next, handled := rawTextAreaEditForEvent(context.state, event)
+			next, handled, accepted := rawTextAreaEditForEvent(
+				context.state, event, context.insertionPolicy,
+			)
 			if !handled {
 				return tui.IgnoreResult[Message]()
 			}
+			if !accepted {
+				return tui.ConsumeResult[Message]().Focus(context.id)
+			}
 			return textAreaChangeResult(context, next)
 		})
+	return textAreaViewportNode(node, a.viewport)
+}
+
+func textAreaViewportNode[Message any](node tui.Node[Message], viewport *textAreaViewport) tui.Node[Message] {
+	if viewport == nil {
+		return node
+	}
+	return tui.ScrollViewportWithOptions(
+		viewport.id,
+		node,
+		tui.ScrollViewportOptions[Message]{Axis: tui.ScrollAxisVertical},
+	).RevealDescendant(viewport.caretID).TabStop(false).WithLength(viewport.height)
 }
 
 const textAreaActionCount = 18
@@ -322,14 +442,29 @@ func textAreaCharacterActionBinding(character rune, modifiers vt.Modifiers) tui.
 		WithRepeatPolicy(tui.RepeatAllow)
 }
 
-func textAreaActionDescriptors(enabled, hasUndo, hasRedo bool) [textAreaActionCount]tui.ActionDescriptor {
+func textAreaActionDescriptors(
+	enabled, hasUndo, hasRedo bool,
+	boundary TextAreaBoundaryNavigation,
+	state TextAreaState,
+	wrapWidth int,
+	hasWrap bool,
+) [textAreaActionCount]tui.ActionDescriptor {
+	hasUp, hasDown := true, true
+	if boundary == TextAreaBoundaryBubble {
+		hasUp, hasDown = textAreaVisualLineDirections(state, wrapWidth, hasWrap)
+	}
 	descriptors := defaultTextAreaActionDescriptors
 	for index := range descriptors {
 		available := enabled
-		if textAreaSemanticAction(index) == textAreaUndo {
+		action := textAreaSemanticAction(index)
+		if action == textAreaUndo {
 			available = available && hasUndo
-		} else if textAreaSemanticAction(index) == textAreaRedo {
+		} else if action == textAreaRedo {
 			available = available && hasRedo
+		} else if action == textAreaCursorUp || action == textAreaSelectionExtendUp {
+			available = available && hasUp
+		} else if action == textAreaCursorDown || action == textAreaSelectionExtendDown {
+			available = available && hasDown
 		}
 		availability := tui.ActionEnabled
 		if !available {
@@ -341,11 +476,14 @@ func textAreaActionDescriptors(enabled, hasUndo, hasRedo bool) [textAreaActionCo
 }
 
 type textAreaActionContext[Message any] struct {
-	id       tui.NodeID
-	state    TextAreaState
-	onChange func(TextAreaState) Message
-	onUndo   func() Message
-	onRedo   func() Message
+	id              tui.NodeID
+	state           TextAreaState
+	wrapWidth       int
+	hasWrap         bool
+	onChange        func(TextAreaState) Message
+	onUndo          func() Message
+	onRedo          func() Message
+	insertionPolicy textAreaInsertionPolicy
 }
 
 func newTextAreaActions[Message any](
@@ -387,8 +525,17 @@ func textAreaActionResult[Message any](
 			return tui.IgnoreResult[Message]()
 		}
 		return tui.ConsumeResult[Message]().Focus(context.id).Emit(context.onRedo())
+	case textAreaInsertLineBreak:
+		next, accepted := applyTextAreaInsertion(context.state, "\n", context.insertionPolicy)
+		if !accepted {
+			return tui.ConsumeResult[Message]().Focus(context.id)
+		}
+		return textAreaChangeResult(context, next)
 	default:
-		return textAreaChangeResult(context, textAreaStateForAction(context.state, action))
+		return textAreaChangeResult(
+			context,
+			textAreaStateForAction(context.state, action, context.wrapWidth, context.hasWrap),
+		)
 	}
 }
 
@@ -403,16 +550,21 @@ func textAreaChangeResult[Message any](
 	return result
 }
 
-func textAreaStateForAction(state TextAreaState, action textAreaSemanticAction) TextAreaState {
+func textAreaStateForAction(
+	state TextAreaState,
+	action textAreaSemanticAction,
+	wrapWidth int,
+	hasWrap bool,
+) TextAreaState {
 	switch action {
 	case textAreaCursorLeft:
 		return applyTextAreaMovement(state, textAreaLeft, false)
 	case textAreaCursorRight:
 		return applyTextAreaMovement(state, textAreaRight, false)
 	case textAreaCursorUp:
-		return applyTextAreaMovement(state, textAreaUp, false)
+		return applyVerticalTextAreaMovement(state, false, false, wrapWidth, hasWrap)
 	case textAreaCursorDown:
-		return applyTextAreaMovement(state, textAreaDown, false)
+		return applyVerticalTextAreaMovement(state, true, false, wrapWidth, hasWrap)
 	case textAreaCursorLineStart:
 		return applyTextAreaMovement(state, textAreaHome, false)
 	case textAreaCursorLineEnd:
@@ -422,9 +574,9 @@ func textAreaStateForAction(state TextAreaState, action textAreaSemanticAction) 
 	case textAreaSelectionExtendRight:
 		return applyTextAreaMovement(state, textAreaRight, true)
 	case textAreaSelectionExtendUp:
-		return applyTextAreaMovement(state, textAreaUp, true)
+		return applyVerticalTextAreaMovement(state, false, true, wrapWidth, hasWrap)
 	case textAreaSelectionExtendDown:
-		return applyTextAreaMovement(state, textAreaDown, true)
+		return applyVerticalTextAreaMovement(state, true, true, wrapWidth, hasWrap)
 	case textAreaSelectionExtendLineStart:
 		return applyTextAreaMovement(state, textAreaHome, true)
 	case textAreaSelectionExtendLineEnd:
@@ -442,25 +594,33 @@ func textAreaStateForAction(state TextAreaState, action textAreaSemanticAction) 
 	}
 }
 
-func textAreaContent[Message any](state TextAreaState, placeholder string, enabled bool, style TextAreaStyle, selectionStyle vt.Style) tui.Node[Message] {
+func textAreaContent[Message any](
+	state TextAreaState,
+	placeholder string,
+	enabled bool,
+	style TextAreaStyle,
+	selectionStyle vt.Style,
+	wrapWidth int,
+	hasWrap bool,
+	caretID tui.NodeID,
+	hasCaretID bool,
+) tui.Node[Message] {
 	state = normalizeTextAreaState(state)
 	if state.value == "" {
 		if enabled {
 			return tui.Row(
-				tui.StyledText[Message]("▏", style.Cursor),
+				textAreaCaret[Message](style.Cursor, caretID, hasCaretID),
 				tui.StyledText[Message](placeholder, style.Placeholder),
 			)
 		}
 		return tui.StyledText[Message](placeholder, style.Disabled)
 	}
 
-	lines := textAreaLineRanges(state.value)
-	cursorLine := len(lines) - 1
-	for index, line := range lines {
-		if state.cursor >= line.start && state.cursor <= line.end {
-			cursorLine = index
-			break
-		}
+	lines := textAreaVisualLineRanges(state.value, wrapWidth, hasWrap)
+	cursorLine := textAreaVisualLineIndex(lines, state.cursor)
+	horizontalOffset := state.horizontalOffset
+	if hasWrap {
+		horizontalOffset = 0
 	}
 	nodes := make([]tui.Node[Message], 0, len(lines))
 	for index, line := range lines {
@@ -468,14 +628,27 @@ func textAreaContent[Message any](state TextAreaState, placeholder string, enabl
 		if !enabled {
 			lineStyle = style.Disabled
 		}
-		nodes = append(nodes, textAreaLineContent[Message](state, line, enabled && index == cursorLine, lineStyle, style.Cursor, selectionStyle))
+		lineHasCaretID := enabled && index == cursorLine && hasCaretID
+		nodes = append(nodes, textAreaLineContent[Message](
+			state, line, enabled && index == cursorLine,
+			lineStyle, style.Cursor, selectionStyle, horizontalOffset,
+			caretID, lineHasCaretID,
+		))
 	}
 	return tui.Column(nodes...)
 }
 
-func textAreaLineContent[Message any](state TextAreaState, line textAreaRange, cursorLine bool, normalStyle, cursorStyle, selectionStyle vt.Style) tui.Node[Message] {
+func textAreaLineContent[Message any](
+	state TextAreaState,
+	line textAreaRange,
+	cursorLine bool,
+	normalStyle, cursorStyle, selectionStyle vt.Style,
+	horizontalOffset int,
+	caretID tui.NodeID,
+	hasCaretID bool,
+) tui.Node[Message] {
 	lineText := state.value[line.start:line.end]
-	visibleStart := line.start + textAreaVisibleStart(lineText, state.horizontalOffset)
+	visibleStart := line.start + textAreaVisibleStart(lineText, horizontalOffset)
 	selectionStart, selectionEnd, selected := state.Selection()
 	boundaries := []int{visibleStart, line.end}
 	if selected {
@@ -491,13 +664,16 @@ func textAreaLineContent[Message any](state TextAreaState, line textAreaRange, c
 	cursorVisible := false
 	if cursorLine && state.cursor >= line.start && state.cursor <= line.end {
 		cursorCell, ok := celltext.CellAtByte(lineText, state.cursor-line.start, celltext.ModernWidth())
-		cursorVisible = ok && cursorCell >= state.horizontalOffset
+		cursorVisible = ok && cursorCell >= horizontalOffset
 	}
 	parts := make([]tui.Node[Message], 0, len(boundaries)*2)
+	if cursorLine && !cursorVisible && hasCaretID {
+		parts = append(parts, tui.StyledText[Message]("", normalStyle).WithID(caretID))
+	}
 	for index := 0; index+1 < len(boundaries); index++ {
 		start, end := boundaries[index], boundaries[index+1]
 		if cursorVisible && state.cursor == start {
-			parts = append(parts, tui.StyledText[Message]("▏", cursorStyle))
+			parts = append(parts, textAreaCaret[Message](cursorStyle, caretID, hasCaretID))
 			cursorVisible = false
 		}
 		if start == end {
@@ -510,12 +686,20 @@ func textAreaLineContent[Message any](state TextAreaState, line textAreaRange, c
 		parts = append(parts, tui.StyledText[Message](state.value[start:end], partStyle))
 	}
 	if cursorVisible && state.cursor == line.end {
-		parts = append(parts, tui.StyledText[Message]("▏", cursorStyle))
+		parts = append(parts, textAreaCaret[Message](cursorStyle, caretID, hasCaretID))
 	}
 	if len(parts) == 0 {
 		return tui.StyledText[Message]("", normalStyle)
 	}
 	return tui.Row(parts...)
+}
+
+func textAreaCaret[Message any](style vt.Style, id tui.NodeID, hasID bool) tui.Node[Message] {
+	caret := tui.StyledText[Message]("▏", style)
+	if hasID {
+		caret = caret.WithID(id)
+	}
+	return caret
 }
 
 func appendTextAreaBoundary(boundaries []int, boundary, start, end int) []int {
@@ -567,11 +751,32 @@ const (
 	textAreaDelete
 )
 
-func rawTextAreaEditForEvent(state TextAreaState, event vt.Event) (TextAreaState, bool) {
+func rawTextAreaEditForEvent(
+	state TextAreaState,
+	event vt.Event,
+	insertionPolicy textAreaInsertionPolicy,
+) (TextAreaState, bool, bool) {
 	if event.Kind == vt.EventText || event.Kind == vt.EventPaste {
-		return applyTextAreaEdit(state, textAreaInsert, event.Text), true
+		next, accepted := applyTextAreaInsertion(state, event.Text, insertionPolicy)
+		return next, true, accepted
 	}
-	return TextAreaState{}, false
+	return TextAreaState{}, false, false
+}
+
+func applyTextAreaInsertion(
+	state TextAreaState,
+	inserted string,
+	insertionPolicy textAreaInsertionPolicy,
+) (TextAreaState, bool) {
+	inserted = celltext.NormalizeUTF8(inserted)
+	if insertionPolicy != nil {
+		var accepted bool
+		inserted, accepted = insertionPolicy(state, inserted)
+		if !accepted {
+			return state, false
+		}
+	}
+	return applyTextAreaEdit(state, textAreaInsert, inserted), true
 }
 
 func selectAllTextAreaState(state TextAreaState) TextAreaState {
@@ -579,6 +784,8 @@ func selectAllTextAreaState(state TextAreaState) TextAreaState {
 	state.cursor = len(state.value)
 	state.selectionAnchor = 0
 	state.hasSelection = state.cursor != 0
+	state.preferredColumn = 0
+	state.hasPreferred = false
 	return state
 }
 
@@ -606,9 +813,9 @@ func applyTextAreaEdit(state TextAreaState, edit textAreaEdit, inserted string) 
 	case textAreaRight:
 		return applyTextAreaMovement(state, edit, false)
 	case textAreaUp:
-		return applyTextAreaMovement(state, edit, false)
+		return applyVerticalTextAreaMovement(state, false, false, 0, false)
 	case textAreaDown:
-		return applyTextAreaMovement(state, edit, false)
+		return applyVerticalTextAreaMovement(state, true, false, 0, false)
 	case textAreaHome:
 		return applyTextAreaMovement(state, edit, false)
 	case textAreaEnd:
@@ -621,6 +828,9 @@ func applyTextAreaEdit(state TextAreaState, edit textAreaEdit, inserted string) 
 		if previous, ok := celltext.PreviousGraphemeBoundary(value, cursor); ok {
 			start = previous
 		}
+		if start == cursor {
+			return state
+		}
 		return textAreaEditedState(state, value[:start]+value[cursor:], start)
 	case textAreaDelete:
 		if start, end, ok := state.Selection(); ok {
@@ -629,6 +839,9 @@ func applyTextAreaEdit(state TextAreaState, edit textAreaEdit, inserted string) 
 		end := cursor
 		if next, ok := celltext.NextGraphemeBoundary(value, cursor); ok {
 			end = next
+		}
+		if end == cursor {
+			return state
 		}
 		return textAreaEditedState(state, value[:cursor]+value[end:], cursor)
 	default:
@@ -641,10 +854,10 @@ func applyTextAreaMovement(state TextAreaState, edit textAreaEdit, extend bool) 
 	if !extend && state.hasSelection {
 		start, end, _ := state.Selection()
 		if edit == textAreaLeft {
-			return textAreaMovedState(state, start, false)
+			return textAreaMovedState(state, start, false, 0, false)
 		}
 		if edit == textAreaRight {
-			return textAreaMovedState(state, end, false)
+			return textAreaMovedState(state, end, false, 0, false)
 		}
 	}
 	target := state.cursor
@@ -657,10 +870,6 @@ func applyTextAreaMovement(state TextAreaState, edit textAreaEdit, extend bool) 
 		} else {
 			target = len(state.value)
 		}
-	case textAreaUp:
-		target = verticalTextAreaCursor(state.value, state.cursor, false)
-	case textAreaDown:
-		target = verticalTextAreaCursor(state.value, state.cursor, true)
 	case textAreaHome:
 		target = currentTextAreaLine(state.value, state.cursor).start
 	case textAreaEnd:
@@ -668,10 +877,60 @@ func applyTextAreaMovement(state TextAreaState, edit textAreaEdit, extend bool) 
 	default:
 		panic("widget: invalid text area movement")
 	}
-	return textAreaMovedState(state, target, extend)
+	if target == state.cursor && !state.hasSelection {
+		return state
+	}
+	return textAreaMovedState(state, target, extend, 0, false)
 }
 
-func textAreaMovedState(state TextAreaState, cursor int, extend bool) TextAreaState {
+func applyVerticalTextAreaMovement(
+	state TextAreaState,
+	down bool,
+	extend bool,
+	wrapWidth int,
+	hasWrap bool,
+) TextAreaState {
+	state = normalizeTextAreaState(state)
+	lines := textAreaVisualLineRanges(state.value, wrapWidth, hasWrap)
+	current := textAreaVisualLineIndex(lines, state.cursor)
+	target := max(current-1, 0)
+	if down {
+		target = min(current+1, len(lines)-1)
+	}
+	if target == current {
+		return state
+	}
+	preferred := state.preferredColumn
+	if !state.hasPreferred {
+		currentLine := state.value[lines[current].start:lines[current].end]
+		var ok bool
+		preferred, ok = celltext.CellAtByte(
+			currentLine,
+			state.cursor-lines[current].start,
+			celltext.ModernWidth(),
+		)
+		if !ok {
+			preferred = 0
+		}
+	}
+	targetLine := state.value[lines[target].start:lines[target].end]
+	relative := len(celltext.Truncate(targetLine, preferred, celltext.ModernWidth()))
+	return textAreaMovedState(
+		state,
+		lines[target].start+relative,
+		extend,
+		preferred,
+		true,
+	)
+}
+
+func textAreaMovedState(
+	state TextAreaState,
+	cursor int,
+	extend bool,
+	preferredColumn int,
+	hasPreferred bool,
+) TextAreaState {
 	anchor := state.cursor
 	if state.hasSelection {
 		anchor = state.selectionAnchor
@@ -684,36 +943,18 @@ func textAreaMovedState(state TextAreaState, cursor int, extend bool) TextAreaSt
 		state.selectionAnchor = cursor
 		state.hasSelection = false
 	}
+	state.preferredColumn = preferredColumn
+	state.hasPreferred = hasPreferred
 	return normalizeTextAreaState(state)
 }
 
 func textAreaEditedState(state TextAreaState, value string, cursor int) TextAreaState {
+	if value == state.value && cursor == state.cursor && !state.hasSelection {
+		return state
+	}
 	return normalizeTextAreaState(TextAreaState{
 		value: value, cursor: cursor, horizontalOffset: state.horizontalOffset,
 	})
-}
-
-func verticalTextAreaCursor(value string, cursor int, down bool) int {
-	lines := textAreaLineRanges(value)
-	current := len(lines) - 1
-	for index, line := range lines {
-		if cursor >= line.start && cursor <= line.end {
-			current = index
-			break
-		}
-	}
-	target := max(current-1, 0)
-	if down {
-		target = min(current+1, len(lines)-1)
-	}
-	currentLine := value[lines[current].start:lines[current].end]
-	targetLine := value[lines[target].start:lines[target].end]
-	column, ok := celltext.CellAtByte(currentLine, cursor-lines[current].start, celltext.ModernWidth())
-	if !ok {
-		column = 0
-	}
-	relative := len(celltext.Truncate(targetLine, column, celltext.ModernWidth()))
-	return lines[target].start + relative
 }
 
 type textAreaRange struct {
@@ -728,6 +969,66 @@ func currentTextAreaLine(value string, cursor int) textAreaRange {
 		}
 	}
 	return textAreaRange{start: len(value), end: len(value)}
+}
+
+func textAreaVisualLineRanges(value string, wrapWidth int, hasWrap bool) []textAreaRange {
+	logicalLines := textAreaLineRanges(value)
+	if !hasWrap {
+		return logicalLines
+	}
+	wrapWidth = max(wrapWidth, 1)
+	visualLines := make([]textAreaRange, 0, len(logicalLines))
+	for _, logical := range logicalLines {
+		if logical.start == logical.end {
+			visualLines = append(visualLines, logical)
+			continue
+		}
+		start := logical.start
+		cells := 0
+		graphemes := celltext.IterateGraphemes(value[logical.start:logical.end])
+		for grapheme, ok := graphemes.Next(); ok; grapheme, ok = graphemes.Next() {
+			graphemeStart := logical.start + grapheme.Start
+			width := celltext.GraphemeWidth(grapheme.Text, celltext.ModernWidth())
+			next := cells + width
+			if width != 0 && graphemeStart != start && next > wrapWidth {
+				visualLines = append(visualLines, textAreaRange{start: start, end: graphemeStart})
+				start = graphemeStart
+				cells = width
+			} else {
+				cells = next
+			}
+		}
+		visualLines = append(visualLines, textAreaRange{start: start, end: logical.end})
+	}
+	return visualLines
+}
+
+func textAreaVisualLineCount(state TextAreaState, wrapWidth int, hasWrap bool) int {
+	state = normalizeTextAreaState(state)
+	return len(textAreaVisualLineRanges(state.value, wrapWidth, hasWrap))
+}
+
+func textAreaVisualLineIndex(lines []textAreaRange, cursor int) int {
+	for index, line := range lines {
+		if cursor < line.start || cursor > line.end {
+			continue
+		}
+		if cursor < line.end || index+1 == len(lines) || lines[index+1].start != line.end {
+			return index
+		}
+	}
+	return max(len(lines)-1, 0)
+}
+
+func textAreaVisualLineDirections(
+	state TextAreaState,
+	wrapWidth int,
+	hasWrap bool,
+) (bool, bool) {
+	state = normalizeTextAreaState(state)
+	lines := textAreaVisualLineRanges(state.value, wrapWidth, hasWrap)
+	current := textAreaVisualLineIndex(lines, state.cursor)
+	return current > 0, current+1 < len(lines)
 }
 
 func textAreaLineRanges(value string) []textAreaRange {

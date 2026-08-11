@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-Nagi TUI Go実装はnative Cell-based TUI runtime、Unicode対応semantic Node、21個の標準Widget、supervised async work、Subscription、決定的test supportを提供します
+Nagi TUI Go実装はnative Cell-based TUI runtime、Unicode対応semantic Node、25個の標準Widget、supervised async work、Subscription、決定的test supportを提供します
 
 ## 要件
 
@@ -29,7 +29,7 @@ go run ./examples/counter
 | --- | --- |
 | Module root `tui` | App lifecycle、semantic Node、Scoped KeyMap、layout、event、Effect、Subscription、terminal loop |
 | `surface` | Geometry、Cell、Surface描画、composition、diff、snapshot |
-| `widget` | Public TUI APIから構築した21個の標準Widget |
+| `widget` | Public TUI APIから構築した25個の標準Widget |
 | `tuitest` | Virtual input、resize、time、Effect、Subscription、frame検査 |
 | `github.com/mayahiro/nagi-go/text` | 共有Unicode 17 text primitive |
 | `github.com/mayahiro/nagi-go/vt` | 共有typed terminal input／output、Color、Attributes、Style |
@@ -67,7 +67,15 @@ Go repository rootから実terminalで実行します
 
 Terminal inputとoutputはterminalへ接続されている必要があります。Mouse reportは既定で無効です。Raw modeとscreen stateは正常return、error、panic経路でbest effortとして復元します。Process abort、nested terminal session、suspendとresume、`/dev/tty`取得には対応していません
 
-`ScrollViewport`はeagerなchild treeをclipしてscrollします。大規模dataでは`VirtualScrollViewport`を使用し、content全体のCell extentを宣言して現在表示する範囲または上限付きoverscanの`VirtualFragment`だけを構築できます
+`ScrollViewport`はeagerなchild treeをclipしてscrollします。大規模dataでは`VirtualScrollViewport`を使用し、content全体のCell extentを宣言して現在表示する範囲または上限付きoverscanの`VirtualFragment`だけを構築できます。`Node.RevealDescendant`はfocusを移動せずstable descendant IDを表示範囲内に保ち、virtual targetは現在のfragment内に存在する必要があります
+
+`TextArea`はdefaultでno-wrap挙動を維持します。`SoftWrap`はvisual-line navigationを追加し、`BoundaryNavigation`はvisual boundaryのUpとDownをpass-throughへ切り替えられ、`Viewport`はTab stopを増やさずapplication suppliedのcaret IDへ追従します
+
+`Composer`は`TextArea`へcontrolled submitとhistory recall、自動row境界、任意のvalidation content、挿入制限を加えます。Applicationはmessageの意味、history persistence、sensitive value policyを引き続き所有します
+
+`Disclosure`はexpanded stateをApplicationに維持し、expanded時だけbodyを構築します。Core Modal scopeはdefaultでentry時に最初のdescendantへfocusし、close時に以前のfocusへ戻り、両方のtargetを設定できます
+
+`Dialog`はapplication-defined action list、lazy controlled details、明示的なdefaultとcancel target、focus policy、Cell幅によるaction wrappingを構成します。`ConfirmDialog`はdefaultを明示する二action convenienceです
 
 ## License
 

@@ -3,7 +3,7 @@
 [日本語](README_ja.md)
 
 Nagi TUI for Go provides a native cell-based TUI runtime, Unicode-aware
-semantic nodes, 21 standard widgets, supervised asynchronous work,
+semantic nodes, 25 standard widgets, supervised asynchronous work,
 subscriptions, and deterministic test support
 
 ## Requirements
@@ -31,7 +31,7 @@ go run ./examples/counter
 | --- | --- |
 | Module root `tui` | App lifecycle, semantic nodes, scoped key maps, layout, events, Effects, Subscriptions, and terminal loop |
 | `surface` | Geometry, Cells, Surface drawing, composition, diffing, and snapshots |
-| `widget` | 21 standard widgets built from the public TUI API |
+| `widget` | 25 standard widgets built from the public TUI API |
 | `tuitest` | Virtual input, resize, time, effects, subscriptions, and frame inspection |
 | `github.com/mayahiro/nagi-go/text` | Shared Unicode 17 text primitives |
 | `github.com/mayahiro/nagi-go/vt` | Shared typed terminal input/output, Color, Attributes, and Style |
@@ -79,7 +79,27 @@ suspend and resume, and `/dev/tty` acquisition are not supported
 
 `ScrollViewport` clips and scrolls an eager child tree. Large data sets can use
 `VirtualScrollViewport`, which declares the complete cell extent and constructs
-only the current visible or bounded-overscan `VirtualFragment`
+only the current visible or bounded-overscan `VirtualFragment`.
+`Node.RevealDescendant` keeps a stable descendant ID visible without moving
+focus; virtual targets must be present in the current fragment
+
+`TextArea` keeps no-wrap behavior by default. `SoftWrap` adds visual-line
+navigation, `BoundaryNavigation` can pass Up and Down through at visual
+boundaries, and `Viewport` follows an application-identified caret without an
+extra Tab stop
+
+`Composer` adds controlled submit and history recall, automatic row bounds,
+optional validation content, and insertion limits over `TextArea`. Applications
+retain ownership of message meaning, history persistence, and sensitive-value
+policy
+
+`Disclosure` keeps expanded state in the application and constructs its body
+only while expanded. Core Modal scopes focus their first descendant on entry
+and return to previous focus on close by default; both targets are configurable
+
+`Dialog` composes application-defined action lists, lazy controlled details,
+explicit default and cancel targets, focus policies, and Cell-width action
+wrapping. `ConfirmDialog` is the explicit-default two-action convenience
 
 ## License
 

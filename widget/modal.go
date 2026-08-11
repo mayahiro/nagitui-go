@@ -24,12 +24,15 @@ type Modal[Message any] struct {
 	child    tui.Node[Message]
 	title    string
 	style    ModalStyle
+	focus    tui.ModalFocusOptions
 	onEscape func() Message
 }
 
 // NewModal returns an untitled modal panel
 func NewModal[Message any](id tui.NodeID, child tui.Node[Message]) Modal[Message] {
-	return Modal[Message]{id: id, child: child, style: DefaultModalStyle()}
+	return Modal[Message]{
+		id: id, child: child, style: DefaultModalStyle(), focus: tui.DefaultModalFocusOptions(),
+	}
 }
 
 // Title sets the text rendered above modal content
@@ -41,6 +44,18 @@ func (m Modal[Message]) Title(title string) Modal[Message] {
 // Style replaces the modal styles
 func (m Modal[Message]) Style(style ModalStyle) Modal[Message] {
 	m.style = style
+	return m
+}
+
+// InitialFocus sets the focus policy used when this modal becomes active
+func (m Modal[Message]) InitialFocus(focus tui.ModalInitialFocus) Modal[Message] {
+	m.focus.Initial = focus
+	return m
+}
+
+// ReturnFocus sets the focus policy used when this modal stops being active
+func (m Modal[Message]) ReturnFocus(focus tui.ModalReturnFocus) Modal[Message] {
+	m.focus.ReturnFocus = focus
 	return m
 }
 
@@ -73,7 +88,7 @@ func (m Modal[Message]) Node() tui.Node[Message] {
 	}
 	panel := tui.Border(content, m.style.Border)
 	centered := tui.Align(panel, tui.AlignCenter, tui.AlignMiddle)
-	modal := tui.Modal(m.id, centered)
+	modal := tui.ModalWithFocus(m.id, centered, m.focus)
 	var handler func(tui.ActionEvent) tui.EventResult[Message]
 	if m.onEscape != nil {
 		handler = func(tui.ActionEvent) tui.EventResult[Message] {

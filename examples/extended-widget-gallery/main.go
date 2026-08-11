@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/mayahiro/nagi-go/vt"
 	"github.com/mayahiro/nagitui-go"
@@ -15,6 +16,7 @@ type message struct {
 	value    bool
 	text     string
 	textArea widget.TextAreaState
+	composer widget.ComposerState
 }
 
 type gallery struct {
@@ -23,18 +25,24 @@ type gallery struct {
 	mode         int
 	theme        int
 	notes        widget.TextAreaState
+	composer     widget.ComposerState
+	history      []string
 	row          int
 	tree         int
 	treeExpanded bool
+	detailsOpen  bool
 	query        string
 	command      int
 	lastAction   string
+	dialogOpen   bool
 }
 
 func newGallery() *gallery {
 	return &gallery{
 		feature: true, treeExpanded: true,
 		notes:      widget.NewTextAreaStateAtEnd("Multiline notes\nremain application state"),
+		composer:   widget.NewComposerStateAtEnd("Draft message"),
+		history:    []string{"Earlier message"},
 		lastAction: "None",
 	}
 }
@@ -55,6 +63,19 @@ func (a *gallery) Update(received message) tui.Effect[message] {
 		a.theme = received.index
 	case "notes":
 		a.notes = received.textArea
+	case "composer":
+		a.composer = received.composer
+	case "submit-composer":
+		value := a.composer.TextArea().Value()
+		if strings.TrimSpace(value) != "" {
+			if len(a.history) == 8 {
+				copy(a.history, a.history[1:])
+				a.history = a.history[:7]
+			}
+			a.history = append(a.history, value)
+			a.composer = widget.NewComposerStateAtEnd("")
+			a.lastAction = "Submitted: " + strings.ReplaceAll(value, "\n", " / ")
+		}
 	case "row":
 		a.row = received.index
 	case "tree":
@@ -63,6 +84,8 @@ func (a *gallery) Update(received message) tui.Effect[message] {
 		if received.index == 0 {
 			a.treeExpanded = received.value
 		}
+	case "toggle-details":
+		a.detailsOpen = received.value
 	case "query":
 		a.query = received.text
 	case "command":
@@ -74,6 +97,18 @@ func (a *gallery) Update(received message) tui.Effect[message] {
 		} else {
 			a.lastAction = "Unknown"
 		}
+	case "open-dialog":
+		a.dialogOpen = true
+	case "dialog-choice":
+		actions := []string{"Open from dialog", "Save from dialog"}
+		if received.index >= 0 && received.index < len(actions) {
+			a.lastAction = actions[received.index]
+		} else {
+			a.lastAction = "Unknown dialog action"
+		}
+		a.dialogOpen = false
+	case "close-dialog":
+		a.dialogOpen = false
 	}
 	return tui.NoneEffect[message]()
 }
@@ -82,7 +117,7 @@ func (*gallery) Subscriptions() tui.Subscription[message] {
 	return tui.NoneSubscription[message]()
 }
 
-func (a *gallery) View(_ tui.ViewContext) tui.Node[message] {
+func (a *gallery) View(viewContext tui.ViewContext) tui.Node[message] {
 	tabs := widget.NewTabs(
 		tui.NewNodeID("gallery-tabs"),
 		[]widget.TabItem{
@@ -93,13 +128,14 @@ func (a *gallery) View(_ tui.ViewContext) tui.Node[message] {
 		a.page,
 		func(index int) message { return message{kind: "page", index: index} },
 	).Node().WithLength(tui.Fixed(1))
-	page := a.inputsPage()
+	composerWidth := max(int(viewContext.Size.Width)-4, 1)
+	page := a.inputsPage(composerWidth)
 	if a.page == 1 {
 		page = a.dataPage()
 	} else if a.page >= 2 {
 		page = a.commandsPage()
 	}
-	return tui.Border(
+	content := tui.Border(
 		tui.Column(
 			tui.StyledText[message]("Extended Widget Gallery", vt.Style{Bold: true}).WithLength(tui.Fixed(1)),
 			tabs,
@@ -108,9 +144,51 @@ func (a *gallery) View(_ tui.ViewContext) tui.Node[message] {
 		),
 		vt.Style{},
 	)
+	if !a.dialogOpen {
+		return content
+	}
+	dialog := widget.NewDialog(
+		tui.NewNodeID("choice-dialog"),
+		tui.Text[message]("Choose one application-defined command"),
+		[]widget.DialogAction[message]{
+			widget.NewDialogAction(tui.NewNodeID("dialog-open"), "Open", func() message {
+				return message{kind: "dialog-choice", index: 0}
+			}),
+			widget.NewDialogAction(tui.NewNodeID("dialog-save"), "Save", func() message {
+				return message{kind: "dialog-choice", index: 1}
+			}),
+			widget.NewDialogAction(tui.NewNodeID("dialog-cancel"), "Cancel", func() message {
+				return message{kind: "close-dialog"}
+			}),
+		},
+	).Title(tui.StyledText[message]("Generic dialog", vt.Style{Bold: true})).
+		DefaultAction(tui.NewNodeID("dialog-cancel")).
+		CancelAction(tui.NewNodeID("dialog-cancel")).
+		ActionWrapWidth(max(viewContext.Size.Width, 5) - 4).
+		Node()
+	return tui.Stack(content, dialog)
 }
 
-func (a *gallery) inputsPage() tui.Node[message] {
+func (a *gallery) inputsPage(composerWidth int) tui.Node[message] {
+	composerValid := strings.TrimSpace(a.composer.TextArea().Value()) != ""
+	composer := widget.NewComposer(
+		tui.NewNodeID("composer"),
+		tui.NewNodeID("composer-viewport"),
+		tui.NewNodeID("composer-caret"),
+		a.composer,
+		func(state widget.ComposerState) message {
+			return message{kind: "composer", composer: state}
+		},
+		func() message { return message{kind: "submit-composer"} },
+	).Placeholder("Enter a message").
+		SoftWrap(composerWidth).
+		Rows(1, 3).
+		History(a.history).
+		MaximumGraphemes(240, widget.ComposerOverflowTruncate).
+		SubmitEnabled(composerValid)
+	if !composerValid {
+		composer = composer.Validation(tui.Text[message]("A message is required"))
+	}
 	return tui.Column(
 		widget.NewCheckbox(tui.NewNodeID("feature"), "Enable feature", a.feature, func(value bool) message {
 			return message{kind: "feature", value: value}
@@ -134,10 +212,20 @@ func (a *gallery) inputsPage() tui.Node[message] {
 			}).Placeholder("Enter notes").Node(),
 			vt.Style{},
 		),
+		tui.Text[message]("Composer: Enter submits, Shift-Enter inserts a line"),
+		tui.Border(composer.Node(), vt.Style{}),
 	)
 }
 
 func (a *gallery) dataPage() tui.Node[message] {
+	details := widget.NewDisclosure(
+		tui.NewNodeID("process-details"),
+		tui.Text[message]("Process details"),
+		a.detailsOpen,
+		func(expanded bool) message { return message{kind: "toggle-details", value: expanded} },
+	).Body(func() tui.Node[message] {
+		return tui.Text[message]("Metrics are application-owned detail content")
+	}).Node()
 	table := widget.NewTable(
 		tui.NewNodeID("process-table"),
 		[]widget.TableColumn{
@@ -168,6 +256,7 @@ func (a *gallery) dataPage() tui.Node[message] {
 	}).Node()
 	offset := uint64(max(a.row, 0)) * 35
 	return tui.Column(
+		details,
 		table,
 		tui.Text[message]("Tree:"),
 		tree,
@@ -193,6 +282,9 @@ func (a *gallery) commandsPage() tui.Node[message] {
 			func(index int) message { return message{kind: "activate", index: index} },
 		).Title("Command Palette").Node(),
 		tui.Text[message]("Last action: "+a.lastAction),
+		widget.NewButton(tui.NewNodeID("open-dialog"), "Open generic dialog", func() message {
+			return message{kind: "open-dialog"}
+		}).Node(),
 	)
 }
 

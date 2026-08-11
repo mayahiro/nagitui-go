@@ -1,6 +1,10 @@
 package tui
 
-import "github.com/mayahiro/nagi-go/vt"
+import (
+	"sort"
+
+	"github.com/mayahiro/nagi-go/vt"
+)
 
 // DuplicateNodeIDError indicates that one semantic tree reused a stable ID
 type DuplicateNodeIDError struct {
@@ -166,14 +170,27 @@ type nodeRecord struct {
 }
 
 type treeIndex struct {
-	records     []nodeRecord
-	byID        map[NodeID]int
-	focusOrder  []NodeID
-	active      map[NodeID]struct{}
-	root        NodeID
-	hasRoot     bool
-	activeModal NodeID
-	hasModal    bool
+	records          []nodeRecord
+	byID             map[NodeID]int
+	focusOrder       []NodeID
+	revealTargets    []revealTarget
+	focusFallbacks   []focusFallbackRecord
+	active           map[NodeID]struct{}
+	root             NodeID
+	hasRoot          bool
+	activeModal      NodeID
+	hasModal         bool
+	activeModalFocus ModalFocusOptions
+}
+
+type revealTarget struct {
+	viewport NodeID
+	target   NodeID
+}
+
+type focusFallbackRecord struct {
+	record int
+	target NodeID
 }
 
 func newTreeIndex() treeIndex {
@@ -183,8 +200,12 @@ func newTreeIndex() treeIndex {
 func (t *treeIndex) reset() {
 	clear(t.records)
 	clear(t.focusOrder)
+	clear(t.revealTargets)
+	clear(t.focusFallbacks)
 	t.records = t.records[:0]
 	t.focusOrder = t.focusOrder[:0]
+	t.revealTargets = t.revealTargets[:0]
+	t.focusFallbacks = t.focusFallbacks[:0]
 	if t.byID == nil {
 		t.byID = make(map[NodeID]int)
 	} else {
@@ -199,6 +220,7 @@ func (t *treeIndex) reset() {
 	t.hasRoot = false
 	t.activeModal = ""
 	t.hasModal = false
+	t.activeModalFocus = DefaultModalFocusOptions()
 }
 
 func (t *treeIndex) register(record nodeRecord, root bool) error {
@@ -212,6 +234,7 @@ func (t *treeIndex) register(record nodeRecord, root bool) error {
 	if record.kind == interactiveModal {
 		t.activeModal = record.id
 		t.hasModal = true
+		t.activeModalFocus = DefaultModalFocusOptions()
 	}
 	if record.focusable {
 		t.focusOrder = append(t.focusOrder, record.id)
@@ -222,12 +245,47 @@ func (t *treeIndex) register(record nodeRecord, root bool) error {
 	return nil
 }
 
+func (t *treeIndex) setActiveModalFocus(id NodeID, focus ModalFocusOptions) {
+	if t.hasModal && t.activeModal == id {
+		t.activeModalFocus = focus
+	}
+}
+
+func (t *treeIndex) registerFocusFallback(id, target NodeID) {
+	if index, ok := t.byID[id]; ok {
+		t.focusFallbacks = append(t.focusFallbacks, focusFallbackRecord{record: index, target: target})
+	}
+}
+
 func (t *treeIndex) record(id NodeID) (nodeRecord, bool) {
 	index, ok := t.byID[id]
 	if !ok {
 		return nodeRecord{}, false
 	}
 	return t.records[index], true
+}
+
+func (t *treeIndex) focusFallback(id NodeID) (NodeID, bool) {
+	record, ok := t.byID[id]
+	if !ok {
+		return "", false
+	}
+	position := sort.Search(len(t.focusFallbacks), func(index int) bool {
+		return t.focusFallbacks[index].record >= record
+	})
+	if position == len(t.focusFallbacks) || t.focusFallbacks[position].record != record {
+		return "", false
+	}
+	return t.focusFallbacks[position].target, true
+}
+
+func (t *treeIndex) hasExplicitReveal(viewport NodeID) bool {
+	for _, target := range t.revealTargets {
+		if target.viewport == viewport {
+			return true
+		}
+	}
+	return false
 }
 
 func (t *treeIndex) route(target NodeID, hasTarget bool) []NodeID {
@@ -316,22 +374,20 @@ func (t *treeIndex) allowsInteraction(id NodeID) bool {
 }
 
 func (t *treeIndex) isWithin(id, ancestor NodeID) bool {
-	visited := make(map[NodeID]struct{})
 	current := id
-	for {
+	remaining := len(t.records) + 1
+	for remaining > 0 {
+		remaining--
 		if current == ancestor {
 			return true
 		}
-		if _, duplicate := visited[current]; duplicate {
-			return false
-		}
-		visited[current] = struct{}{}
 		record, ok := t.record(current)
 		if !ok || !record.hasParent {
 			return false
 		}
 		current = record.parent
 	}
+	return false
 }
 
 func routePath(parents map[NodeID]*NodeID, root, target *NodeID) []NodeID {
