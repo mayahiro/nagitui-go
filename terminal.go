@@ -180,6 +180,15 @@ func runTerminalContext[Message any](
 			return err
 		}
 		handleRuntimeNotices(runtime, handleNotice)
+		if !runtime.ExitRequested() {
+			ran, err := runPendingTerminalTasks(ctx, session, runtime, handleNotice)
+			if err != nil {
+				return err
+			}
+			if ran {
+				decoder.Reset()
+			}
+		}
 		if focusFirst {
 			focusFirst = false
 			if _, err := runtime.focusFirst(); err != nil {
@@ -249,11 +258,28 @@ func runTerminalContext[Message any](
 				if exit || runtime.ExitRequested() {
 					break
 				}
+				ran, err := runPendingTerminalTasks(ctx, session, runtime, handleNotice)
+				if err != nil {
+					return err
+				}
+				if ran {
+					decoder.Reset()
+					break
+				}
 			}
 			if _, err := runtime.ProcessPending(); err != nil {
 				return err
 			}
 			handleRuntimeNotices(runtime, handleNotice)
+			if !exit && !runtime.ExitRequested() {
+				ran, err := runPendingTerminalTasks(ctx, session, runtime, handleNotice)
+				if err != nil {
+					return err
+				}
+				if ran {
+					decoder.Reset()
+				}
+			}
 			if err := writeTerminalOutput(session, runtime, options.Capabilities, options.Clipboard); err != nil {
 				return err
 			}
@@ -263,6 +289,48 @@ func runTerminalContext[Message any](
 		}
 		return nil
 	})
+}
+
+func runPendingTerminalTasks[Message any](
+	ctx context.Context,
+	session *ttyunix.Session,
+	runtime *Runtime[Message],
+	handleNotice func(RuntimeNotice),
+) (bool, error) {
+	ran := false
+	for !runtime.ExitRequested() && runtime.PendingTerminalTasks() > 0 {
+		if err := ctx.Err(); err != nil {
+			return ran, err
+		}
+		if err := session.Suspend(); err != nil {
+			return ran, err
+		}
+		if !runtime.RunTerminalTask() {
+			if err := session.Resume(); err != nil {
+				return ran, err
+			}
+			return ran, errors.New("nagi-tui: pending terminal task disappeared")
+		}
+		if err := session.Resume(); err != nil {
+			return ran, err
+		}
+		if err := ctx.Err(); err != nil {
+			return true, err
+		}
+
+		runtime.InvalidateTerminalSurface()
+		columns, rows, err := session.Size()
+		if err != nil {
+			return true, err
+		}
+		runtime.Resize(Size{Width: uint32(columns), Height: uint32(rows)})
+		if _, err := runtime.ProcessPending(); err != nil {
+			return true, err
+		}
+		handleRuntimeNotices(runtime, handleNotice)
+		ran = true
+	}
+	return ran, nil
 }
 
 func handleRuntimeNotices[Message any](runtime *Runtime[Message], handler func(RuntimeNotice)) {

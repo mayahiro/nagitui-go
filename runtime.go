@@ -309,11 +309,16 @@ func (r *Runtime[Message]) PollEffects() int {
 	r.effects.poll(r.clock.Now())
 	r.applyEffectCommands()
 	available := r.queueCapacity - len(r.queue)
-	messages := r.effects.takeReady(available)
-	for _, message := range messages {
+	count := 0
+	for count < available {
+		message, ok := r.effects.popReady()
+		if !ok {
+			break
+		}
 		r.queue = append(r.queue, queuedMessage[Message]{message: message})
+		count++
 	}
-	return len(messages)
+	return count
 }
 
 // ExitRequested reports whether the application requested normal exit
@@ -346,6 +351,27 @@ func (r *Runtime[Message]) RunningTasks() int {
 // PendingTasks returns supervised tasks waiting for a worker slot
 func (r *Runtime[Message]) PendingTasks() int {
 	return r.effects.pendingTasks()
+}
+
+// PendingTerminalTasks returns terminal-suspending tasks waiting for a Runtime
+// driver
+func (r *Runtime[Message]) PendingTerminalTasks() int {
+	return r.effects.pendingTerminalTasks()
+}
+
+// RunTerminalTask runs the oldest terminal-suspending task on the current
+// goroutine
+//
+// A full-screen terminal driver must suspend its terminal session before
+// calling this method and resume it afterwards. Task panics become Runtime
+// notices. The returned Message becomes available at the next pending-message
+// processing boundary.
+func (r *Runtime[Message]) RunTerminalTask() bool {
+	ran := r.effects.runTerminalTask(r.clock.Now())
+	if ran {
+		r.applyEffectCommands()
+	}
+	return ran
 }
 
 // PendingEffectMessages returns completed effect messages waiting for capacity
@@ -470,7 +496,11 @@ func (r *Runtime[Message]) processQueuedWith(observe func(Message)) (int, error)
 		queued := r.queue[0]
 		var zero queuedMessage[Message]
 		r.queue[0] = zero
-		r.queue = r.queue[1:]
+		if len(r.queue) == 1 {
+			r.queue = r.queue[:0]
+		} else {
+			r.queue = r.queue[1:]
+		}
 		if observe != nil {
 			observe(queued.message)
 		}
@@ -537,6 +567,16 @@ func (r *Runtime[Message]) applyPendingInteraction(index treeIndex) {
 
 // RequestFrame schedules a frame even when application state has not changed
 func (r *Runtime[Message]) RequestFrame() {
+	r.dirty = true
+	r.urgentFrame = true
+	r.subscriptionsDirty = true
+}
+
+// InvalidateTerminalSurface discards the terminal diff baseline and requests
+// one full redraw after an external process may have changed terminal contents
+func (r *Runtime[Message]) InvalidateTerminalSurface() {
+	r.previousSurface = nil
+	r.previousReusable = false
 	r.dirty = true
 	r.urgentFrame = true
 	r.subscriptionsDirty = true
@@ -1128,7 +1168,12 @@ func (r *Runtime[Message]) reconcileSubscriptions() error {
 	if !r.subscriptionsDirty {
 		return nil
 	}
-	reconciliation, err := r.subscriptions.reconcile(r.app.Subscriptions(), r.clock.Now())
+	declared := r.app.Subscriptions()
+	if declared.IsNone() && r.subscriptions.activeSubscriptions() == 0 {
+		r.subscriptionsDirty = false
+		return nil
+	}
+	reconciliation, err := r.subscriptions.reconcile(declared, r.clock.Now())
 	if err != nil {
 		return err
 	}

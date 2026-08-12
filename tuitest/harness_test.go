@@ -2,6 +2,7 @@ package tuitest
 
 import (
 	"context"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -117,6 +118,88 @@ func TestHarnessObservesAndTakesPendingClipboardRequest(t *testing.T) {
 	}
 	if _, ok := harness.TakeClipboardRequest(); ok {
 		t.Fatal("second take returned a request")
+	}
+}
+
+type terminalHarnessMessage uint8
+
+const (
+	terminalHarnessOpen terminalHarnessMessage = iota
+	terminalHarnessReturned
+)
+
+type terminalHarnessApp struct {
+	returned bool
+}
+
+func (*terminalHarnessApp) Init() tui.Effect[terminalHarnessMessage] {
+	return tui.NoneEffect[terminalHarnessMessage]()
+}
+
+func (a *terminalHarnessApp) Update(message terminalHarnessMessage) tui.Effect[terminalHarnessMessage] {
+	if message == terminalHarnessOpen {
+		return tui.SuspendTerminalEffect(func(context.Context) terminalHarnessMessage {
+			return terminalHarnessReturned
+		})
+	}
+	a.returned = true
+	return tui.NoneEffect[terminalHarnessMessage]()
+}
+
+func (*terminalHarnessApp) Subscriptions() tui.Subscription[terminalHarnessMessage] {
+	return tui.NoneSubscription[terminalHarnessMessage]()
+}
+
+func (a *terminalHarnessApp) View(tui.ViewContext) tui.Node[terminalHarnessMessage] {
+	if a.returned {
+		return tui.Text[terminalHarnessMessage]("returned")
+	}
+	return tui.Text[terminalHarnessMessage]("ready")
+}
+
+func TestHarnessRunsTerminalTaskAndDiscardsPendingInput(t *testing.T) {
+	app := &terminalHarnessApp{}
+	harness, err := New(
+		app,
+		tui.Size{Width: 8, Height: 1},
+		func(event vt.Event) tui.EventAction[terminalHarnessMessage] {
+			if event.Kind == vt.EventKey && event.Key.Code == vt.KeyEscape {
+				return tui.ExitAction[terminalHarnessMessage]()
+			}
+			return tui.IgnoreAction[terminalHarnessMessage]()
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(harness.Close)
+	if err := harness.Send(terminalHarnessOpen); err != nil {
+		t.Fatal(err)
+	}
+	if err := harness.Input([]byte{0x1B}); err != nil {
+		t.Fatal(err)
+	}
+
+	if harness.PendingTerminalTasks() != 1 {
+		t.Fatalf("pending terminal tasks = %d, want 1", harness.PendingTerminalTasks())
+	}
+	if ran, err := harness.RunTerminalTask(); err != nil || !ran {
+		t.Fatalf("RunTerminalTask = %t, %v", ran, err)
+	}
+	if !app.returned || harness.PendingTerminalTasks() != 0 {
+		t.Fatalf("returned = %t, pending = %d", app.returned, harness.PendingTerminalTasks())
+	}
+	if ran, err := harness.RunTerminalTask(); err != nil || ran {
+		t.Fatalf("second RunTerminalTask = %t, %v", ran, err)
+	}
+	if err := harness.Advance(25 * time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	if harness.ExitRequested() {
+		t.Fatal("discarded pending Escape requested exit")
+	}
+	if got := harness.MessageHistory(); !reflect.DeepEqual(got, []terminalHarnessMessage{terminalHarnessOpen, terminalHarnessReturned}) {
+		t.Fatalf("message history = %v", got)
 	}
 }
 

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"strconv"
 	"strings"
 	"testing"
@@ -474,5 +475,95 @@ func BenchmarkClipboardEncoding1MiB(b *testing.B) {
 		b.Run(test.name, func(b *testing.B) {
 			benchmarkClipboardEncoding(b, text, test.reuse)
 		})
+	}
+}
+
+type terminalTaskBenchmarkMessage uint8
+
+const (
+	terminalTaskBenchmarkStart terminalTaskBenchmarkMessage = iota
+	terminalTaskBenchmarkReturned
+)
+
+type terminalTaskBenchmarkApp struct{}
+
+func (*terminalTaskBenchmarkApp) Init() Effect[terminalTaskBenchmarkMessage] {
+	return NoneEffect[terminalTaskBenchmarkMessage]()
+}
+
+func (*terminalTaskBenchmarkApp) Update(message terminalTaskBenchmarkMessage) Effect[terminalTaskBenchmarkMessage] {
+	if message == terminalTaskBenchmarkStart {
+		return SuspendTerminalEffect(func(context.Context) terminalTaskBenchmarkMessage {
+			return terminalTaskBenchmarkReturned
+		})
+	}
+	return NoneEffect[terminalTaskBenchmarkMessage]()
+}
+
+func (*terminalTaskBenchmarkApp) Subscriptions() Subscription[terminalTaskBenchmarkMessage] {
+	return NoneSubscription[terminalTaskBenchmarkMessage]()
+}
+
+func (*terminalTaskBenchmarkApp) View(ViewContext) Node[terminalTaskBenchmarkMessage] {
+	return Text[terminalTaskBenchmarkMessage]("")
+}
+
+func BenchmarkTerminalTaskRoundTrip(b *testing.B) {
+	runtime, err := NewRuntime[terminalTaskBenchmarkMessage](
+		&terminalTaskBenchmarkApp{},
+		Size{Width: 1, Height: 1},
+	)
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer runtime.Close()
+	roundTrip := func() {
+		if err := runtime.Enqueue(terminalTaskBenchmarkStart); err != nil {
+			b.Fatal(err)
+		}
+		if _, err := runtime.ProcessPending(); err != nil {
+			b.Fatal(err)
+		}
+		if !runtime.RunTerminalTask() {
+			b.Fatal("terminal task did not run")
+		}
+		if _, err := runtime.ProcessPending(); err != nil {
+			b.Fatal(err)
+		}
+	}
+	roundTrip()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		roundTrip()
+	}
+}
+
+func TestTerminalTaskRoundTripAllocationBound(t *testing.T) {
+	runtime, err := NewRuntime[terminalTaskBenchmarkMessage](
+		&terminalTaskBenchmarkApp{},
+		Size{Width: 1, Height: 1},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	roundTrip := func() {
+		if err := runtime.Enqueue(terminalTaskBenchmarkStart); err != nil {
+			panic(err)
+		}
+		if _, err := runtime.ProcessPending(); err != nil {
+			panic(err)
+		}
+		if !runtime.RunTerminalTask() {
+			panic("terminal task did not run")
+		}
+		if _, err := runtime.ProcessPending(); err != nil {
+			panic(err)
+		}
+	}
+	roundTrip()
+	if allocations := testing.AllocsPerRun(1_000, roundTrip); allocations > 4 {
+		t.Fatalf("allocations = %.0f, want at most 4", allocations)
 	}
 }

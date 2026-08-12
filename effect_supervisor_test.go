@@ -69,6 +69,7 @@ func TestEffectTaskConstructorsRejectNil(t *testing.T) {
 	}{
 		{name: "run", construct: func() { RunEffect[string](nil) }},
 		{name: "latest", construct: func() { LatestEffect[string]("search", nil) }},
+		{name: "suspend-terminal", construct: func() { SuspendTerminalEffect[string](nil) }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -269,6 +270,87 @@ func TestEffectTaskPanicBecomesDiagnosticAndDoesNotStallSequence(t *testing.T) {
 	supervisor.poll(0)
 	if messages := supervisor.takeReady(100); len(messages) != 1 || messages[0] != "recovered" {
 		t.Fatalf("messages = %v, want [recovered]", messages)
+	}
+}
+
+func TestTerminalSuspensionMatchesSharedFixtures(t *testing.T) {
+	records, err := conformance.Load(
+		"effects/terminal-suspend.txt",
+		"effect-terminal-suspend",
+		"mode",
+		"pending",
+		"expected",
+		"panics",
+		"cancellations",
+	)
+	if errors.Is(err, conformance.ErrNoFixtureRoot) {
+		t.Skip(err)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, record := range records {
+		t.Run(record.ID, func(t *testing.T) {
+			supervisor := newEffectSupervisor[string](1)
+			defer supervisor.close()
+			switch record.Field("mode") {
+			case "sequence":
+				supervisor.schedule(SequenceEffects(
+					SuspendTerminalEffect(func(context.Context) string { return "first" }),
+					SuspendTerminalEffect(func(context.Context) string { return "second" }),
+				), 0)
+			case "batch":
+				supervisor.schedule(BatchEffects(
+					SuspendTerminalEffect(func(context.Context) string { return "first" }),
+					SuspendTerminalEffect(func(context.Context) string { return "second" }),
+				), 0)
+			case "panic-sequence":
+				supervisor.schedule(SequenceEffects(
+					SuspendTerminalEffect(func(context.Context) string { panic("terminal task failure") }),
+					AfterEffect(0, "recovered"),
+				), 0)
+			case "scoped-cancel":
+				supervisor.schedule(ScopedEffect(
+					"external",
+					SuspendTerminalEffect(func(context.Context) string { return "cancelled" }),
+				), 0)
+				supervisor.schedule(CancelScopeEffect[string]("external"), 0)
+			default:
+				t.Fatalf("invalid terminal effect mode %q", record.Field("mode"))
+			}
+
+			pending := []string{strconv.Itoa(supervisor.pendingTerminalTasks())}
+			for supervisor.runTerminalTask(0) {
+				pending = append(pending, strconv.Itoa(supervisor.pendingTerminalTasks()))
+				supervisor.poll(0)
+			}
+			supervisor.poll(0)
+
+			effectAssertList(t, "pending", pending, strings.Split(record.Field("pending"), ","))
+			effectAssertList(t, "messages", supervisor.takeReady(1<<30), effectFixtureList(record.Field("expected")))
+			if got, want := supervisor.diagnostics.TaskPanics(), effectFixtureNumber(t, record.Field("panics")); got != want {
+				t.Fatalf("task panics = %d, want %d", got, want)
+			}
+			if got, want := supervisor.diagnostics.Cancellations(), effectFixtureNumber(t, record.Field("cancellations")); got != want {
+				t.Fatalf("cancellations = %d, want %d", got, want)
+			}
+		})
+	}
+}
+
+func TestRepeatedTerminalTaskCancellationDoesNotRetainQueueEntries(t *testing.T) {
+	supervisor := newEffectSupervisor[struct{}](1)
+	defer supervisor.close()
+	for range 10_000 {
+		supervisor.schedule(ScopedEffect(
+			"external",
+			SuspendTerminalEffect(func(context.Context) struct{} { return struct{}{} }),
+		), 0)
+		supervisor.schedule(CancelScopeEffect[struct{}]("external"), 0)
+	}
+
+	if len(supervisor.terminalTasks) != 0 || len(supervisor.pendingTerminal) != 0 || supervisor.pendingTerminalTasks() != 0 {
+		t.Fatalf("terminal tasks = %d, queue = %d", len(supervisor.terminalTasks), len(supervisor.pendingTerminal))
 	}
 }
 

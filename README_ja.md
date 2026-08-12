@@ -41,11 +41,13 @@ Root packageはapplicationから使いやすくするためSurfaceのGeometry型
 
 ## Application test
 
-`tuitest` packageは実terminalを使わずにMessage、terminal input、resize、virtual time、Effect、Subscription、pending clipboard request、Runtime notice、frame、activeなresolved actionを操作できます
+`tuitest` packageは実terminalを使わずにMessage、terminal input、resize、virtual time、Effect、Subscription、pending terminal taskとclipboard request、Runtime notice、frame、activeなresolved actionを操作できます
 
 共有の[event-driven application architecture](https://github.com/mayahiro/nagi/blob/main/docs/EVENT_DRIVEN_APPLICATIONS_ja.md)では、第2のUI loopを作らずprocess outputとtimerをNagiへ渡す方法を説明します
 
 `RuntimeConfig.WidthProfile`と`TerminalOptions.WidthProfile`はCoreのmeasure、render、hit geometry、cursor配置で使うcell幅policyを1個選択します。幅計算を行うWidget builderには`ViewContext.WidthProfile`を渡します。予期しないasync lifecycle transitionは上限付きRuntime notice queueまたはterminal notice-handler entry pointから観測できます
+
+`SuspendTerminalEffect`は標準runnerが通常terminalを復元してalternate screenを離れた後にApplication所有のblocking taskを実行します。Task return後は設定済みmodeを再開し、pending inputをresetしてfull redrawを強制します
 
 ## Example
 
@@ -62,6 +64,7 @@ Go repository rootから実terminalで実行します
 | [Code view](examples/code-view/README.md) | `go run ./examples/code-view` |
 | [Diff view](examples/diff-view/README.md) | `go run ./examples/diff-view` |
 | [Event-driven log viewer](examples/log-viewer/README.md) | `go run ./examples/log-viewer` |
+| [Terminal suspendとresume](examples/terminal-suspend/README.md) | `go run ./examples/terminal-suspend` |
 | [Virtual scroll](examples/virtual-scroll/README.md) | `go run ./examples/virtual-scroll` |
 | [Variable-height feed](examples/virtual-feed/README.md) | `go run ./examples/virtual-feed` |
 | [Widget gallery](examples/widget-gallery/README.md) | `go run ./examples/widget-gallery` |
@@ -74,7 +77,7 @@ Go repository rootから実terminalで実行します
 
 ## 制約
 
-Terminal inputとoutputはterminalへ接続されている必要があります。Mouse reportは既定で無効です。Raw modeとscreen stateは正常return、error、panic経路でbest effortとして復元します。Process abort、nested terminal session、suspendとresume、`/dev/tty`取得には対応していません
+Terminal inputとoutputはterminalへ接続されている必要があります。Mouse reportは既定で無効です。Raw modeとscreen stateは正常return、error、panic経路でbest effortとして復元します。Applicationが要求する一時的なterminal suspendには対応します。Process abort、nested terminal session、Nagi processのjob-control suspend、`/dev/tty`取得には対応していません
 
 `ScrollViewport`はeagerなchild treeをclipしてscrollします。大規模dataでは`VirtualScrollViewport`を使用し、content全体のCell extentを宣言して現在表示する範囲または上限付きoverscanの`VirtualFragment`だけを構築できます。`Node.RevealDescendant`はfocusを移動せずstable descendant IDを表示範囲内に保ち、virtual targetは現在のfragment内に存在する必要があります
 

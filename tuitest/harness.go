@@ -123,6 +123,29 @@ func (h *Harness[Message]) PendingTasks() int {
 	return h.runtime.PendingTasks()
 }
 
+// PendingTerminalTasks returns terminal-suspending tasks waiting for the
+// virtual driver
+func (h *Harness[Message]) PendingTerminalTasks() int {
+	return h.runtime.PendingTerminalTasks()
+}
+
+// RunTerminalTask runs one terminal-suspending task and simulates a restored
+// terminal boundary
+//
+// Incomplete terminal input is discarded, the terminal diff baseline is
+// invalidated, the task result is processed, and at most one frame is captured.
+func (h *Harness[Message]) RunTerminalTask() (bool, error) {
+	if !h.runtime.RunTerminalTask() {
+		return false, nil
+	}
+	h.decoder.Reset()
+	h.runtime.InvalidateTerminalSurface()
+	if err := h.Step(); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
 // PendingEffectMessages returns completed messages waiting for queue capacity
 func (h *Harness[Message]) PendingEffectMessages() int {
 	return h.runtime.PendingEffectMessages()

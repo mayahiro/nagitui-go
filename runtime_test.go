@@ -172,6 +172,56 @@ func TestRuntimeContextPropagatesToEffectsAndSubscriptions(t *testing.T) {
 	}
 }
 
+type terminalContextApp struct {
+	observed runtimeContextObservation
+}
+
+func (a *terminalContextApp) Init() Effect[struct{}] {
+	return SuspendTerminalEffect(func(ctx context.Context) struct{} {
+		a.observed = observeRuntimeContext(ctx)
+		return struct{}{}
+	})
+}
+
+func (*terminalContextApp) Update(struct{}) Effect[struct{}] {
+	return NoneEffect[struct{}]()
+}
+
+func (*terminalContextApp) View(ViewContext) Node[struct{}] {
+	return Text[struct{}]("")
+}
+
+func (*terminalContextApp) Subscriptions() Subscription[struct{}] {
+	return NoneSubscription[struct{}]()
+}
+
+func TestRuntimeContextPropagatesToTerminalTask(t *testing.T) {
+	deadline := time.Now().Add(time.Minute)
+	parent := context.WithValue(context.Background(), runtimeContextKey{}, "terminal-trace")
+	parent, cancel := context.WithDeadline(parent, deadline)
+	defer cancel()
+	app := &terminalContextApp{}
+	runtime, err := NewRuntimeWithClockContext(
+		parent,
+		app,
+		NewRuntimeConfig(Size{Width: 1, Height: 1}),
+		NewVirtualClock(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(runtime.Close)
+
+	if !runtime.RunTerminalTask() {
+		t.Fatal("terminal task did not run")
+	}
+	if app.observed.value != "terminal-trace" ||
+		!app.observed.hasDeadline ||
+		!app.observed.deadline.Equal(deadline) {
+		t.Fatalf("terminal task context = %+v", app.observed)
+	}
+}
+
 func TestNewRuntimeContextRejectsNilParent(t *testing.T) {
 	if _, err := NewRuntimeContext[runtimeMessage](nil, &counterApp{}, Size{}); err == nil {
 		t.Fatal("NewRuntimeContext accepted nil parent")
@@ -256,6 +306,98 @@ func TestTerminalRenderingReusesReleasedSurfaceStorage(t *testing.T) {
 	}
 	if runtime.previousSurface != first {
 		t.Fatal("terminal rendering did not reuse the released surface")
+	}
+}
+
+type terminalTaskApp struct {
+	messages []string
+}
+
+func (*terminalTaskApp) Init() Effect[string] { return NoneEffect[string]() }
+
+func (a *terminalTaskApp) Update(message string) Effect[string] {
+	a.messages = append(a.messages, message)
+	if message == "start" {
+		return SequenceEffects(
+			SuspendTerminalEffect(func(context.Context) string { return "first" }),
+			SuspendTerminalEffect(func(context.Context) string { return "second" }),
+		)
+	}
+	return NoneEffect[string]()
+}
+
+func (*terminalTaskApp) Subscriptions() Subscription[string] {
+	return NoneSubscription[string]()
+}
+
+func (a *terminalTaskApp) View(ViewContext) Node[string] {
+	return Text[string](strings.Join(a.messages, ","))
+}
+
+func TestTerminalTasksRunOnDriverGoroutineAndPreserveSequenceOrder(t *testing.T) {
+	app := &terminalTaskApp{}
+	runtime, err := NewRuntime[string](app, Size{Width: 32, Height: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(runtime.Close)
+	if err := runtime.Enqueue("start"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.ProcessPending(); err != nil {
+		t.Fatal(err)
+	}
+
+	if runtime.PendingTerminalTasks() != 1 || !runtime.RunTerminalTask() {
+		t.Fatalf("first pending terminal tasks = %d", runtime.PendingTerminalTasks())
+	}
+	if _, err := runtime.ProcessPending(); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(app.messages, []string{"start", "first"}) || runtime.PendingTerminalTasks() != 1 {
+		t.Fatalf("after first task messages = %v, pending = %d", app.messages, runtime.PendingTerminalTasks())
+	}
+
+	if !runtime.RunTerminalTask() {
+		t.Fatal("second terminal task did not run")
+	}
+	if _, err := runtime.ProcessPending(); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(app.messages, []string{"start", "first", "second"}) || runtime.PendingTerminalTasks() != 0 {
+		t.Fatalf("after second task messages = %v, pending = %d", app.messages, runtime.PendingTerminalTasks())
+	}
+	if runtime.RunTerminalTask() {
+		t.Fatal("empty terminal task queue reported work")
+	}
+}
+
+func TestInvalidatedTerminalSurfaceProducesFullRedraw(t *testing.T) {
+	runtime, err := NewRuntime[runtimeMessage](&counterApp{}, Size{Width: 3, Height: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(runtime.Close)
+	first, err := runtime.RenderIfDirty()
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.RequestFrame()
+	unchanged, err := runtime.RenderIfDirty()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unchanged.Operations()) != 0 {
+		t.Fatalf("unchanged operations = %v, want none", unchanged.Operations())
+	}
+
+	runtime.InvalidateTerminalSurface()
+	redrawn, err := runtime.RenderIfDirty()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(redrawn.Operations(), first.Operations()) {
+		t.Fatalf("redraw operations = %v, want %v", redrawn.Operations(), first.Operations())
 	}
 }
 

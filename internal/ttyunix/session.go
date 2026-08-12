@@ -50,6 +50,9 @@ type Session struct {
 	hasOriginalState bool
 	watcher          resizeWatcher
 	wake             *wakePipe
+	mouseTracking    vt.MouseTracking
+	hasMouseTracking bool
+	rawModeActive    bool
 	lifecycleStarted bool
 	initialResize    bool
 	ownsProcess      bool
@@ -107,8 +110,13 @@ func startSession(backend terminalBackend, inputFD, outputFD int, options Option
 		hasOriginalState: true,
 		watcher:          watcher,
 		wake:             wake,
+		rawModeActive:    true,
 		lifecycleStarted: true,
 		initialResize:    true,
+	}
+	if options.MouseTracking != nil {
+		session.mouseTracking = *options.MouseTracking
+		session.hasMouseTracking = true
 	}
 	operations := []vt.TerminalOp{
 		vt.EnterAlternateScreen(),
@@ -236,12 +244,49 @@ func (s *Session) TakeResize() bool {
 	return s.watcher != nil && s.watcher.changed()
 }
 
-// Close performs best-effort terminal restoration and returns the first error.
-// It is safe to call more than once.
-func (s *Session) Close() error {
+// Suspend restores the original terminal mode and leaves the alternate screen
+// while retaining resize signaling and enough state to Resume
+func (s *Session) Suspend() error {
+	return s.deactivate("suspend terminal mode")
+}
+
+// Resume re-enters raw mode and the configured full-screen terminal modes
+func (s *Session) Resume() error {
+	if s.lifecycleStarted && s.rawModeActive {
+		return nil
+	}
+	if !s.hasOriginalState {
+		return errors.New("resume terminal session: terminal session is closed")
+	}
+	if !s.rawModeActive {
+		rawState := s.originalState
+		makeRaw(&rawState)
+		if err := s.backend.setState(s.inputFD, &rawState); err != nil {
+			return fmt.Errorf("resume terminal raw mode: %w", err)
+		}
+		s.rawModeActive = true
+	}
+
+	s.lifecycleStarted = true
+	operations := []vt.TerminalOp{
+		vt.EnterAlternateScreen(),
+		vt.HideCursor(),
+		vt.EnableBracketedPaste(),
+	}
+	if s.hasMouseTracking {
+		operations = append(operations, vt.EnableMouse(s.mouseTracking))
+	}
+	operations = append(operations, vt.EnableFocus())
+	if err := s.WriteOperations(operations, vt.BaselineCapabilities()); err != nil {
+		_ = s.deactivate("restore terminal mode")
+		return err
+	}
+	return nil
+}
+
+func (s *Session) deactivate(modeOperation string) error {
 	var firstErr error
 	if s.lifecycleStarted {
-		s.lifecycleStarted = false
 		operations := []vt.TerminalOp{
 			vt.DisableMouse(),
 			vt.DisableFocus(),
@@ -252,14 +297,29 @@ func (s *Session) Close() error {
 		}
 		if err := s.WriteOperations(operations, vt.BaselineCapabilities()); err != nil {
 			firstErr = err
+		} else {
+			s.lifecycleStarted = false
 		}
 	}
-	if s.hasOriginalState {
-		s.hasOriginalState = false
-		if err := s.backend.setState(s.inputFD, &s.originalState); err != nil && firstErr == nil {
-			firstErr = fmt.Errorf("restore terminal mode: %w", err)
+	if s.rawModeActive && s.hasOriginalState {
+		if err := s.backend.setState(s.inputFD, &s.originalState); err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("%s: %w", modeOperation, err)
+			}
+		} else {
+			s.rawModeActive = false
 		}
 	}
+	return firstErr
+}
+
+// Close performs best-effort terminal restoration and returns the first error.
+// It is safe to call more than once.
+func (s *Session) Close() error {
+	firstErr := s.deactivate("restore terminal mode")
+	s.lifecycleStarted = false
+	s.rawModeActive = false
+	s.hasOriginalState = false
 	if s.watcher != nil {
 		s.watcher.close()
 		s.watcher = nil

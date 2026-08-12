@@ -47,8 +47,9 @@ define behavior shared with the Rust implementation
 ## Testing applications
 
 Package `tuitest` drives messages, terminal input, resize, virtual time,
-Effects, Subscriptions, pending clipboard requests, Runtime notices, frame
-inspection, and active resolved action queries without a real terminal
+Effects, Subscriptions, pending terminal tasks and clipboard requests, Runtime
+notices, frame inspection, and active resolved action queries without a real
+terminal
 
 The shared [event-driven application architecture](https://github.com/mayahiro/nagi/blob/main/docs/EVENT_DRIVEN_APPLICATIONS.md)
 explains how process output and timers enter Nagi without a second UI loop
@@ -58,6 +59,11 @@ width policy for Core measurement, rendering, hit geometry, and cursor
 placement. Pass `ViewContext.WidthProfile` to width-sensitive widget builders.
 Unexpected asynchronous lifecycle transitions are available through the
 bounded Runtime notice queue or the terminal notice-handler entry points
+
+`SuspendTerminalEffect` runs an application-owned blocking task after the
+standard runner restores the ordinary terminal and leaves the alternate screen.
+Returning from the task resumes configured modes, resets pending input, and
+forces a full redraw
 
 ## Examples
 
@@ -74,6 +80,7 @@ Run commands from the Go repository root in a real terminal
 | [Code view](examples/code-view/README.md) | `go run ./examples/code-view` |
 | [Diff view](examples/diff-view/README.md) | `go run ./examples/diff-view` |
 | [Event-driven log viewer](examples/log-viewer/README.md) | `go run ./examples/log-viewer` |
+| [Terminal suspend and resume](examples/terminal-suspend/README.md) | `go run ./examples/terminal-suspend` |
 | [Virtual scroll](examples/virtual-scroll/README.md) | `go run ./examples/virtual-scroll` |
 | [Variable-height feed](examples/virtual-feed/README.md) | `go run ./examples/virtual-feed` |
 | [Widget gallery](examples/widget-gallery/README.md) | `go run ./examples/widget-gallery` |
@@ -88,8 +95,9 @@ Run commands from the Go repository root in a real terminal
 
 Terminal input and output must be connected to a terminal. Mouse reporting is
 disabled by default. Raw mode and screen restoration are best effort on normal
-return, error, and panic paths. Process abort, nested terminal sessions,
-suspend and resume, and `/dev/tty` acquisition are not supported
+return, error, and panic paths. Application-requested temporary terminal
+suspension is supported. Process abort, nested terminal sessions, job-control
+suspension of the Nagi process, and `/dev/tty` acquisition are not supported
 
 `ScrollViewport` clips and scrolls an eager child tree. Large data sets can use
 `VirtualScrollViewport`, which declares the complete cell extent and constructs

@@ -37,6 +37,21 @@ func TestTimedInputDecoderTreatsNegativeTimeoutAsZero(t *testing.T) {
 	}
 }
 
+func TestTimedInputDecoderResetDiscardsIncompleteInput(t *testing.T) {
+	clock := NewVirtualClock()
+	decoder := NewTimedInputDecoder(clock, 25*time.Millisecond)
+	if events := decoder.Feed([]byte{0x1B}); len(events) != 0 {
+		t.Fatalf("initial events = %v, want none", events)
+	}
+
+	decoder.Reset()
+	clock.Advance(25 * time.Millisecond)
+
+	if events := decoder.Poll(); len(events) != 0 || decoder.HasPending() {
+		t.Fatalf("events after reset = %v, pending = %t", events, decoder.HasPending())
+	}
+}
+
 func TestTimedInputDecoderRejectsNilClock(t *testing.T) {
 	defer func() {
 		if recover() == nil {

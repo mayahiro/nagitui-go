@@ -98,6 +98,12 @@ func (d *TimedInputDecoder) Flush() []vt.Event {
 	return d.decoder.FlushPending()
 }
 
+// Reset discards incomplete terminal input without emitting an Event
+func (d *TimedInputDecoder) Reset() {
+	d.decoder = vt.NewDecoder()
+	d.hasDeadline = false
+}
+
 // HasPending reports whether incomplete input is buffered
 func (d *TimedInputDecoder) HasPending() bool {
 	return d.decoder.HasPending()

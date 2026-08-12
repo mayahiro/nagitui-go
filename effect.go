@@ -33,7 +33,10 @@ func (s ScopeID) String() string {
 	return string(s)
 }
 
-// Task is one goroutine task producing an application message
+// Task produces one application Message
+//
+// RunEffect executes it on a supervised goroutine. SuspendTerminalEffect
+// executes it on the terminal driver goroutine.
 type Task[Message any] func(context.Context) Message
 
 // ClipboardRequest is one application-requested semantic text write to a
@@ -61,6 +64,7 @@ const (
 	effectFocus
 	effectScrollTo
 	effectSetClipboard
+	effectSuspendTerminal
 	effectRun
 	effectLatest
 	effectCancel
@@ -114,6 +118,18 @@ func ScrollToEffect[Message any](id NodeID, offset ScrollOffset) Effect[Message]
 // the latest value.
 func SetClipboardEffect[Message any](text string) Effect[Message] {
 	return Effect[Message]{kind: effectSetClipboard, clipboard: NewClipboardRequest(text)}
+}
+
+// SuspendTerminalEffect runs one blocking task on the terminal driver goroutine
+// while the standard full-screen terminal session is suspended
+//
+// Process selection, command execution, and domain error mapping remain
+// application responsibilities. It panics when task is nil.
+func SuspendTerminalEffect[Message any](task Task[Message]) Effect[Message] {
+	if task == nil {
+		panic("nagi-tui: nil terminal effect task")
+	}
+	return Effect[Message]{kind: effectSuspendTerminal, task: task}
 }
 
 // RunEffect runs one task on a supervised goroutine

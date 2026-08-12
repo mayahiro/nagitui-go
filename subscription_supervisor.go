@@ -171,6 +171,9 @@ func (s *subscriptionSupervisor[Message]) poll(now Timestamp) {
 }
 
 func (s *subscriptionSupervisor[Message]) takeReady(maximum int) []subscriptionMessage[Message] {
+	if maximum <= 0 || len(s.order) == 0 {
+		return nil
+	}
 	ready := make([]subscriptionMessage[Message], 0, min(maximum, 64))
 	for len(ready) < maximum {
 		var selectedKey SubscriptionKey
