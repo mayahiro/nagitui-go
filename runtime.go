@@ -128,6 +128,8 @@ type Runtime[Message any] struct {
 	pendingFocus            NodeID
 	hasPendingFocus         bool
 	pendingScroll           []pendingScrollRequest
+	pendingClipboard        ClipboardRequest
+	hasPendingClipboard     bool
 }
 
 type pendingScrollRequest struct {
@@ -257,6 +259,19 @@ func (r *Runtime[Message]) App() App[Message] {
 // Size returns the current terminal cell size
 func (r *Runtime[Message]) Size() Size {
 	return r.size
+}
+
+// PendingClipboardRequest returns the latest request without clearing it
+func (r *Runtime[Message]) PendingClipboardRequest() (ClipboardRequest, bool) {
+	return r.pendingClipboard, r.hasPendingClipboard
+}
+
+// TakeClipboardRequest returns and clears the latest pending request
+func (r *Runtime[Message]) TakeClipboardRequest() (ClipboardRequest, bool) {
+	request, ok := r.pendingClipboard, r.hasPendingClipboard
+	r.pendingClipboard = ClipboardRequest{}
+	r.hasPendingClipboard = false
+	return request, ok
 }
 
 // Interaction returns runtime-owned UI continuity
@@ -488,6 +503,10 @@ func (r *Runtime[Message]) applyEffectCommands() {
 				id:     command.id,
 				offset: command.offset,
 			})
+		case runtimeCommandSetClipboard:
+			r.pendingClipboard = command.clipboard
+			r.hasPendingClipboard = true
+			continue
 		default:
 			panic("nagi-tui: invalid runtime command")
 		}

@@ -103,6 +103,7 @@ func (a *gallery) Update(received message) tui.Effect[message] {
 			kind = "document"
 		}
 		a.lastAction = "Copied " + kind + ": " + strings.ReplaceAll(received.copyRequest.Text, "\n", " / ")
+		return tui.SetClipboardEffect[message](received.copyRequest.Text)
 	case "query":
 		a.query = received.text
 	case "command":
@@ -336,6 +337,7 @@ func mapEvent(event vt.Event) tui.EventAction[message] {
 func run() error {
 	options := tui.DefaultTerminalOptions()
 	options.FocusFirst = true
+	options.Clipboard = tui.TerminalClipboardOSC52
 	mouseTracking := vt.MouseTrackingPress
 	options.MouseTracking = &mouseTracking
 	return tui.RunTerminal[message](newGallery(), options, mapEvent)

@@ -103,12 +103,14 @@ const (
 	runtimeCommandExit runtimeCommandKind = iota
 	runtimeCommandFocus
 	runtimeCommandScrollTo
+	runtimeCommandSetClipboard
 )
 
 type runtimeCommand struct {
-	kind   runtimeCommandKind
-	id     NodeID
-	offset ScrollOffset
+	kind      runtimeCommandKind
+	id        NodeID
+	offset    ScrollOffset
+	clipboard ClipboardRequest
 }
 
 type effectSupervisor[Message any] struct {
@@ -257,6 +259,11 @@ func (s *effectSupervisor[Message]) startEffect(
 			kind:   runtimeCommandScrollTo,
 			id:     effect.id,
 			offset: effect.offset,
+		})
+		s.complete(continuation, now)
+	case effectSetClipboard:
+		s.commands = append(s.commands, runtimeCommand{
+			kind: runtimeCommandSetClipboard, clipboard: effect.clipboard,
 		})
 		s.complete(continuation, now)
 	case effectRun:

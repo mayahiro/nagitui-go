@@ -2,9 +2,11 @@ package tui
 
 import (
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/mayahiro/nagi-go/content"
+	"github.com/mayahiro/nagi-go/vt"
 )
 
 const benchmarkRows = 100_000
@@ -342,3 +344,53 @@ func BenchmarkContentProjectionBoundedFailure100K(b *testing.B) {
 }
 
 var benchmarkProjectionNode Node[struct{}]
+
+var benchmarkClipboardOutput []byte
+
+func benchmarkClipboardEncoding(b *testing.B, text string, reuse bool) {
+	b.Helper()
+	operations := []vt.TerminalOp{vt.SetClipboard(text)}
+	output := vt.Encode(operations, vt.BaselineCapabilities())
+	output = output[:0]
+	b.SetBytes(int64(len(text)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		if reuse {
+			output = output[:0]
+			output = vt.AppendEncoded(output, operations, vt.BaselineCapabilities())
+			benchmarkClipboardOutput = output
+		} else {
+			benchmarkClipboardOutput = vt.Encode(operations, vt.BaselineCapabilities())
+		}
+	}
+}
+
+func BenchmarkClipboardEncodingSmall(b *testing.B) {
+	for _, test := range []struct {
+		name  string
+		reuse bool
+	}{
+		{name: "Fresh"},
+		{name: "Reused", reuse: true},
+	} {
+		b.Run(test.name, func(b *testing.B) {
+			benchmarkClipboardEncoding(b, "A日", test.reuse)
+		})
+	}
+}
+
+func BenchmarkClipboardEncoding1MiB(b *testing.B) {
+	text := strings.Repeat("x", 1<<20)
+	for _, test := range []struct {
+		name  string
+		reuse bool
+	}{
+		{name: "Fresh"},
+		{name: "Reused", reuse: true},
+	} {
+		b.Run(test.name, func(b *testing.B) {
+			benchmarkClipboardEncoding(b, text, test.reuse)
+		})
+	}
+}

@@ -75,6 +75,51 @@ func TestHarnessObservesBytesMessagesFramesAndEscapeTime(t *testing.T) {
 	}
 }
 
+type clipboardApp struct{}
+
+func (*clipboardApp) Init() tui.Effect[string] {
+	return tui.NoneEffect[string]()
+}
+
+func (*clipboardApp) Update(message string) tui.Effect[string] {
+	return tui.SetClipboardEffect[string](message).WithoutRedraw()
+}
+
+func (*clipboardApp) Subscriptions() tui.Subscription[string] {
+	return tui.NoneSubscription[string]()
+}
+
+func (*clipboardApp) View(tui.ViewContext) tui.Node[string] {
+	return tui.Text[string]("clipboard")
+}
+
+func TestHarnessObservesAndTakesPendingClipboardRequest(t *testing.T) {
+	harness, err := New[string](
+		&clipboardApp{},
+		tui.Size{Width: 12, Height: 1},
+		func(vt.Event) tui.EventAction[string] { return tui.IgnoreAction[string]() },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer harness.Close()
+	if err := harness.Send("copy"); err != nil {
+		t.Fatal(err)
+	}
+
+	request, ok := harness.PendingClipboardRequest()
+	if !ok || request.Text() != "copy" {
+		t.Fatalf("pending request = %q, %t", request.Text(), ok)
+	}
+	request, ok = harness.TakeClipboardRequest()
+	if !ok || request.Text() != "copy" {
+		t.Fatalf("taken request = %q, %t", request.Text(), ok)
+	}
+	if _, ok := harness.TakeClipboardRequest(); ok {
+		t.Fatal("second take returned a request")
+	}
+}
+
 type controlledInputMessage struct {
 	value     string
 	selection int

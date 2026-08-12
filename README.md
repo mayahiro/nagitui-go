@@ -47,8 +47,8 @@ define behavior shared with the Rust implementation
 ## Testing applications
 
 Package `tuitest` drives messages, terminal input, resize, virtual time,
-Effects, Subscriptions, Runtime notices, frame inspection, and active resolved
-action queries without a real terminal
+Effects, Subscriptions, pending clipboard requests, Runtime notices, frame
+inspection, and active resolved action queries without a real terminal
 
 The shared [event-driven application architecture](https://github.com/mayahiro/nagi/blob/main/docs/EVENT_DRIVEN_APPLICATIONS.md)
 explains how process output and timers enter Nagi without a second UI loop
@@ -112,8 +112,11 @@ retain ownership of message meaning, history persistence, and sensitive-value
 policy
 
 `SelectableText` adds controlled grapheme-aligned keyboard selection over
-immutable styled content. Copy actions emit application messages; clipboard
-I/O, pointer selection, and redaction policy remain application concerns
+immutable styled content. Copy actions emit application messages. Applications
+may return `SetClipboardEffect`, and `TerminalClipboardOSC52` provides an
+explicit write-only terminal backend. Pointer selection, redaction policy,
+terminal support detection, and OS-specific clipboard commands remain outside
+the widget
 
 `Disclosure` keeps expanded state in the application and constructs its body
 only while expanded. Core Modal scopes focus their first descendant on entry

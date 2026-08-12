@@ -13,6 +13,17 @@ import (
 
 const defaultMinimumFrameInterval = (time.Second + 119) / 120
 
+// TerminalClipboard selects standard terminal handling for clipboard requests
+type TerminalClipboard uint8
+
+const (
+	// TerminalClipboardDisabled drops clipboard requests without terminal output
+	TerminalClipboardDisabled TerminalClipboard = iota
+	// TerminalClipboardOSC52 writes requests through direct, write-only OSC 52
+	// without detecting support or adding multiplexer wrapping
+	TerminalClipboardOSC52
+)
+
 // TerminalOptions contains settings for RunTerminal
 type TerminalOptions struct {
 	// Capabilities contains optional output encoder capabilities
@@ -21,6 +32,8 @@ type TerminalOptions struct {
 	//
 	// It is disabled by default so terminal text selection remains available.
 	MouseTracking *vt.MouseTracking
+	// Clipboard selects terminal clipboard output and defaults to disabled
+	Clipboard TerminalClipboard
 	// FocusFirst focuses the first focusable node before the initial frame
 	FocusFirst bool
 	// EscapeTimeout disambiguates a lone ESC from an escape sequence
@@ -129,6 +142,9 @@ func runTerminalContext[Message any](
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if options.Clipboard > TerminalClipboardOSC52 {
+		return fmt.Errorf("nagi-tui: invalid terminal clipboard mode %d", options.Clipboard)
+	}
 	return ttyunix.Run(ttyunix.Options{MouseTracking: options.MouseTracking}, func(session *ttyunix.Session) error {
 		columns, rows, err := session.Size()
 		if err != nil {
@@ -170,7 +186,7 @@ func runTerminalContext[Message any](
 				return err
 			}
 		}
-		if err := writeTerminalFrame(session, runtime, options.Capabilities); err != nil {
+		if err := writeTerminalOutput(session, runtime, options.Capabilities, options.Clipboard); err != nil {
 			return err
 		}
 		if runtime.ExitRequested() {
@@ -238,7 +254,7 @@ func runTerminalContext[Message any](
 				return err
 			}
 			handleRuntimeNotices(runtime, handleNotice)
-			if err := writeTerminalFrame(session, runtime, options.Capabilities); err != nil {
+			if err := writeTerminalOutput(session, runtime, options.Capabilities, options.Clipboard); err != nil {
 				return err
 			}
 			if exit || runtime.ExitRequested() {
@@ -288,8 +304,13 @@ func terminalWaitDuration(decoder terminalDeadlineSource, runtime runtimeDeadlin
 	return timeout, hasTimeout
 }
 
-func writeTerminalFrame[Message any](session *ttyunix.Session, runtime *Runtime[Message], capabilities vt.Capabilities) error {
-	operations, err := runtime.terminalOperationsIfDirty()
+func writeTerminalOutput[Message any](
+	session *ttyunix.Session,
+	runtime *Runtime[Message],
+	capabilities vt.Capabilities,
+	clipboard TerminalClipboard,
+) error {
+	operations, err := pendingTerminalOutputOperations(runtime, clipboard)
 	if err != nil {
 		return err
 	}
@@ -297,4 +318,19 @@ func writeTerminalFrame[Message any](session *ttyunix.Session, runtime *Runtime[
 		return nil
 	}
 	return session.WriteOperations(operations, capabilities)
+}
+
+func pendingTerminalOutputOperations[Message any](
+	runtime *Runtime[Message],
+	clipboard TerminalClipboard,
+) ([]vt.TerminalOp, error) {
+	operations, err := runtime.terminalOperationsIfDirty()
+	if err != nil {
+		return nil, err
+	}
+	request, ok := runtime.TakeClipboardRequest()
+	if ok && clipboard == TerminalClipboardOSC52 {
+		operations = append(operations, vt.SetClipboard(request.Text()))
+	}
+	return operations, nil
 }

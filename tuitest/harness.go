@@ -68,6 +68,16 @@ func (h *Harness[Message]) Interaction() *tui.InteractionState {
 	return h.runtime.Interaction()
 }
 
+// PendingClipboardRequest returns the latest request without clearing it
+func (h *Harness[Message]) PendingClipboardRequest() (tui.ClipboardRequest, bool) {
+	return h.runtime.PendingClipboardRequest()
+}
+
+// TakeClipboardRequest returns and clears the latest pending request
+func (h *Harness[Message]) TakeClipboardRequest() (tui.ClipboardRequest, bool) {
+	return h.runtime.TakeClipboardRequest()
+}
+
 // RequestFocus requests focus for a focusable ID in the current semantic tree
 func (h *Harness[Message]) RequestFocus(id tui.NodeID) (bool, error) {
 	return h.runtime.RequestFocus(id)
