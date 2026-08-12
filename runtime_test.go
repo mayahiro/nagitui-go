@@ -865,6 +865,104 @@ func TestRuntimeFocusFallbackAndAncestorRouting(t *testing.T) {
 	}
 }
 
+type pointerHandlerOrderApp struct {
+	visits []string
+}
+
+func (*pointerHandlerOrderApp) Init() Effect[focusMessage] {
+	return NoneEffect[focusMessage]()
+}
+
+func (*pointerHandlerOrderApp) Subscriptions() Subscription[focusMessage] {
+	return NoneSubscription[focusMessage]()
+}
+
+func (a *pointerHandlerOrderApp) Update(message focusMessage) Effect[focusMessage] {
+	a.visits = append(a.visits, message.visit)
+	return NoneEffect[focusMessage]()
+}
+
+func (*pointerHandlerOrderApp) View(ViewContext) Node[focusMessage] {
+	return RichText[focusMessage](NewTextSpan("ab", vt.Style{})).
+		OnPointerEvent("target", func(context PointerEventContext) EventResult[focusMessage] {
+			hit, ok := context.TextHit()
+			if !ok || hit.Start() != 0 || hit.End() != 1 {
+				panic("unexpected paragraph text hit")
+			}
+			if context.LocalPosition() != (Point{}) {
+				panic("unexpected pointer local position")
+			}
+			if context.Bounds() != (Size{Width: 2, Height: 1}) ||
+				context.VisibleBounds() != (Rect{Width: 2, Height: 1}) || context.IsCaptured() {
+				panic("unexpected pointer geometry")
+			}
+			if _, ok := context.Viewport(); ok {
+				panic("unexpected pointer viewport")
+			}
+			return IgnoreResult[focusMessage]().Emit(focusMessage{visit: "pointer"})
+		}).
+		OnEvent("target", func(vt.Event) EventResult[focusMessage] {
+			return MessageResult(focusMessage{visit: "raw"})
+		})
+}
+
+func TestRuntimeGeometryPointerHandlerPrecedesRawHandler(t *testing.T) {
+	app := &pointerHandlerOrderApp{}
+	runtime, err := NewRuntimeWithClock[focusMessage](
+		app,
+		NewRuntimeConfig(Size{Width: 2, Height: 1}),
+		NewVirtualClock(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(runtime.Close)
+	if _, err := runtime.RenderIfDirty(); err != nil {
+		t.Fatal(err)
+	}
+
+	dispatch, err := runtime.DispatchEvent(vt.Event{Kind: vt.EventMouse, Mouse: vt.MouseEvent{
+		Kind: vt.MousePress, Button: vt.MouseLeft,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !dispatch.Consumed() || dispatch.Messages() != 2 {
+		t.Fatalf("dispatch = %+v", dispatch)
+	}
+	if _, err := runtime.ProcessPending(); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(app.visits, []string{"pointer", "raw"}) {
+		t.Fatalf("visits = %v", app.visits)
+	}
+}
+
+func TestPointerEdgeScrollIsDerivedOnlyForMoveEvents(t *testing.T) {
+	context := PointerEventContext{
+		viewport: PointerViewport{
+			id:   "scroll",
+			axis: ScrollAxisVertical,
+			state: ScrollState{
+				Offset: ScrollOffset{Y: 1}, Maximum: ScrollOffset{Y: 3},
+			},
+			visible: Rect{Width: 4, Height: 2},
+		},
+		hasViewport: true,
+	}
+	for _, kind := range []vt.MouseKind{vt.MousePress, vt.MouseRelease} {
+		context.event = vt.MouseEvent{Kind: kind, Button: vt.MouseLeft, X: 1, Y: 1}
+		if _, _, ok := context.EdgeScroll(); ok {
+			t.Fatalf("EdgeScroll returned a request for kind %v", kind)
+		}
+	}
+	context.event = vt.MouseEvent{Kind: vt.MouseMove, Button: vt.MouseLeft, X: 1, Y: 1}
+	id, offset, ok := context.EdgeScroll()
+	if !ok || id != "scroll" || offset != (ScrollOffset{Y: 2}) {
+		t.Fatalf("EdgeScroll = %q, %+v, %t", id, offset, ok)
+	}
+}
+
 type modalApp struct {
 	visits []string
 	hard   bool

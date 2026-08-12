@@ -232,6 +232,7 @@ type Node[Message any] struct {
 	focusedStyle     vt.Style
 	hasFocusedStyle  bool
 	handler          eventHandler[Message]
+	pointerHandler   pointerEventHandler[Message]
 	keyInteraction   *nodeKeyInteraction[Message]
 	onChange         func(string) Message
 	placeholder      string
@@ -564,7 +565,8 @@ func (n Node[Message]) WithID(id NodeID) Node[Message] {
 }
 
 // BlockUnhandledEvents consumes routed events that remain unhandled after this
-// identified node has processed its actions, built-in behavior, and raw handler
+// identified node has processed its actions, built-in behavior, pointer
+// handler, and raw handler
 //
 // The boundary prevents the event from reaching ancestors and terminal-level
 // fallback mapping. It has no effect until the node has a stable identity.
@@ -614,6 +616,22 @@ func (n Node[Message]) OnEvent(id NodeID, handler func(vt.Event) EventResult[Mes
 	n.id = id
 	n.hasID = true
 	n.handler = handler
+	return n
+}
+
+// OnPointerEvent attaches a geometry-aware mouse event handler under a stable identity
+//
+// The handler receives Node-local coordinates, clipping, Runtime width policy,
+// paragraph text hit information, and the nearest ScrollViewport Raw OnEvent
+// handling remains independent and runs afterward when this handler does not
+// consume the event
+func (n Node[Message]) OnPointerEvent(
+	id NodeID,
+	handler func(PointerEventContext) EventResult[Message],
+) Node[Message] {
+	n.id = id
+	n.hasID = true
+	n.pointerHandler = handler
 	return n
 }
 

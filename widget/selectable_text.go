@@ -182,10 +182,11 @@ func DefaultSelectableTextStyle() SelectableTextStyle {
 	}
 }
 
-// SelectableText provides controlled keyboard selection and copy actions over one styled document
+// SelectableText provides controlled keyboard and pointer selection over one styled document
 //
 // Copy requests are emitted as application messages. This widget does not
-// access an OS or terminal clipboard and does not perform pointer selection.
+// access an OS or terminal clipboard. Left-button dragging requires the
+// terminal driver to enable button-motion mouse tracking.
 type SelectableText[Message any] struct {
 	id       tui.NodeID
 	content  SelectableTextContent
@@ -275,6 +276,9 @@ func (s SelectableText[Message]) Node() tui.Node[Message] {
 	}
 	return node.Focusable(s.id).
 		WithFocusedStyle(s.style.Focused).
+		OnPointerEvent(s.id, func(pointer tui.PointerEventContext) tui.EventResult[Message] {
+			return selectableTextPointerResult(pointer, context)
+		}).
 		OnActions(s.id, actions)
 }
 
@@ -474,6 +478,76 @@ func selectableTextActionResult[Message any](
 		return result
 	}
 	return result.Emit(context.onChange(next))
+}
+
+func selectableTextPointerResult[Message any](
+	pointer tui.PointerEventContext,
+	context *selectableTextActionContext[Message],
+) tui.EventResult[Message] {
+	event := pointer.Event()
+	if event.Button != vt.MouseLeft {
+		return tui.IgnoreResult[Message]()
+	}
+	hit, ok := pointer.TextHit()
+	if !ok {
+		return tui.IgnoreResult[Message]()
+	}
+	switch event.Kind {
+	case vt.MousePress:
+		var next SelectableTextState
+		if event.Modifiers.Shift {
+			anchor := selectableTextAnchor(context.state)
+			next = NewSelectableTextStateWithSelection(pointerSelectionOffset(hit, anchor), anchor)
+		} else {
+			next = NewSelectableTextState(hit.Start())
+		}
+		result := tui.ConsumeResult[Message]().Focus(context.id).CapturePointer(context.id)
+		return emitSelectableTextChange(result, next, context)
+	case vt.MouseMove:
+		if !pointer.IsCaptured() {
+			return tui.IgnoreResult[Message]()
+		}
+		anchor := selectableTextAnchor(context.state)
+		next := NewSelectableTextStateWithSelection(pointerSelectionOffset(hit, anchor), anchor)
+		result := tui.ConsumeResult[Message]().Focus(context.id)
+		if viewport, offset, scroll := pointer.EdgeScroll(); scroll {
+			result = result.ScrollTo(viewport, offset)
+		}
+		return emitSelectableTextChange(result, next, context)
+	case vt.MouseRelease:
+		if !pointer.IsCaptured() {
+			return tui.IgnoreResult[Message]()
+		}
+		return tui.ConsumeResult[Message]().ReleasePointer()
+	default:
+		return tui.IgnoreResult[Message]()
+	}
+}
+
+func emitSelectableTextChange[Message any](
+	result tui.EventResult[Message],
+	next SelectableTextState,
+	context *selectableTextActionContext[Message],
+) tui.EventResult[Message] {
+	next = context.content.NormalizeState(next)
+	if next == context.state {
+		return result
+	}
+	return result.Emit(context.onChange(next))
+}
+
+func selectableTextAnchor(state SelectableTextState) int {
+	if state.hasSelection {
+		return state.selectionAnchor
+	}
+	return state.cursor
+}
+
+func pointerSelectionOffset(hit tui.TextHit, anchor int) int {
+	if hit.End() <= anchor {
+		return hit.Start()
+	}
+	return hit.End()
 }
 
 func selectableTextCopyResult[Message any](

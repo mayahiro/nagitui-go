@@ -3,6 +3,7 @@ package tui
 import (
 	"sort"
 
+	celltext "github.com/mayahiro/nagi-go/text"
 	"github.com/mayahiro/nagi-go/vt"
 )
 
@@ -41,7 +42,159 @@ type EventResult[Message any] struct {
 	focusID       NodeID
 	pointerChange pointerChangeKind
 	pointerID     NodeID
+	scrollID      NodeID
+	scrollOffset  ScrollOffset
+	hasScroll     bool
 	redraw        bool
+}
+
+// TextHit is one semantic text grapheme or collapsed line boundary under a pointer cell
+type TextHit struct {
+	start int
+	end   int
+}
+
+func newTextHit(start, end int) TextHit {
+	return TextHit{start: start, end: end}
+}
+
+// Start returns the inclusive UTF-8 byte boundary before the hit grapheme
+func (h TextHit) Start() int {
+	return h.start
+}
+
+// End returns the exclusive UTF-8 byte boundary after the hit grapheme
+//
+// Empty visual regions such as a line boundary have equal Start and End
+func (h TextHit) End() int {
+	return h.end
+}
+
+// PointerViewport is the nearest ancestor ScrollViewport available to a pointer handler
+type PointerViewport struct {
+	id      NodeID
+	axis    ScrollAxis
+	state   ScrollState
+	visible Rect
+}
+
+// ID returns the stable ScrollViewport identity
+func (v PointerViewport) ID() NodeID {
+	return v.id
+}
+
+// Axis returns the axes controlled by the ScrollViewport
+func (v PointerViewport) Axis() ScrollAxis {
+	return v.axis
+}
+
+// State returns the resolved ScrollViewport state at dispatch time
+func (v PointerViewport) State() ScrollState {
+	return v.state
+}
+
+// VisibleRect returns the globally positioned visible ScrollViewport rectangle
+func (v PointerViewport) VisibleRect() Rect {
+	return v.visible
+}
+
+func (v PointerViewport) edgeScrollOffset(event vt.MouseEvent) (ScrollOffset, bool) {
+	if event.Kind != vt.MouseMove || v.visible.Empty() {
+		return ScrollOffset{}, false
+	}
+	next := v.state.Offset
+	x, y := int64(event.X), int64(event.Y)
+	left, top := int64(v.visible.X), int64(v.visible.Y)
+	right := left + int64(v.visible.Width)
+	bottom := top + int64(v.visible.Height)
+	if v.axis.allowsHorizontal() {
+		switch {
+		case x <= left:
+			next.X -= min(next.X, uint32(1))
+		case x >= right-1:
+			next.X = min(saturatingAdd32(next.X, 1), v.state.Maximum.X)
+		}
+	}
+	if v.axis.allowsVertical() {
+		switch {
+		case y <= top:
+			next.Y -= min(next.Y, uint32(1))
+		case y >= bottom-1:
+			next.Y = min(saturatingAdd32(next.Y, 1), v.state.Maximum.Y)
+		}
+	}
+	return next, next != v.state.Offset
+}
+
+// PointerEventContext contains geometry and resolved text information for one routed mouse event
+type PointerEventContext struct {
+	event         vt.MouseEvent
+	localPosition Point
+	bounds        Size
+	visibleBounds Rect
+	widthProfile  celltext.WidthProfile
+	captured      bool
+	textHit       TextHit
+	hasTextHit    bool
+	viewport      PointerViewport
+	hasViewport   bool
+}
+
+// Event returns the normalized zero-based terminal mouse event
+func (c PointerEventContext) Event() vt.MouseEvent {
+	return c.event
+}
+
+// LocalPosition returns the pointer cell relative to the routed Node origin
+//
+// Pointer capture may produce coordinates outside Bounds
+func (c PointerEventContext) LocalPosition() Point {
+	return c.localPosition
+}
+
+// Bounds returns the routed Node size
+func (c PointerEventContext) Bounds() Size {
+	return c.bounds
+}
+
+// VisibleBounds returns the Node-visible rectangle in Node-local coordinates
+func (c PointerEventContext) VisibleBounds() Rect {
+	return c.visibleBounds
+}
+
+// WidthProfile returns the Runtime terminal cell-width policy
+func (c PointerEventContext) WidthProfile() celltext.WidthProfile {
+	return c.widthProfile
+}
+
+// IsCaptured reports whether this Node owns pointer capture for the event
+func (c PointerEventContext) IsCaptured() bool {
+	return c.captured
+}
+
+// TextHit returns the rendered paragraph grapheme or line boundary under the pointer
+//
+// Non-paragraph Nodes return false
+func (c PointerEventContext) TextHit() (TextHit, bool) {
+	return c.textHit, c.hasTextHit
+}
+
+// Viewport returns the nearest ancestor ScrollViewport, when one exists
+func (c PointerEventContext) Viewport() (PointerViewport, bool) {
+	return c.viewport, c.hasViewport
+}
+
+// EdgeScroll returns a one-cell scroll request for a Move at a visible edge
+//
+// The result is clamped to the current ScrollViewport maximum This method
+// does not start a timer and returns false for other event kinds, away from an
+// enabled edge, or when the viewport cannot move farther
+func (c PointerEventContext) EdgeScroll() (NodeID, ScrollOffset, bool) {
+	if !c.hasViewport {
+		return "", ScrollOffset{}, false
+	}
+	offset, ok := c.viewport.edgeScrollOffset(c.event)
+	return c.viewport.id, offset, ok
 }
 
 // IgnoreResult returns an ignored result that continues ancestor routing
@@ -97,6 +250,17 @@ func (r EventResult[Message]) ReleasePointer() EventResult[Message] {
 	return r
 }
 
+// ScrollTo requests a ScrollViewport offset during this event dispatch
+//
+// The latest request in one result wins The Runtime clamps the request and
+// queues a resulting ScrollViewport callback after explicit messages
+func (r EventResult[Message]) ScrollTo(id NodeID, offset ScrollOffset) EventResult[Message] {
+	r.scrollID = id
+	r.scrollOffset = offset
+	r.hasScroll = true
+	return r
+}
+
 // Redraw requests a frame even without an application message
 func (r EventResult[Message]) Redraw() EventResult[Message] {
 	r.redraw = true
@@ -110,17 +274,20 @@ type EventDispatch struct {
 	redraw   bool
 }
 
-// Consumed reports whether a handler consumed the event
+// Consumed reports whether routing consumed the event
 func (d EventDispatch) Consumed() bool {
 	return d.consumed
 }
 
-// Messages returns the number of application messages enqueued by handlers
+// Messages returns the number of application messages enqueued during routing
+//
+// This includes an optional ScrollViewport callback produced by a changed
+// event-local scroll request
 func (d EventDispatch) Messages() int {
 	return d.messages
 }
 
-// RedrawRequested reports whether routing explicitly requested a frame
+// RedrawRequested reports whether routing made an urgent frame necessary
 func (d EventDispatch) RedrawRequested() bool {
 	return d.redraw
 }
@@ -411,3 +578,4 @@ func routePath(parents map[NodeID]*NodeID, root, target *NodeID) []NodeID {
 }
 
 type eventHandler[Message any] func(vt.Event) EventResult[Message]
+type pointerEventHandler[Message any] func(PointerEventContext) EventResult[Message]

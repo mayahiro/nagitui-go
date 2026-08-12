@@ -34,6 +34,32 @@ func (n *Node[Message]) handleEvent(id NodeID, event vt.Event) (EventResult[Mess
 	return node.handler(event), true
 }
 
+func (n *Node[Message]) handlePointerEvent(
+	id NodeID,
+	context PointerEventContext,
+) (EventResult[Message], bool) {
+	node := n.find(id)
+	if node == nil || node.pointerHandler == nil {
+		return EventResult[Message]{}, false
+	}
+	if node.kind == nodeRichText {
+		layout := node.richTextCache.resolveTextHit(
+			node.spans,
+			context.bounds.Width,
+			node.paragraph.Wrap,
+			context.widthProfile,
+		)
+		context.textHit = paragraphTextHit(
+			layout,
+			context.bounds.Width,
+			node.paragraph.Alignment,
+			context.localPosition,
+		)
+		context.hasTextHit = true
+	}
+	return node.pointerHandler(context), true
+}
+
 func (n *Node[Message]) textInputMessage(id NodeID, value string) (Message, bool) {
 	node := n.find(id)
 	if node == nil || node.kind != nodeTextInput || node.onChange == nil {
@@ -138,7 +164,7 @@ func (n *Node[Message]) buildIndex(
 			rect:            rect,
 			clip:            clip,
 			focusable:       n.focusable,
-			hasHandler:      n.handler != nil,
+			hasHandler:      n.handler != nil || n.pointerHandler != nil,
 			blocksUnhandled: n.blocksUnhandled,
 			kind:            kind,
 		}, root); err != nil {

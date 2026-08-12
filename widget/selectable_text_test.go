@@ -3,9 +3,11 @@ package widget
 import (
 	"errors"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
+	celltext "github.com/mayahiro/nagi-go/text"
 	"github.com/mayahiro/nagi-go/vt"
 	"github.com/mayahiro/nagitui-go"
 )
@@ -14,6 +16,7 @@ type selectableTextMessage struct {
 	kind    string
 	state   SelectableTextState
 	request TextCopyRequest
+	offset  tui.ScrollOffset
 }
 
 type selectableTextFixtureApp struct {
@@ -23,6 +26,174 @@ type selectableTextFixtureApp struct {
 	copy     bool
 	keyMap   tui.KeyMap
 	messages []selectableTextMessage
+}
+
+type selectableTextPointerApp struct {
+	content  SelectableTextContent
+	state    SelectableTextState
+	enabled  bool
+	options  tui.ParagraphOptions
+	scroll   string
+	messages []selectableTextMessage
+}
+
+func (*selectableTextPointerApp) Init() tui.Effect[selectableTextMessage] {
+	return tui.NoneEffect[selectableTextMessage]()
+}
+
+func (*selectableTextPointerApp) Subscriptions() tui.Subscription[selectableTextMessage] {
+	return tui.NoneSubscription[selectableTextMessage]()
+}
+
+func (a *selectableTextPointerApp) Update(message selectableTextMessage) tui.Effect[selectableTextMessage] {
+	if message.kind == "change" {
+		a.state = message.state
+	}
+	a.messages = append(a.messages, message)
+	return tui.NoneEffect[selectableTextMessage]()
+}
+
+func (a *selectableTextPointerApp) View(tui.ViewContext) tui.Node[selectableTextMessage] {
+	text := NewSelectableText(
+		tui.NewNodeID("text"),
+		a.content,
+		a.state,
+		func(state SelectableTextState) selectableTextMessage {
+			return selectableTextMessage{kind: "change", state: state}
+		},
+	).Enabled(a.enabled).ParagraphOptions(a.options).Node()
+	if a.scroll == "none" {
+		return text
+	}
+	options := tui.DefaultScrollViewportOptions[selectableTextMessage]()
+	switch a.scroll {
+	case "vertical":
+		options.Axis = tui.ScrollAxisVertical
+	case "horizontal":
+		options.Axis = tui.ScrollAxisHorizontal
+	default:
+		panic("invalid pointer scroll axis " + a.scroll)
+	}
+	options.OnScroll = func(state tui.ScrollState) selectableTextMessage {
+		return selectableTextMessage{kind: "scroll", offset: state.Offset}
+	}
+	return tui.ScrollViewportWithOptions(tui.NewNodeID("scroll"), text, options)
+}
+
+func TestSelectableTextPointerSelectionMatchesSharedFixtures(t *testing.T) {
+	records := loadWidgetFixtures(
+		t,
+		"widgets/selectable-text-pointer.txt",
+		"widget-selectable-text-pointer",
+		"content", "width", "height", "wrap", "alignment", "profile", "scroll",
+		"enabled", "cursor", "anchor", "events", "expected-cursor", "expected-anchor",
+		"messages", "consumed", "capture", "focus", "offset",
+	)
+	for _, record := range records {
+		record := record
+		t.Run(record.ID, func(t *testing.T) {
+			content := NewPlainSelectableTextContent(record.Text("content"))
+			state := content.NormalizeState(selectableTextFixtureState(
+				t, record.Field("cursor"), record.Field("anchor"),
+			))
+			config := tui.NewRuntimeConfig(tui.Size{
+				Width:  uint32(fixtureInt(t, record.Field("width"))),
+				Height: uint32(fixtureInt(t, record.Field("height"))),
+			})
+			switch record.Field("profile") {
+			case "modern":
+				config.WidthProfile = celltext.ModernWidth()
+			case "cjk":
+				config.WidthProfile = celltext.CJKWidth()
+			default:
+				t.Fatalf("invalid pointer WidthProfile %q", record.Field("profile"))
+			}
+			options := tui.DefaultParagraphOptions()
+			switch record.Field("wrap") {
+			case "word":
+				options.Wrap = tui.WrapWord
+			case "hard":
+				options.Wrap = tui.WrapHard
+			case "none":
+				options.Wrap = tui.WrapNone
+			default:
+				t.Fatalf("invalid pointer WrapMode %q", record.Field("wrap"))
+			}
+			switch record.Field("alignment") {
+			case "start":
+				options.Alignment = tui.AlignStart
+			case "center":
+				options.Alignment = tui.AlignCenter
+			case "end":
+				options.Alignment = tui.AlignEnd
+			default:
+				t.Fatalf("invalid pointer alignment %q", record.Field("alignment"))
+			}
+			app := &selectableTextPointerApp{
+				content: content, state: state,
+				enabled: fixtureBool(t, record.Field("enabled")),
+				options: options, scroll: record.Field("scroll"),
+			}
+			runtime, err := tui.NewRuntimeWithClock(app, config, tui.NewVirtualClock())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer runtime.Close()
+			if _, err := runtime.RenderIfDirty(); err != nil {
+				t.Fatal(err)
+			}
+			var consumed []bool
+			for _, event := range strings.Split(record.Field("events"), ",") {
+				dispatch, err := runtime.DispatchEvent(selectableTextPointerFixtureEvent(t, event))
+				if err != nil {
+					t.Fatal(err)
+				}
+				consumed = append(consumed, dispatch.Consumed())
+				if _, err := runtime.ProcessPending(); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := runtime.RenderIfDirty(); err != nil {
+					t.Fatal(err)
+				}
+			}
+			expectedState := selectableTextFixtureState(
+				t, record.Field("expected-cursor"), record.Field("expected-anchor"),
+			)
+			if app.state != expectedState {
+				t.Errorf("state = %#v, want %#v", app.state, expectedState)
+			}
+			if actual := selectableTextPointerMessages(app.messages); actual != record.Field("messages") {
+				t.Errorf("messages = %q, want %q", actual, record.Field("messages"))
+			}
+			expectedConsumed := strings.Split(record.Field("consumed"), ",")
+			if len(consumed) != len(expectedConsumed) {
+				t.Fatalf("consumed = %#v, want %q", consumed, record.Field("consumed"))
+			}
+			for index := range consumed {
+				if consumed[index] != fixtureBool(t, expectedConsumed[index]) {
+					t.Errorf("consumed[%d] = %t, want %s", index, consumed[index], expectedConsumed[index])
+				}
+			}
+			capture := "none"
+			if id, ok := runtime.Interaction().PointerCapture(); ok {
+				capture = id.String()
+			}
+			if capture != record.Field("capture") {
+				t.Errorf("capture = %q, want %q", capture, record.Field("capture"))
+			}
+			focus := "none"
+			if id, ok := runtime.Interaction().Focused(); ok {
+				focus = id.String()
+			}
+			if focus != record.Field("focus") {
+				t.Errorf("focus = %q, want %q", focus, record.Field("focus"))
+			}
+			expectedOffset := selectableTextFixtureScrollOffset(t, record.Field("offset"))
+			if offset := runtime.Interaction().ScrollOffset(tui.NewNodeID("scroll")); offset != expectedOffset {
+				t.Errorf("scroll offset = %#v, want %#v", offset, expectedOffset)
+			}
+		})
+	}
 }
 
 func (*selectableTextFixtureApp) Init() tui.Effect[selectableTextMessage] {
@@ -463,6 +634,78 @@ func selectableTextFixtureEvent(t *testing.T, value string) vt.Event {
 	default:
 		t.Fatalf("invalid SelectableText event %q", value)
 		return vt.Event{}
+	}
+}
+
+func selectableTextPointerFixtureEvent(t *testing.T, value string) vt.Event {
+	t.Helper()
+	kind, coordinates, ok := strings.Cut(value, "@")
+	if !ok {
+		t.Fatalf("invalid pointer event %q", value)
+	}
+	xText, yText, ok := strings.Cut(coordinates, ":")
+	if !ok {
+		t.Fatalf("invalid pointer coordinates %q", coordinates)
+	}
+	x, err := strconv.ParseUint(xText, 10, 32)
+	if err != nil {
+		t.Fatalf("invalid pointer x %q: %v", xText, err)
+	}
+	y, err := strconv.ParseUint(yText, 10, 32)
+	if err != nil {
+		t.Fatalf("invalid pointer y %q: %v", yText, err)
+	}
+	event := vt.MouseEvent{X: uint32(x), Y: uint32(y)}
+	switch kind {
+	case "press":
+		event.Kind, event.Button = vt.MousePress, vt.MouseLeft
+	case "shift-press":
+		event.Kind, event.Button = vt.MousePress, vt.MouseLeft
+		event.Modifiers.Shift = true
+	case "right-press":
+		event.Kind, event.Button = vt.MousePress, vt.MouseRight
+	case "move":
+		event.Kind, event.Button = vt.MouseMove, vt.MouseLeft
+	case "release":
+		event.Kind, event.Button = vt.MouseRelease, vt.MouseLeft
+	default:
+		t.Fatalf("invalid pointer event kind %q", kind)
+	}
+	return vt.Event{Kind: vt.EventMouse, Mouse: event}
+}
+
+func selectableTextPointerMessages(messages []selectableTextMessage) string {
+	if len(messages) == 0 {
+		return "-"
+	}
+	values := make([]string, len(messages))
+	for index, message := range messages {
+		switch message.kind {
+		case "change":
+			anchor := "-"
+			if value, ok := message.state.SelectionAnchor(); ok {
+				anchor = strconv.Itoa(value)
+			}
+			values[index] = "change:" + strconv.Itoa(message.state.Cursor()) + ":" + anchor
+		case "scroll":
+			values[index] = "scroll:" + strconv.FormatUint(uint64(message.offset.X), 10) +
+				":" + strconv.FormatUint(uint64(message.offset.Y), 10)
+		default:
+			panic("unexpected message in pointer fixture: " + message.kind)
+		}
+	}
+	return strings.Join(values, ",")
+}
+
+func selectableTextFixtureScrollOffset(t *testing.T, value string) tui.ScrollOffset {
+	t.Helper()
+	x, y, ok := strings.Cut(value, ":")
+	if !ok {
+		t.Fatalf("invalid scroll offset %q", value)
+	}
+	return tui.ScrollOffset{
+		X: uint32(fixtureInt(t, x)),
+		Y: uint32(fixtureInt(t, y)),
 	}
 }
 

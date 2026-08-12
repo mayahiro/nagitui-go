@@ -284,7 +284,7 @@ func (a *gallery) dataPage() tui.Node[message] {
 			tui.Text[message]("Viewport: "),
 			widget.NewScrollbar[message](100, 30, offset, 24).Orientation(widget.ScrollbarHorizontal).Node(),
 		),
-		tui.Text[message]("SelectableText: Shift-arrows select, Ctrl-C copies, Ctrl-Shift-C copies all"),
+		tui.Text[message]("SelectableText: drag or Shift-arrows select, Ctrl-C copies, Ctrl-Shift-C copies all"),
 		tui.Border(
 			widget.NewSelectableText(
 				tui.NewNodeID("selectable-text"),
@@ -338,7 +338,7 @@ func run() error {
 	options := tui.DefaultTerminalOptions()
 	options.FocusFirst = true
 	options.Clipboard = tui.TerminalClipboardOSC52
-	mouseTracking := vt.MouseTrackingPress
+	mouseTracking := vt.MouseTrackingButton
 	options.MouseTracking = &mouseTracking
 	return tui.RunTerminal[message](newGallery(), options, mapEvent)
 }

@@ -10,6 +10,7 @@ import (
 )
 
 const benchmarkRows = 100_000
+const pointerBenchmarkBytes = 100_000
 
 type eagerViewportBenchmarkApp struct{}
 
@@ -25,6 +26,87 @@ type identifiedVirtualViewportBenchmarkApp struct {
 
 type virtualFlowBenchmarkApp struct {
 	items VirtualFlowItems
+}
+
+type pointerTextHitBenchmarkApp struct {
+	document string
+}
+
+func (*pointerTextHitBenchmarkApp) Init() Effect[struct{}] {
+	return NoneEffect[struct{}]()
+}
+
+func (*pointerTextHitBenchmarkApp) Update(struct{}) Effect[struct{}] {
+	return NoneEffect[struct{}]()
+}
+
+func (*pointerTextHitBenchmarkApp) Subscriptions() Subscription[struct{}] {
+	return NoneSubscription[struct{}]()
+}
+
+func (a *pointerTextHitBenchmarkApp) View(ViewContext) Node[struct{}] {
+	options := DefaultParagraphOptions()
+	options.Wrap = WrapNone
+	return Paragraph[struct{}]([]TextSpan{
+		NewTextSpan(a.document, vt.Style{}),
+	}, options).OnPointerEvent("text", func(context PointerEventContext) EventResult[struct{}] {
+		if context.Event().Kind == vt.MousePress {
+			return ConsumeResult[struct{}]().CapturePointer("text")
+		}
+		return ConsumeResult[struct{}]()
+	})
+}
+
+func pointerTextHitEvent(kind vt.MouseKind) vt.Event {
+	return vt.Event{Kind: vt.EventMouse, Mouse: vt.MouseEvent{
+		Kind: kind, Button: vt.MouseLeft, X: pointerBenchmarkBytes - 1,
+	}}
+}
+
+func newPointerTextHitBenchmarkRuntime(tb testing.TB) *Runtime[struct{}] {
+	tb.Helper()
+	runtime, err := NewRuntime[struct{}](
+		&pointerTextHitBenchmarkApp{document: strings.Repeat("x", pointerBenchmarkBytes)},
+		Size{Width: 80, Height: 1},
+	)
+	if err != nil {
+		tb.Fatal(err)
+	}
+	tb.Cleanup(runtime.Close)
+	if _, err := runtime.RenderIfDirty(); err != nil {
+		tb.Fatal(err)
+	}
+	if _, err := runtime.DispatchEvent(pointerTextHitEvent(vt.MousePress)); err != nil {
+		tb.Fatal(err)
+	}
+	return runtime
+}
+
+func TestWarmedLongParagraphPointerDispatchDoesNotAllocate(t *testing.T) {
+	runtime := newPointerTextHitBenchmarkRuntime(t)
+	movement := pointerTextHitEvent(vt.MouseMove)
+	var dispatchError error
+	allocations := testing.AllocsPerRun(1_000, func() {
+		_, dispatchError = runtime.DispatchEvent(movement)
+	})
+	if dispatchError != nil {
+		t.Fatal(dispatchError)
+	}
+	if allocations != 0 {
+		t.Fatalf("pointer dispatch allocations = %f, want 0", allocations)
+	}
+}
+
+func BenchmarkPointerTextHit100K(b *testing.B) {
+	runtime := newPointerTextHitBenchmarkRuntime(b)
+	movement := pointerTextHitEvent(vt.MouseMove)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		if _, err := runtime.DispatchEvent(movement); err != nil {
+			b.Fatal(err)
+		}
+	}
 }
 
 func warmViewportBenchmark(b *testing.B, runtime *Runtime[struct{}]) {

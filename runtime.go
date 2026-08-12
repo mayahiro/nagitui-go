@@ -120,6 +120,7 @@ type Runtime[Message any] struct {
 	resolvedActionRoute     resolvedActionRoute[Message]
 	nextResolvedActionRoute resolvedActionRoute[Message]
 	hasResolvedActionRoute  bool
+	eventRoute              []NodeID
 	effects                 *effectSupervisor[Message]
 	subscriptions           *subscriptionSupervisor[Message]
 	notices                 *runtimeNoticeQueue
@@ -671,7 +672,10 @@ func (r *Runtime[Message]) DispatchEvent(event vt.Event) (EventDispatch, error) 
 		}
 	}
 
-	route := r.treeIndex.route(target, hasTarget)
+	route := r.treeIndex.routeInto(target, hasTarget, r.eventRoute[:0])
+	defer func() {
+		r.eventRoute = route[:0]
+	}()
 	focusOwner, hasFocusOwner := r.treeIndex.focusActionOwner(
 		r.interaction.focused,
 		r.interaction.hasFocus,
@@ -725,6 +729,16 @@ func (r *Runtime[Message]) DispatchEvent(event vt.Event) (EventDispatch, error) 
 				break
 			}
 		}
+		if context, ok := r.pointerEventContext(id, route, index, event); ok {
+			if result, handled := r.viewTree.handlePointerEvent(id, context); handled {
+				if err := r.applyEventResult(result, &dispatch); err != nil {
+					return dispatch, err
+				}
+				if dispatch.consumed {
+					break
+				}
+			}
+		}
 		if result, ok := r.viewTree.handleEvent(id, event); ok {
 			if err := r.applyEventResult(result, &dispatch); err != nil {
 				return dispatch, err
@@ -739,6 +753,58 @@ func (r *Runtime[Message]) DispatchEvent(event vt.Event) (EventDispatch, error) 
 		}
 	}
 	return dispatch, nil
+}
+
+func (r *Runtime[Message]) pointerEventContext(
+	id NodeID,
+	route []NodeID,
+	index int,
+	event vt.Event,
+) (PointerEventContext, bool) {
+	if event.Kind != vt.EventMouse {
+		return PointerEventContext{}, false
+	}
+	record, ok := r.treeIndex.record(id)
+	if !ok {
+		return PointerEventContext{}, false
+	}
+	visible := record.rect.Intersection(record.clip)
+	context := PointerEventContext{
+		event: event.Mouse,
+		localPosition: Point{
+			X: localPointerCoordinate(event.Mouse.X, record.rect.X),
+			Y: localPointerCoordinate(event.Mouse.Y, record.rect.Y),
+		},
+		bounds: record.rect.Size(),
+		visibleBounds: Rect{
+			X:     localGeometryCoordinate(visible.X, record.rect.X),
+			Y:     localGeometryCoordinate(visible.Y, record.rect.Y),
+			Width: visible.Width, Height: visible.Height,
+		},
+		widthProfile: r.widthProfile,
+		captured:     r.interaction.hasCapture && r.interaction.pointerCapture == id,
+	}
+	for _, viewportID := range route[index+1:] {
+		viewportRecord, ok := r.treeIndex.record(viewportID)
+		if !ok {
+			continue
+		}
+		axis, ok := viewportRecord.kind.scrollAxis()
+		if !ok {
+			continue
+		}
+		state, ok := r.interaction.ScrollState(viewportID)
+		if !ok {
+			continue
+		}
+		context.viewport = PointerViewport{
+			id: viewportID, axis: axis, state: state,
+			visible: viewportRecord.rect.Intersection(viewportRecord.clip),
+		}
+		context.hasViewport = true
+		break
+	}
+	return context, true
 }
 
 func (r *Runtime[Message]) ensureActionRoute(
@@ -1015,6 +1081,28 @@ func (r *Runtime[Message]) applyEventResult(result EventResult[Message], dispatc
 		}
 		dispatch.messages++
 	}
+	if result.hasScroll {
+		record, exists := r.treeIndex.record(result.scrollID)
+		available := exists && record.kind.isScrollViewport() &&
+			r.treeIndex.allowsInteraction(result.scrollID)
+		if available {
+			state, changed, initialized := r.interaction.requestScroll(
+				result.scrollID,
+				result.scrollOffset,
+			)
+			if initialized && changed {
+				r.dirty = true
+				r.urgentFrame = true
+				dispatch.redraw = true
+				if message, ok := r.viewTree.scrollMessage(result.scrollID, state); ok {
+					if err := r.Enqueue(message); err != nil {
+						return err
+					}
+					dispatch.messages++
+				}
+			}
+		}
+	}
 	dispatch.consumed = dispatch.consumed || result.consumed
 	dispatch.redraw = dispatch.redraw || result.redraw
 	if result.redraw {
@@ -1022,6 +1110,18 @@ func (r *Runtime[Message]) applyEventResult(result EventResult[Message], dispatc
 		r.urgentFrame = true
 	}
 	return nil
+}
+
+func localPointerCoordinate(value uint32, origin int32) int32 {
+	return clampPointerCoordinate(int64(value) - int64(origin))
+}
+
+func localGeometryCoordinate(value, origin int32) int32 {
+	return clampPointerCoordinate(int64(value) - int64(origin))
+}
+
+func clampPointerCoordinate(value int64) int32 {
+	return int32(min(max(value, int64(-1<<31)), int64(1<<31-1)))
 }
 
 func (r *Runtime[Message]) reconcileSubscriptions() error {
