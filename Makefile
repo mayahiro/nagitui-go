@@ -1,7 +1,7 @@
 .PHONY: bench build check format format-check lint test
 
 bench:
-	GOTOOLCHAIN=local go test -run '^$$' -bench '^Benchmark(ScrollViewport(Eager|Virtual|VirtualStickToEndGrowth|VirtualIdentified)|VirtualFlowVariableHeight)100K$$' -benchmem -benchtime=5x -count=3 .
+	GOTOOLCHAIN=local go test -run '^$$' -bench '^Benchmark((ScrollViewport(Eager|Virtual|VirtualStickToEndGrowth|VirtualIdentified)|VirtualFlowVariableHeight)100K|ContentProjection(VisibleSubtree|BoundedFailure100K))$$' -benchmem -benchtime=5x -count=3 .
 
 build:
 	GOTOOLCHAIN=local go build ./...

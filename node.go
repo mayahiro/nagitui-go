@@ -302,9 +302,13 @@ func RichText[Message any](spans ...TextSpan) Node[Message] {
 
 // Paragraph returns inline styled text using the supplied wrapping and alignment
 func Paragraph[Message any](spans []TextSpan, options ParagraphOptions) Node[Message] {
+	return paragraphOwned[Message](cloneTextSpans(spans), options)
+}
+
+func paragraphOwned[Message any](spans []TextSpan, options ParagraphOptions) Node[Message] {
 	return Node[Message]{
 		kind:          nodeRichText,
-		spans:         cloneTextSpans(spans),
+		spans:         spans,
 		paragraph:     options,
 		richTextCache: &richTextLayoutCache{},
 	}

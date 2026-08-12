@@ -3,6 +3,8 @@ package tui
 import (
 	"strconv"
 	"testing"
+
+	"github.com/mayahiro/nagi-go/content"
 )
 
 const benchmarkRows = 100_000
@@ -275,3 +277,68 @@ func BenchmarkVirtualFlowVariableHeight100K(b *testing.B) {
 		}
 	}
 }
+
+func contentProjectionBenchmarkInput() (
+	content.Content,
+	PresentationSheet,
+	ContentProjectionOptions,
+) {
+	paragraphRole, _ := content.NewRole("paragraph")
+	children := make([]content.Content, 24)
+	for index := range children {
+		inline := content.NewInline([]content.Content{content.NewText("value")})
+		paragraph, _ := content.NewParagraph([]content.Content{
+			content.NewText(strconv.Itoa(index)),
+			inline.Content(),
+		}).WithRoles([]content.Role{paragraphRole})
+		children[index] = paragraph.Content()
+	}
+	root := content.NewFlow(children).Content()
+	sheet := NewPresentationSheet([]PresentationRule{
+		NewPresentationRule(
+			AnyPresentationSelector(),
+			PresentationDeclaration{}.WithTextStyle(
+				TextStyleDeclaration{}.WithDim(SetDeclarationValue(true)),
+			),
+		),
+		NewPresentationRule(
+			RolePresentationSelector(paragraphRole),
+			PresentationDeclaration{}.WithVisualSeparator(SetDeclarationValue(" ")),
+		),
+	})
+	return root, sheet, ContentProjectionOptions{}
+}
+
+func BenchmarkContentProjectionVisibleSubtree(b *testing.B) {
+	root, sheet, options := contentProjectionBenchmarkInput()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		node, err := ProjectContent[struct{}](root, sheet, options)
+		if err != nil {
+			b.Fatal(err)
+		}
+		benchmarkProjectionNode = node
+	}
+}
+
+func BenchmarkContentProjectionBoundedFailure100K(b *testing.B) {
+	children := make([]content.Content, benchmarkRows)
+	for index := range children {
+		children[index] = content.NewText("value")
+	}
+	root := content.NewFlow(children).Content()
+	options := ContentProjectionOptions{}.WithLimits(
+		ContentProjectionLimits{}.WithMaxContentNodes(128),
+	)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		_, err := ProjectContent[struct{}](root, PresentationSheet{}, options)
+		if err == nil {
+			b.Fatal("projection unexpectedly succeeded")
+		}
+	}
+}
+
+var benchmarkProjectionNode Node[struct{}]

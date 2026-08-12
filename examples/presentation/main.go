@@ -11,7 +11,7 @@ import (
 func main() {
 	heading := mustRole("heading")
 	muted := mustState("muted")
-	element := mustRoles(content.NewParagraph(nil), heading)
+	element := mustRoles(content.NewParagraph([]content.Content{content.NewText("Nagi")}), heading)
 
 	headingRule := tui.NewPresentationRule(
 		tui.RolePresentationSelector(heading),
@@ -35,11 +35,24 @@ func main() {
 	)
 	sheet := tui.NewPresentationSheet([]tui.PresentationRule{headingRule, mutedRule})
 
-	computed := sheet.Resolve(element, vt.Style{}, []tui.PresentationState{muted})
+	activeStates := []tui.PresentationState{muted}
+	computed := sheet.Resolve(element, vt.Style{}, activeStates)
 	style := computed.Style()
 	fmt.Printf("display=%s\n", displayName(computed.Display()))
 	fmt.Printf("foreground=%s\n", colorName(style.Foreground))
 	fmt.Printf("bold=%t dim=%t\n", style.Bold, style.Dim)
+	_, err := tui.ProjectContentWithStates[struct{}](
+		element.Content(),
+		sheet,
+		tui.ContentProjectionOptions{},
+		func(content.Element) []tui.PresentationState {
+			return activeStates
+		},
+	)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println("projection=ok")
 }
 
 func mustRole(value string) content.Role {
