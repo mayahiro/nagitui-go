@@ -80,6 +80,9 @@ const SuggestionAcceptActionID tui.ActionID = "nagi.suggestion.accept"
 // SuggestionDismissActionID is the stable Action ID for dismissing an open suggestion popup
 const SuggestionDismissActionID tui.ActionID = "nagi.suggestion.dismiss"
 
+// InspectorCopyActionID is the stable Action ID for copying the selected inspector value
+const InspectorCopyActionID tui.ActionID = "nagi.inspector.copy"
+
 const (
 	activateActionLabel                 = "Activate"
 	selectionPreviousActionLabel        = "Previous"

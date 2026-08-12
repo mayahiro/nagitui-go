@@ -4,7 +4,7 @@
 
 Nagi TUI for Go provides immutable Terminal Presentation Rules, bounded
 Content-to-Node projection, a native cell-based TUI runtime, Unicode-aware
-semantic nodes, 27 standard widgets, supervised asynchronous work,
+semantic nodes, 29 standard widgets, supervised asynchronous work,
 subscriptions, and deterministic test support
 
 ## Requirements
@@ -32,7 +32,7 @@ go run ./examples/counter
 | --- | --- |
 | Module root `tui` | Terminal Presentation Rules, bounded Content-to-Node projection, App lifecycle, semantic nodes, scoped key maps, layout, events, Effects, Subscriptions, and terminal loop |
 | `surface` | Geometry, Cells, Surface drawing, composition, diffing, and snapshots |
-| `widget` | 27 standard widgets built from the public TUI API |
+| `widget` | 29 standard widgets built from the public TUI API |
 | `tuitest` | Virtual input, resize, time, effects, subscriptions, and frame inspection |
 | `github.com/mayahiro/nagi-go/content` | Shared source-neutral Content used by Presentation Rules and projection |
 | `github.com/mayahiro/nagi-go/text` | Shared Unicode 17 text primitives |
@@ -70,6 +70,7 @@ Run commands from the Go repository root in a real terminal
 | [Command palette](examples/command-palette/README.md) | `go run ./examples/command-palette` |
 | [Async search](examples/async-search/README.md) | `go run ./examples/async-search` |
 | [Suggestion popup](examples/suggestion-popup/README.md) | `go run ./examples/suggestion-popup` |
+| [JSON inspector](examples/json-inspector/README.md) | `go run ./examples/json-inspector` |
 | [Event-driven log viewer](examples/log-viewer/README.md) | `go run ./examples/log-viewer` |
 | [Virtual scroll](examples/virtual-scroll/README.md) | `go run ./examples/virtual-scroll` |
 | [Variable-height feed](examples/virtual-feed/README.md) | `go run ./examples/virtual-feed` |
@@ -126,6 +127,12 @@ Applications may return `SetClipboardEffect`, and `TerminalClipboardOSC52`
 provides an explicit write-only terminal backend. Redaction policy, terminal
 support detection, and OS-specific clipboard commands remain outside the
 widget
+
+`widget.JSONInspector` projects an immutable typed `JSONDocument` into a
+controlled tree with bounded row construction and grapheme-safe scalar
+previews. Copy requests retain the complete compact value. Parsing, schema
+validation, redaction, clipboard policy, and domain meaning remain
+application-owned
 
 `Disclosure` keeps expanded state in the application and constructs its body
 only while expanded. Core Modal scopes focus their first descendant on entry

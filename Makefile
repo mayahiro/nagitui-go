@@ -5,6 +5,8 @@ bench:
 	GOTOOLCHAIN=local go test -run '^$$' -bench '^BenchmarkClipboardEncoding(Small|1MiB)$$' -benchmem -benchtime=1s -count=3 .
 	GOTOOLCHAIN=local go test -run '^$$' -bench '^BenchmarkPointerTextHit100K$$' -benchmem -benchtime=1s -count=3 .
 	GOTOOLCHAIN=local go test -run '^$$' -bench '^BenchmarkSuggestionPopupCandidates$$' -benchmem -benchtime=10000x -count=3 ./widget
+	GOTOOLCHAIN=local go test -run '^$$' -bench '^BenchmarkJSONDocument100K$$' -benchmem -benchtime=5x -count=3 ./widget
+	GOTOOLCHAIN=local go test -run '^$$' -bench '^BenchmarkJSONInspectorViewport$$' -benchmem -benchtime=10000x -count=3 ./widget
 
 build:
 	GOTOOLCHAIN=local go build ./...
