@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-Nagi TUI Go実装はimmutableなTerminal Presentation Rules、上限付きContentからNodeへのprojection、native Cell-based TUI runtime、Unicode対応semantic Node、30個の標準Widget、supervised async work、Subscription、決定的test supportを提供します
+Nagi TUI Go実装はimmutableなTerminal Presentation Rules、上限付きContentからNodeへのprojection、native Cell-based TUI runtime、Unicode対応semantic Node、31個の標準Widget、supervised async work、Subscription、決定的test supportを提供します
 
 ## 要件
 
@@ -29,7 +29,7 @@ go run ./examples/counter
 | --- | --- |
 | Module root `tui` | Terminal Presentation Rules、上限付きContentからNodeへのprojection、App lifecycle、semantic Node、Scoped KeyMap、layout、event、Effect、Subscription、terminal loop |
 | `surface` | Geometry、Cell、Surface描画、composition、diff、snapshot |
-| `widget` | Public TUI APIから構築した30個の標準Widget |
+| `widget` | Public TUI APIから構築した31個の標準Widget |
 | `tuitest` | Virtual input、resize、time、Effect、Subscription、frame検査 |
 | `github.com/mayahiro/nagi-go/content` | Presentation Rulesとprojectionが使用する共有source-neutral Content |
 | `github.com/mayahiro/nagi-go/text` | 共有Unicode 17 text primitive |
@@ -60,6 +60,7 @@ Go repository rootから実terminalで実行します
 | [Suggestion popup](examples/suggestion-popup/README.md) | `go run ./examples/suggestion-popup` |
 | [JSON inspector](examples/json-inspector/README.md) | `go run ./examples/json-inspector` |
 | [Code view](examples/code-view/README.md) | `go run ./examples/code-view` |
+| [Diff view](examples/diff-view/README.md) | `go run ./examples/diff-view` |
 | [Event-driven log viewer](examples/log-viewer/README.md) | `go run ./examples/log-viewer` |
 | [Virtual scroll](examples/virtual-scroll/README.md) | `go run ./examples/virtual-scroll` |
 | [Variable-height feed](examples/virtual-feed/README.md) | `go run ./examples/virtual-feed` |
@@ -94,6 +95,8 @@ Copy actionはApplication Messageを発行します。Applicationは`SetClipboar
 `widget.JSONInspector`はimmutableなtyped `JSONDocument`をbounded row構築とgrapheme境界を保つscalar previewを持つcontrolled treeへ投影します。Copy requestは完全なcompact valueを保持し、parser、schema validation、redaction、clipboard policy、domain上の意味はApplicationが所有します
 
 `widget.CodeView`はApplicationがstyleを付けたimmutableなlogical lineをmemo化したterminal幅layoutで投影します。Tab、wrap、line number、行選択、横scroll、上限付きNode構築、完全な行単位copyをsyntax parser、file、diffの意味、clipboard I/Oから独立させます
+
+`widget.DiffView`はimmutableなtyped metadata、hunk、context、addition、deletion lineを受け取ります。上限付きCode projectionを再利用しながらold／new line number、unified marker、semantic style、要求時のunified copyを追加します。Diff parse、repository access、patch apply、approval policy、clipboard I/OはApplicationが所有します
 
 `Disclosure`はexpanded stateをApplicationに維持し、expanded時だけbodyを構築します。Core Modal scopeはdefaultでentry時に最初のdescendantへfocusし、close時に以前のfocusへ戻り、両方のtargetを設定できます。Modalがunhandled raw Eventとterminal fallback mappingも止める必要がある場合は`Node.BlockUnhandledEvents`でopt-inのhard input boundaryを追加します
 

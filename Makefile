@@ -9,6 +9,8 @@ bench:
 	GOTOOLCHAIN=local go test -run '^$$' -bench '^BenchmarkJSONInspectorViewport$$' -benchmem -benchtime=10000x -count=3 ./widget
 	GOTOOLCHAIN=local go test -run '^$$' -bench '^BenchmarkCode(Document|Layout)100K$$' -benchmem -benchtime=5x -count=3 ./widget
 	GOTOOLCHAIN=local go test -run '^$$' -bench '^BenchmarkCode(LayoutCache100K|ViewViewport|ViewLongLineOffset)$$' -benchmem -benchtime=10000x -count=3 ./widget
+	GOTOOLCHAIN=local go test -run '^$$' -bench '^BenchmarkDiff(Document|Layout|Copy)100K$$' -benchmem -benchtime=5x -count=3 ./widget
+	GOTOOLCHAIN=local go test -run '^$$' -bench '^BenchmarkDiff(LayoutCache100K|ViewViewport)$$' -benchmem -benchtime=10000x -count=3 ./widget
 
 build:
 	GOTOOLCHAIN=local go build ./...

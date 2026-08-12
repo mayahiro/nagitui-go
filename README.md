@@ -4,7 +4,7 @@
 
 Nagi TUI for Go provides immutable Terminal Presentation Rules, bounded
 Content-to-Node projection, a native cell-based TUI runtime, Unicode-aware
-semantic nodes, 30 standard widgets, supervised asynchronous work,
+semantic nodes, 31 standard widgets, supervised asynchronous work,
 subscriptions, and deterministic test support
 
 ## Requirements
@@ -32,7 +32,7 @@ go run ./examples/counter
 | --- | --- |
 | Module root `tui` | Terminal Presentation Rules, bounded Content-to-Node projection, App lifecycle, semantic nodes, scoped key maps, layout, events, Effects, Subscriptions, and terminal loop |
 | `surface` | Geometry, Cells, Surface drawing, composition, diffing, and snapshots |
-| `widget` | 30 standard widgets built from the public TUI API |
+| `widget` | 31 standard widgets built from the public TUI API |
 | `tuitest` | Virtual input, resize, time, effects, subscriptions, and frame inspection |
 | `github.com/mayahiro/nagi-go/content` | Shared source-neutral Content used by Presentation Rules and projection |
 | `github.com/mayahiro/nagi-go/text` | Shared Unicode 17 text primitives |
@@ -72,6 +72,7 @@ Run commands from the Go repository root in a real terminal
 | [Suggestion popup](examples/suggestion-popup/README.md) | `go run ./examples/suggestion-popup` |
 | [JSON inspector](examples/json-inspector/README.md) | `go run ./examples/json-inspector` |
 | [Code view](examples/code-view/README.md) | `go run ./examples/code-view` |
+| [Diff view](examples/diff-view/README.md) | `go run ./examples/diff-view` |
 | [Event-driven log viewer](examples/log-viewer/README.md) | `go run ./examples/log-viewer` |
 | [Virtual scroll](examples/virtual-scroll/README.md) | `go run ./examples/virtual-scroll` |
 | [Variable-height feed](examples/virtual-feed/README.md) | `go run ./examples/virtual-feed` |
@@ -139,6 +140,12 @@ application-owned
 a memoized terminal-width layout. Tabs, wrapping, line numbers, line selection,
 horizontal scrolling, bounded Node construction, and complete-line copy stay
 independent from syntax parsing, files, diff meaning, and clipboard I/O
+
+`widget.DiffView` accepts immutable typed metadata, hunk, context, addition,
+and deletion lines. It reuses bounded code projection while adding old and new
+line numbers, unified markers, semantic styles, and on-demand unified copy.
+Diff parsing, repository access, patch application, approval policy, and
+clipboard I/O remain application-owned
 
 `Disclosure` keeps expanded state in the application and constructs its body
 only while expanded. Core Modal scopes focus their first descendant on entry
