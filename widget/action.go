@@ -20,6 +20,24 @@ const SelectionFirstActionID tui.ActionID = "nagi.selection.first"
 // SelectionLastActionID is the stable Action ID for selecting the last item
 const SelectionLastActionID tui.ActionID = "nagi.selection.last"
 
+// SelectionExtendPreviousActionID is the stable Action ID for extending selection to the previous item
+const SelectionExtendPreviousActionID tui.ActionID = "nagi.selection.extend-previous"
+
+// SelectionExtendNextActionID is the stable Action ID for extending selection to the next item
+const SelectionExtendNextActionID tui.ActionID = "nagi.selection.extend-next"
+
+// SelectionExtendFirstActionID is the stable Action ID for extending selection to the first item
+const SelectionExtendFirstActionID tui.ActionID = "nagi.selection.extend-first"
+
+// SelectionExtendLastActionID is the stable Action ID for extending selection to the last item
+const SelectionExtendLastActionID tui.ActionID = "nagi.selection.extend-last"
+
+// HorizontalScrollPreviousActionID is the stable Action ID for horizontal scrolling toward the start
+const HorizontalScrollPreviousActionID tui.ActionID = "nagi.scroll.horizontal-previous"
+
+// HorizontalScrollNextActionID is the stable Action ID for horizontal scrolling toward the end
+const HorizontalScrollNextActionID tui.ActionID = "nagi.scroll.horizontal-next"
+
 // SelectionPreviousPageActionID is the stable Action ID for selecting one page toward the beginning
 const SelectionPreviousPageActionID tui.ActionID = "nagi.selection.previous-page"
 
