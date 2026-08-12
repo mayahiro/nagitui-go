@@ -97,6 +97,7 @@ type Composer[Message any] struct {
 	placeholder    string
 	style          TextAreaStyle
 	selectionStyle vt.Style
+	widthProfile   celltext.WidthProfile
 	wrapWidth      int
 	hasWrap        bool
 	minRows        int
@@ -125,7 +126,8 @@ func NewComposer[Message any](
 		state:   normalizeComposerState(state),
 		enabled: onChange != nil && onSubmit != nil, submitEnabled: true,
 		style: DefaultTextAreaStyle(), selectionStyle: vt.Style{Reverse: true},
-		minRows: defaultComposerMinRows, maxRows: defaultComposerMaxRows,
+		widthProfile: celltext.ModernWidth(),
+		minRows:      defaultComposerMinRows, maxRows: defaultComposerMaxRows,
 		onChange: onChange, onSubmit: onSubmit,
 	}
 }
@@ -157,6 +159,14 @@ func (c Composer[Message]) Style(style TextAreaStyle) Composer[Message] {
 // SelectionStyle sets the style merged over selected text
 func (c Composer[Message]) SelectionStyle(style vt.Style) Composer[Message] {
 	c.selectionStyle = style
+	return c
+}
+
+// WidthProfile sets the terminal cell-width policy used by editing and layout
+//
+// Pass ViewContext.WidthProfile to keep the widget aligned with its Runtime.
+func (c Composer[Message]) WidthProfile(profile celltext.WidthProfile) Composer[Message] {
+	c.widthProfile = profile
 	return c
 }
 
@@ -238,7 +248,7 @@ func (c Composer[Message]) OnRedo(handler func() Message) Composer[Message] {
 
 // VisibleRows returns editor viewport height before parent layout clamping
 func (c Composer[Message]) VisibleRows() uint32 {
-	return composerVisibleRows(c.state.textArea, c.wrapWidth, c.hasWrap, c.minRows, c.maxRows)
+	return composerVisibleRows(c.state.textArea, c.wrapWidth, c.hasWrap, c.minRows, c.maxRows, c.widthProfile)
 }
 
 // ActionDescriptors returns Composer actions followed by inherited TextArea actions
@@ -249,6 +259,7 @@ func (c Composer[Message]) ActionDescriptors() []tui.ActionDescriptor {
 	text := composerTextActionDescriptors(
 		c.enabled, c.onUndo != nil, c.onRedo != nil,
 		c.state.textArea, c.wrapWidth, c.hasWrap,
+		c.widthProfile,
 	)
 	hasUp, hasDown := composerTextDirections(text)
 	leading := composerLeadingActionDescriptors(
@@ -273,6 +284,7 @@ func (c Composer[Message]) Node() tui.Node[Message] {
 		Placeholder(c.placeholder).
 		Style(c.style).
 		SelectionStyle(c.selectionStyle).
+		WidthProfile(c.widthProfile).
 		BoundaryNavigation(TextAreaBoundaryBubble).
 		Viewport(c.viewportID, c.caretID, tui.Fixed(rows))
 	if c.hasWrap {
@@ -287,6 +299,7 @@ func (c Composer[Message]) Node() tui.Node[Message] {
 
 	textDescriptors := composerTextActionDescriptors(
 		c.enabled, hasUndo, hasRedo, c.state.textArea, c.wrapWidth, c.hasWrap,
+		c.widthProfile,
 	)
 	hasUp, hasDown := composerTextDirections(textDescriptors)
 	var previous, next ComposerState
@@ -333,9 +346,10 @@ func composerTextActionDescriptors(
 	state TextAreaState,
 	wrapWidth int,
 	hasWrap bool,
+	profile celltext.WidthProfile,
 ) [textAreaActionCount]tui.ActionDescriptor {
 	descriptors := textAreaActionDescriptors(
-		enabled, hasUndo, hasRedo, TextAreaBoundaryBubble, state, wrapWidth, hasWrap,
+		enabled, hasUndo, hasRedo, TextAreaBoundaryBubble, state, wrapWidth, hasWrap, profile,
 	)
 	for index, descriptor := range descriptors {
 		if descriptor.ID() == tui.TextInsertLineBreakActionID {
@@ -479,10 +493,11 @@ func composerVisibleRows(
 	hasWrap bool,
 	minRows int,
 	maxRows int,
+	profile celltext.WidthProfile,
 ) uint32 {
 	minimum := max(minRows, 1)
 	maximum := max(maxRows, minimum)
-	rows := min(max(textAreaVisualLineCount(state, wrapWidth, hasWrap), minimum), maximum)
+	rows := min(max(textAreaVisualLineCount(state, wrapWidth, hasWrap, profile), minimum), maximum)
 	return cellCount(rows)
 }
 

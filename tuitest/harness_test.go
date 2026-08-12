@@ -1,6 +1,7 @@
 package tuitest
 
 import (
+	"context"
 	"runtime"
 	"strings"
 	"testing"
@@ -71,6 +72,107 @@ func TestHarnessObservesBytesMessagesFramesAndEscapeTime(t *testing.T) {
 	}
 	if !harness.ExitRequested() {
 		t.Fatal("Escape did not request exit")
+	}
+}
+
+type controlledInputMessage struct {
+	value     string
+	selection int
+}
+
+type controlledInputApp struct {
+	value     string
+	selection int
+}
+
+func (*controlledInputApp) Init() tui.Effect[controlledInputMessage] {
+	return tui.NoneEffect[controlledInputMessage]()
+}
+
+func (a *controlledInputApp) Update(message controlledInputMessage) tui.Effect[controlledInputMessage] {
+	a.value = message.value
+	a.selection = message.selection
+	return tui.NoneEffect[controlledInputMessage]()
+}
+
+func (*controlledInputApp) Subscriptions() tui.Subscription[controlledInputMessage] {
+	return tui.NoneSubscription[controlledInputMessage]()
+}
+
+func (a *controlledInputApp) View(tui.ViewContext) tui.Node[controlledInputMessage] {
+	value := a.value
+	selection := a.selection
+	return tui.Text[controlledInputMessage](value).Focusable("controlled").OnEvent(
+		"controlled",
+		func(event vt.Event) tui.EventResult[controlledInputMessage] {
+			switch {
+			case event.Kind == vt.EventText:
+				return tui.MessageResult(controlledInputMessage{
+					value: value + event.Text, selection: selection,
+				})
+			case event.Kind == vt.EventKey && event.Key.Code == vt.KeyBackspace:
+				next := value
+				if len(next) > 0 {
+					next = next[:len(next)-1]
+				}
+				return tui.MessageResult(controlledInputMessage{
+					value: next, selection: selection,
+				})
+			case event.Kind == vt.EventKey && event.Key.Code == vt.KeyDown:
+				return tui.MessageResult(controlledInputMessage{
+					value: value, selection: selection + 1,
+				})
+			default:
+				return tui.IgnoreResult[controlledInputMessage]()
+			}
+		},
+	)
+}
+
+func TestHarnessProcessesControlledInputEventsSequentially(t *testing.T) {
+	tests := []struct {
+		name              string
+		app               *controlledInputApp
+		input             []byte
+		expectedValue     string
+		expectedSelection int
+	}{
+		{name: "unicode text", app: &controlledInputApp{}, input: []byte("A日"), expectedValue: "A日"},
+		{name: "backspace", app: &controlledInputApp{value: "abc"}, input: []byte{0x7f, 0x7f}, expectedValue: "a"},
+		{name: "down", app: &controlledInputApp{}, input: []byte("\x1b[B\x1b[B"), expectedSelection: 2},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			harness, err := New[controlledInputMessage](
+				test.app,
+				tui.Size{Width: 8, Height: 1},
+				func(vt.Event) tui.EventAction[controlledInputMessage] {
+					return tui.IgnoreAction[controlledInputMessage]()
+				},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer harness.Close()
+			if focused, err := harness.RequestFocus("controlled"); err != nil || !focused {
+				t.Fatalf("RequestFocus = %t, %v", focused, err)
+			}
+			if err := harness.Input(test.input); err != nil {
+				t.Fatal(err)
+			}
+			if test.app.value != test.expectedValue || test.app.selection != test.expectedSelection {
+				t.Fatalf(
+					"state = %q, %d, want %q, %d",
+					test.app.value,
+					test.app.selection,
+					test.expectedValue,
+					test.expectedSelection,
+				)
+			}
+			if len(harness.Frames()) != 2 {
+				t.Fatalf("frame count = %d, want 2", len(harness.Frames()))
+			}
+		})
 	}
 }
 
@@ -255,5 +357,53 @@ func TestHarnessObservesManualSubscriptionLifecycleAndMessages(t *testing.T) {
 	}
 	if len(harness.MessageHistory()) != 2 {
 		t.Fatalf("message history = %d, want 2", len(harness.MessageHistory()))
+	}
+}
+
+type completedStreamHarnessApp struct{}
+
+func (*completedStreamHarnessApp) Init() tui.Effect[struct{}] {
+	return tui.NoneEffect[struct{}]()
+}
+
+func (*completedStreamHarnessApp) Update(struct{}) tui.Effect[struct{}] {
+	return tui.NoneEffect[struct{}]()
+}
+
+func (*completedStreamHarnessApp) Subscriptions() tui.Subscription[struct{}] {
+	return tui.StreamSubscription(
+		"events",
+		tui.ReliableDelivery(),
+		func(context.Context, tui.SubscriptionSink[struct{}]) {},
+	)
+}
+
+func (*completedStreamHarnessApp) View(tui.ViewContext) tui.Node[struct{}] {
+	return tui.Text[struct{}]("")
+}
+
+func TestHarnessObservesRuntimeNotices(t *testing.T) {
+	harness, err := New[struct{}](
+		&completedStreamHarnessApp{},
+		tui.Size{Width: 1, Height: 1},
+		func(vt.Event) tui.EventAction[struct{}] { return tui.IgnoreAction[struct{}]() },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer harness.Close()
+
+	for range 10_000 {
+		if harness.PendingRuntimeNotices() > 0 {
+			break
+		}
+		runtime.Gosched()
+	}
+	notices := harness.DrainRuntimeNotices()
+	if len(notices) != 1 || notices[0].Kind() != tui.RuntimeNoticeSubscriptionStreamCompleted {
+		t.Fatalf("notices = %+v", notices)
+	}
+	if harness.RuntimeNoticeDiagnostics().Dropped() != 0 {
+		t.Fatalf("dropped notices = %d", harness.RuntimeNoticeDiagnostics().Dropped())
 	}
 }

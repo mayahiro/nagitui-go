@@ -70,8 +70,8 @@ func (a DialogAction[Message]) IsEnabled() bool {
 	return a.enabled
 }
 
-func (a DialogAction[Message]) buttonWidth() uint32 {
-	return saturatingAddDialogWidth(cellCount(celltext.Width(a.label, celltext.ModernWidth())), 4)
+func (a DialogAction[Message]) buttonWidth(profile celltext.WidthProfile) uint32 {
+	return saturatingAddDialogWidth(cellCount(celltext.Width(a.label, profile)), 4)
 }
 
 func (a DialogAction[Message]) node() tui.Node[Message] {
@@ -96,6 +96,7 @@ type Dialog[Message any] struct {
 	actionWrapWidth    uint32
 	hasActionWrapWidth bool
 	style              DialogStyle
+	widthProfile       celltext.WidthProfile
 }
 
 // NewDialog returns an untitled dialog without default or cancel action selection
@@ -108,6 +109,7 @@ func NewDialog[Message any](
 	return Dialog[Message]{
 		id: id, body: body, actions: ownedActions,
 		returnFocus: tui.ModalReturnFocusPrevious(), style: DefaultDialogStyle(),
+		widthProfile: celltext.ModernWidth(),
 	}
 }
 
@@ -166,6 +168,14 @@ func (d Dialog[Message]) Style(style DialogStyle) Dialog[Message] {
 	return d
 }
 
+// WidthProfile sets the terminal cell-width policy used to arrange actions
+//
+// Pass ViewContext.WidthProfile to keep the widget aligned with its Runtime.
+func (d Dialog[Message]) WidthProfile(profile celltext.WidthProfile) Dialog[Message] {
+	d.widthProfile = profile
+	return d
+}
+
 // ActionDescriptors returns confirmation and dismissal descriptors in semantic order
 func (d Dialog[Message]) ActionDescriptors() [2]tui.ActionDescriptor {
 	return [2]tui.ActionDescriptor{
@@ -197,7 +207,7 @@ func (d Dialog[Message]) Node() tui.Node[Message] {
 		children = append(children, d.details.Node())
 	}
 	if len(d.actions) > 0 {
-		children = append(children, dialogActionRows(d.actions, d.actionWrapWidth, d.hasActionWrapWidth))
+		children = append(children, dialogActionRows(d.actions, d.actionWrapWidth, d.hasActionWrapWidth, d.widthProfile))
 	}
 	panel := tui.Border(tui.Column(children...), d.style.Border)
 	centered := tui.Align(panel, tui.AlignCenter, tui.AlignMiddle)
@@ -359,6 +369,14 @@ func (d ConfirmDialog[Message]) Style(style DialogStyle) ConfirmDialog[Message] 
 	return d
 }
 
+// WidthProfile sets the terminal cell-width policy used to arrange actions
+//
+// Pass ViewContext.WidthProfile to keep the widget aligned with its Runtime.
+func (d ConfirmDialog[Message]) WidthProfile(profile celltext.WidthProfile) ConfirmDialog[Message] {
+	d.dialog = d.dialog.WidthProfile(profile)
+	return d
+}
+
 // ActionDescriptors returns confirmation and dismissal descriptors in semantic order
 func (d ConfirmDialog[Message]) ActionDescriptors() [2]tui.ActionDescriptor {
 	return d.dialog.ActionDescriptors()
@@ -373,12 +391,13 @@ func dialogActionRows[Message any](
 	actions []DialogAction[Message],
 	wrapWidth uint32,
 	hasWrapWidth bool,
+	profile celltext.WidthProfile,
 ) tui.Node[Message] {
 	rows := make([]tui.Node[Message], 0, len(actions))
 	row := make([]tui.Node[Message], 0, len(actions)*2)
 	var used uint32
 	for _, action := range actions {
-		width := action.buttonWidth()
+		width := action.buttonWidth(profile)
 		required := width
 		if len(row) > 0 {
 			required = saturatingAddDialogWidth(saturatingAddDialogWidth(used, 1), width)

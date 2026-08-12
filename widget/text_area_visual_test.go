@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	celltext "github.com/mayahiro/nagi-go/text"
 	"github.com/mayahiro/nagi-go/vt"
 	"github.com/mayahiro/nagitui-go"
 	"github.com/mayahiro/nagitui-go/internal/conformance"
@@ -63,6 +64,7 @@ func TestTextAreaVisualFixtures(t *testing.T) {
 						visualTextAreaAction(t, event),
 						max(wrap, 1),
 						hasWrap,
+						celltext.ModernWidth(),
 					)
 				}
 			}
@@ -76,7 +78,7 @@ func TestTextAreaVisualFixtures(t *testing.T) {
 			}
 			assertVisualTextAreaSelection(t, state, record.Field("expected-selection"))
 
-			lines := textAreaVisualLineRanges(state.value, max(wrap, 1), hasWrap)
+			lines := textAreaVisualLineRanges(state.value, max(wrap, 1), hasWrap, celltext.ModernWidth())
 			expectedLines := fixtureTextAreaRanges(t, record.Field("expected-ranges"))
 			if !slices.Equal(lines, expectedLines) {
 				t.Errorf("ranges = %#v, want %#v", lines, expectedLines)
@@ -87,7 +89,7 @@ func TestTextAreaVisualFixtures(t *testing.T) {
 
 			boundary := visualTextAreaBoundary(t, record.Field("boundary"))
 			descriptors := textAreaActionDescriptors(
-				true, false, false, boundary, state, max(wrap, 1), hasWrap,
+				true, false, false, boundary, state, max(wrap, 1), hasWrap, celltext.ModernWidth(),
 			)
 			assertTextAreaDescriptorAvailability(t, descriptors[2], record.Field("expected-up"))
 			assertTextAreaDescriptorAvailability(t, descriptors[3], record.Field("expected-down"))

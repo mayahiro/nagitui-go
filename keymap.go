@@ -313,8 +313,7 @@ func (b KeyBinding) Support() BindingSupport {
 
 // Matches reports whether a normalized event matches this binding
 func (b KeyBinding) Matches(event vt.Event) bool {
-	stroke, ok := KeyStrokeFromEvent(event)
-	if !ok || stroke != b.stroke {
+	if !b.MatchesStroke(event) {
 		return false
 	}
 	if event.Kind == vt.EventText {
@@ -328,6 +327,16 @@ func (b KeyBinding) Matches(event vt.Event) bool {
 	default:
 		return false
 	}
+}
+
+// MatchesStroke reports whether an event has this binding's normalized stroke
+//
+// Unlike Matches, this ignores repeat policy. Disabled-consume actions use it
+// to keep repeated input inside the same semantic boundary without invoking a
+// handler that is initial-only.
+func (b KeyBinding) MatchesStroke(event vt.Event) bool {
+	stroke, ok := KeyStrokeFromEvent(event)
+	return ok && stroke == b.stroke
 }
 
 // ActionDescriptor is one handler-independent action definition

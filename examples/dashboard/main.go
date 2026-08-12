@@ -30,7 +30,7 @@ func (*dashboard) Subscriptions() tui.Subscription[message] {
 	return tui.NoneSubscription[message]()
 }
 
-func (a *dashboard) View(_ tui.ViewContext) tui.Node[message] {
+func (a *dashboard) View(context tui.ViewContext) tui.Node[message] {
 	requests := tui.Panel(
 		tui.Column(
 			tui.StyledText[message]("12.8k req/min", vt.Style{Bold: true}),
@@ -60,12 +60,16 @@ func (a *dashboard) View(_ tui.ViewContext) tui.Node[message] {
 			{X: 0, Y: 3}, {X: 1, Y: 4}, {X: 2, Y: 4}, {X: 3, Y: 7},
 			{X: 4, Y: 6}, {X: 5, Y: 9}, {X: 6, Y: 8}, {X: 7, Y: 11},
 		}),
-	}, 34, 8).Bounds(0, 7, 0, 12).Node()
+	}, 34, 8).Bounds(0, 7, 0, 12).
+		WidthProfile(context.WidthProfile).
+		Node()
 	resources := widget.NewBarChart[message]([]widget.BarChartBar{
 		widget.NewBarChartBar("api", 68),
 		widget.NewBarChartBar("worker", 47),
 		widget.NewBarChartBar("database", 81),
-	}, 16).Maximum(100).Node()
+	}, 16).Maximum(100).
+		WidthProfile(context.WidthProfile).
+		Node()
 
 	services := widget.NewTable(
 		tui.NewNodeID("services"),
@@ -99,7 +103,7 @@ func (a *dashboard) View(_ tui.ViewContext) tui.Node[message] {
 			widget.NewHelpBinding("Tab", "focus"),
 			widget.NewHelpBinding("Up/Down", "select service"),
 			widget.NewHelpBinding("Esc", "exit"),
-		}).Node().WithLength(tui.Fixed(1)),
+		}).WidthProfile(context.WidthProfile).Node().WithLength(tui.Fixed(1)),
 	)
 }
 

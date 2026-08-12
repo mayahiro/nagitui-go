@@ -227,6 +227,7 @@ type Node[Message any] struct {
 	length           Length
 	id               NodeID
 	hasID            bool
+	blocksUnhandled  bool
 	focusable        bool
 	focusedStyle     vt.Style
 	hasFocusedStyle  bool
@@ -235,6 +236,7 @@ type Node[Message any] struct {
 	onChange         func(string) Message
 	placeholder      string
 	placeholderStyle vt.Style
+	cursorOwner      NodeID
 	scroll           ScrollViewportOptions[Message]
 }
 
@@ -246,6 +248,7 @@ const (
 	nodeSurface
 	nodeSpacer
 	nodeGap
+	nodeCursorAnchor
 	nodeTextInput
 	nodeRow
 	nodeColumn
@@ -331,6 +334,15 @@ func Spacer[Message any](width, height uint32) Node[Message] {
 // Outside a Row or Column, a Gap has zero measured size.
 func Gap[Message any](cells uint32) Node[Message] {
 	return Node[Message]{kind: nodeGap, gap: cells}
+}
+
+// CursorAnchor returns a zero-width cursor position shown while focusOwner is
+// focused
+//
+// The anchor measures one row high, consumes no horizontal layout space, and
+// sets the output Surface cursor only while its position is visible
+func CursorAnchor[Message any](focusOwner NodeID) Node[Message] {
+	return Node[Message]{kind: nodeCursorAnchor, cursorOwner: focusOwner}
 }
 
 // Row returns a horizontal container
@@ -547,6 +559,16 @@ func (n Node[Message]) WithID(id NodeID) Node[Message] {
 	return n
 }
 
+// BlockUnhandledEvents consumes routed events that remain unhandled after this
+// identified node has processed its actions, built-in behavior, and raw handler
+//
+// The boundary prevents the event from reaching ancestors and terminal-level
+// fallback mapping. It has no effect until the node has a stable identity.
+func (n Node[Message]) BlockUnhandledEvents() Node[Message] {
+	n.blocksUnhandled = true
+	return n
+}
+
 // Focusable makes the node focusable under a stable identity
 func (n Node[Message]) Focusable(id NodeID) Node[Message] {
 	n.id = id
@@ -660,17 +682,21 @@ func (n Node[Message]) WithLength(length Length) Node[Message] {
 }
 
 func (n Node[Message]) renderTo(target *surface.Surface, interaction *InteractionState) {
-	bounds := Rect{Width: target.Width(), Height: target.Height()}
-	n.render(target, bounds, bounds, interaction)
+	n.renderToProfile(target, interaction, celltext.ModernWidth())
 }
 
-func (n Node[Message]) measure(constraints layoutConstraints) Size {
+func (n Node[Message]) renderToProfile(target *surface.Surface, interaction *InteractionState, profile celltext.WidthProfile) {
+	bounds := Rect{Width: target.Width(), Height: target.Height()}
+	n.render(target, bounds, bounds, interaction, profile)
+}
+
+func (n Node[Message]) measure(constraints layoutConstraints, profile celltext.WidthProfile) Size {
 	var measured Size
 	switch n.kind {
 	case nodeText:
-		measured = measureText(n.content, constraints)
+		measured = measureText(n.content, constraints, profile)
 	case nodeRichText:
-		measured = measureRichText(n.spans, n.paragraph, n.richTextCache, constraints)
+		measured = measureRichText(n.spans, n.paragraph, n.richTextCache, constraints, profile)
 	case nodeSurface:
 		if n.payload != nil && n.payload.surface != nil {
 			measured = Size{Width: n.payload.surface.Width(), Height: n.payload.surface.Height()}
@@ -679,42 +705,44 @@ func (n Node[Message]) measure(constraints layoutConstraints) Size {
 		measured = n.intrinsicSize
 	case nodeGap:
 		measured = Size{}
+	case nodeCursorAnchor:
+		measured = Size{Height: 1}
 	case nodeTextInput:
 		measured = Size{
-			Width:  intToUint32(max(celltext.Width(n.content, celltext.ModernWidth()), celltext.Width(n.placeholder, celltext.ModernWidth()))),
+			Width:  intToUint32(max(celltext.Width(n.content, profile), celltext.Width(n.placeholder, profile))),
 			Height: 1,
 		}
 	case nodeRow:
-		measured = measureLinear(n.children, constraints, true)
+		measured = measureLinear(n.children, constraints, true, profile)
 	case nodeColumn:
-		measured = measureLinear(n.children, constraints, false)
+		measured = measureLinear(n.children, constraints, false, profile)
 	case nodeStack:
 		for _, child := range n.children {
-			childSize := child.measure(constraints)
+			childSize := child.measure(constraints, profile)
 			measured.Width = max(measured.Width, childSize.Width)
 			measured.Height = max(measured.Height, childSize.Height)
 		}
 	case nodePadding:
 		measured = addNodeSize(
-			n.child.measure(shrinkConstraints(constraints, n.insets)),
+			n.child.measure(shrinkConstraints(constraints, n.insets), profile),
 			saturatingAdd32(n.insets.Left, n.insets.Right),
 			saturatingAdd32(n.insets.Top, n.insets.Bottom),
 		)
 	case nodeBorder:
 		measured = addNodeSize(
-			n.child.measure(shrinkConstraints(constraints, UniformInsets(1))),
+			n.child.measure(shrinkConstraints(constraints, UniformInsets(1)), profile),
 			2,
 			2,
 		)
 	case nodePanel:
 		insets := panelContentInsets(n.panel)
 		measured = addNodeSize(
-			n.child.measure(shrinkConstraints(constraints, insets)),
+			n.child.measure(shrinkConstraints(constraints, insets), profile),
 			saturatingAdd32(insets.Left, insets.Right),
 			saturatingAdd32(insets.Top, insets.Bottom),
 		)
 	case nodeAlign, nodeClip, nodeScrollViewport, nodeModal:
-		measured = n.child.measure(constraints)
+		measured = n.child.measure(constraints, profile)
 	case nodeVirtualScrollViewport:
 		measured = n.payload.virtualSize
 	case nodeVirtualFlow:
@@ -725,12 +753,12 @@ func (n Node[Message]) measure(constraints layoutConstraints) Size {
 	return clampNodeSize(measured, constraints)
 }
 
-func measureText(content string, constraints layoutConstraints) Size {
+func measureText(content string, constraints layoutConstraints, profile celltext.WidthProfile) Size {
 	maxCells := math.MaxInt
 	if constraints.width.bounded {
 		maxCells = int(constraints.width.value)
 	}
-	lines := celltext.IterateWrappedLines(content, maxCells, celltext.ModernWidth())
+	lines := celltext.IterateWrappedLines(content, maxCells, profile)
 	width, height := 0, 0
 	for line, ok := lines.Next(); ok; line, ok = lines.Next() {
 		width = max(width, line.Width)
@@ -739,7 +767,7 @@ func measureText(content string, constraints layoutConstraints) Size {
 	return Size{Width: intToUint32(width), Height: intToUint32(height)}
 }
 
-func measureLinear[Message any](children []Node[Message], constraints layoutConstraints, horizontal bool) Size {
+func measureLinear[Message any](children []Node[Message], constraints layoutConstraints, horizontal bool, profile celltext.WidthProfile) Size {
 	childConstraints := constraints
 	if horizontal {
 		childConstraints.width = layoutLimit{}
@@ -748,7 +776,7 @@ func measureLinear[Message any](children []Node[Message], constraints layoutCons
 	}
 	var measured Size
 	for _, child := range children {
-		childSize := child.measure(childConstraints)
+		childSize := child.measure(childConstraints, profile)
 		if child.kind == nodeGap {
 			if horizontal {
 				childSize.Width = child.gap

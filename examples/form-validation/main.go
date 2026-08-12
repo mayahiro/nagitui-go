@@ -73,7 +73,7 @@ func (*registrationForm) Subscriptions() tui.Subscription[message] {
 	return tui.NoneSubscription[message]()
 }
 
-func (a *registrationForm) View(_ tui.ViewContext) tui.Node[message] {
+func (a *registrationForm) View(context tui.ViewContext) tui.Node[message] {
 	errors := a.validationErrors()
 	errorNodes := make([]tui.Node[message], 0, max(len(errors), 1))
 	if len(errors) == 0 {
@@ -147,7 +147,7 @@ func (a *registrationForm) View(_ tui.ViewContext) tui.Node[message] {
 				widget.NewHelpBinding("Arrows", "select"),
 				widget.NewHelpBinding("Enter/Space", "activate"),
 				widget.NewHelpBinding("Esc", "exit"),
-			}).Node().WithLength(tui.Fixed(1)),
+			}).WidthProfile(context.WidthProfile).Node().WithLength(tui.Fixed(1)),
 		),
 		"Registration form",
 	)

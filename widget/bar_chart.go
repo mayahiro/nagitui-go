@@ -45,18 +45,20 @@ func DefaultBarChartStyle() BarChartStyle {
 
 // BarChart is a horizontal chart with aligned labels and bounded bars
 type BarChart[Message any] struct {
-	bars       []BarChartBar
-	width      uint16
-	maximum    uint64
-	hasMaximum bool
-	showValues bool
-	style      BarChartStyle
+	bars         []BarChartBar
+	width        uint16
+	maximum      uint64
+	hasMaximum   bool
+	showValues   bool
+	style        BarChartStyle
+	widthProfile celltext.WidthProfile
 }
 
 // NewBarChart returns a horizontal chart whose bar portion occupies width cells
 func NewBarChart[Message any](bars []BarChartBar, width uint16) BarChart[Message] {
 	return BarChart[Message]{
 		bars: cloneBarChartBars(bars), width: width, showValues: true, style: DefaultBarChartStyle(),
+		widthProfile: celltext.ModernWidth(),
 	}
 }
 
@@ -81,6 +83,14 @@ func (c BarChart[Message]) Style(style BarChartStyle) BarChart[Message] {
 	return c
 }
 
+// WidthProfile sets the terminal cell-width policy used by labels and bars
+//
+// Pass ViewContext.WidthProfile to keep the widget aligned with its Runtime.
+func (c BarChart[Message]) WidthProfile(profile celltext.WidthProfile) BarChart[Message] {
+	c.widthProfile = profile
+	return c
+}
+
 // Node builds the public semantic node for this bar chart
 func (c BarChart[Message]) Node() tui.Node[Message] {
 	maximum := c.maximum
@@ -91,17 +101,21 @@ func (c BarChart[Message]) Node() tui.Node[Message] {
 	}
 	labelWidth := 0
 	for _, bar := range c.bars {
-		labelWidth = max(labelWidth, celltext.Width(bar.Label, celltext.ModernWidth()))
+		labelWidth = max(labelWidth, celltext.Width(bar.Label, c.widthProfile))
+	}
+	filledGlyph, emptyGlyph := "█", "░"
+	if celltext.GraphemeWidth(filledGlyph, c.widthProfile) != 1 || celltext.GraphemeWidth(emptyGlyph, c.widthProfile) != 1 {
+		filledGlyph, emptyGlyph = "#", "."
 	}
 	rows := make([]tui.Node[Message], 0, len(c.bars))
 	for _, bar := range c.bars {
 		filled := scaledBarCells(bar.Value, maximum, c.width)
 		barStyle := c.style.Bar.Merge(bar.Style)
 		parts := []tui.Node[Message]{
-			tui.StyledText[Message](bar.Label+strings.Repeat(" ", labelWidth-celltext.Width(bar.Label, celltext.ModernWidth())), c.style.Label),
+			tui.StyledText[Message](bar.Label+strings.Repeat(" ", labelWidth-celltext.Width(bar.Label, c.widthProfile)), c.style.Label),
 			tui.StyledText[Message](" ", vt.Style{}),
-			tui.StyledText[Message](strings.Repeat("█", filled), barStyle),
-			tui.StyledText[Message](strings.Repeat("░", int(c.width)-filled), c.style.Empty),
+			tui.StyledText[Message](strings.Repeat(filledGlyph, filled), barStyle),
+			tui.StyledText[Message](strings.Repeat(emptyGlyph, int(c.width)-filled), c.style.Empty),
 		}
 		if c.showValues {
 			parts = append(parts,

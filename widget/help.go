@@ -68,6 +68,7 @@ type Help[Message any] struct {
 	separator    string
 	showDisabled bool
 	style        HelpStyle
+	widthProfile celltext.WidthProfile
 }
 
 // NewHelp returns compact help for the supplied bindings
@@ -78,6 +79,7 @@ func NewHelp[Message any](bindings []HelpBinding) Help[Message] {
 func newHelp[Message any](bindings []HelpBinding) Help[Message] {
 	return Help[Message]{
 		bindings: bindings, separator: " • ", style: DefaultHelpStyle(),
+		widthProfile: celltext.ModernWidth(),
 	}
 }
 
@@ -129,6 +131,14 @@ func (h Help[Message]) Style(style HelpStyle) Help[Message] {
 	return h
 }
 
+// WidthProfile sets the terminal cell-width policy used by full-mode alignment
+//
+// Pass ViewContext.WidthProfile to keep the widget aligned with its Runtime.
+func (h Help[Message]) WidthProfile(profile celltext.WidthProfile) Help[Message] {
+	h.widthProfile = profile
+	return h
+}
+
 // Node builds the public semantic node for this help view
 func (h Help[Message]) Node() tui.Node[Message] {
 	bindings := make([]HelpBinding, 0, len(h.bindings))
@@ -162,7 +172,7 @@ func (h Help[Message]) Node() tui.Node[Message] {
 func (h Help[Message]) fullNode(bindings []HelpBinding) tui.Node[Message] {
 	keyWidth := 0
 	for _, binding := range bindings {
-		keyWidth = max(keyWidth, celltext.Width(binding.Key, celltext.ModernWidth()))
+		keyWidth = max(keyWidth, celltext.Width(binding.Key, h.widthProfile))
 	}
 	rows := make([]tui.Node[Message], 0, len(bindings))
 	for _, binding := range bindings {
@@ -171,7 +181,7 @@ func (h Help[Message]) fullNode(bindings []HelpBinding) tui.Node[Message] {
 			keyStyle = keyStyle.Merge(h.style.Disabled)
 			descriptionStyle = descriptionStyle.Merge(h.style.Disabled)
 		}
-		padding := strings.Repeat(" ", keyWidth-celltext.Width(binding.Key, celltext.ModernWidth()))
+		padding := strings.Repeat(" ", keyWidth-celltext.Width(binding.Key, h.widthProfile))
 		rows = append(rows, tui.Row(
 			tui.StyledText[Message](binding.Key+padding, keyStyle),
 			tui.StyledText[Message]("  ", vt.Style{}),

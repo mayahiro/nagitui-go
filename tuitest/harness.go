@@ -158,6 +158,21 @@ func (h *Harness[Message]) SubscriptionDiagnostics() tui.SubscriptionDiagnostics
 	return h.runtime.SubscriptionDiagnostics()
 }
 
+// PendingRuntimeNotices returns retained asynchronous lifecycle notices
+func (h *Harness[Message]) PendingRuntimeNotices() int {
+	return h.runtime.PendingRuntimeNotices()
+}
+
+// DrainRuntimeNotices removes and returns retained notices in occurrence order
+func (h *Harness[Message]) DrainRuntimeNotices() []tui.RuntimeNotice {
+	return h.runtime.DrainRuntimeNotices()
+}
+
+// RuntimeNoticeDiagnostics returns bounded notice queue counters
+func (h *Harness[Message]) RuntimeNoticeDiagnostics() tui.RuntimeNoticeDiagnostics {
+	return h.runtime.RuntimeNoticeDiagnostics()
+}
+
 // Send injects one application message and completes one coalesced step
 func (h *Harness[Message]) Send(message Message) error {
 	if err := h.runtime.Enqueue(message); err != nil {
@@ -238,19 +253,25 @@ func (h *Harness[Message]) dispatch(events []vt.Event) error {
 		if err != nil {
 			return err
 		}
-		if dispatch.Consumed() {
-			continue
-		}
-		action := h.mapEvent(event)
-		switch action.Kind() {
-		case tui.EventIgnore:
-		case tui.EventMessage:
-			message, _ := action.Message()
-			if err := h.runtime.Enqueue(message); err != nil {
-				return err
+		if !dispatch.Consumed() {
+			action := h.mapEvent(event)
+			switch action.Kind() {
+			case tui.EventIgnore:
+			case tui.EventMessage:
+				message, _ := action.Message()
+				if err := h.runtime.Enqueue(message); err != nil {
+					return err
+				}
+			case tui.EventExit:
+				h.exitRequested = true
 			}
-		case tui.EventExit:
-			h.exitRequested = true
+		}
+		if _, err := h.runtime.ProcessQueuedWith(func(message Message) {
+			h.messages = append(h.messages, message)
+		}); err != nil {
+			return err
+		}
+		if h.exitRequested || h.runtime.ExitRequested() {
 			return nil
 		}
 	}

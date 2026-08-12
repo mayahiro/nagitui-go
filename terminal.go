@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	celltext "github.com/mayahiro/nagi-go/text"
 	"github.com/mayahiro/nagi-go/vt"
 	"github.com/mayahiro/nagitui-go/internal/ttyunix"
 )
@@ -30,21 +31,29 @@ type TerminalOptions struct {
 	TaskLimit int
 	// SubscriptionCapacity is the maximum pending values retained per source
 	SubscriptionCapacity int
+	// RuntimeNoticeCapacity is the maximum retained asynchronous lifecycle notices
+	RuntimeNoticeCapacity int
 	// MinimumFrameInterval limits non-urgent rendering; the default is 120 FPS
 	// and zero disables the limit
 	MinimumFrameInterval time.Duration
+	// WidthProfile is the terminal cell-width policy used by the complete view
+	//
+	// A custom override must return stable widths for this Runtime's lifetime.
+	WidthProfile celltext.WidthProfile
 }
 
 // DefaultTerminalOptions returns event-driven settings with bounded queues and
 // non-urgent rendering limited to 120 FPS
 func DefaultTerminalOptions() TerminalOptions {
 	return TerminalOptions{
-		Capabilities:         vt.BaselineCapabilities(),
-		EscapeTimeout:        25 * time.Millisecond,
-		QueueCapacity:        DefaultQueueCapacity,
-		TaskLimit:            DefaultTaskLimit,
-		SubscriptionCapacity: DefaultSubscriptionCapacity,
-		MinimumFrameInterval: defaultMinimumFrameInterval,
+		Capabilities:          vt.BaselineCapabilities(),
+		EscapeTimeout:         25 * time.Millisecond,
+		QueueCapacity:         DefaultQueueCapacity,
+		TaskLimit:             DefaultTaskLimit,
+		SubscriptionCapacity:  DefaultSubscriptionCapacity,
+		RuntimeNoticeCapacity: DefaultRuntimeNoticeCapacity,
+		MinimumFrameInterval:  defaultMinimumFrameInterval,
+		WidthProfile:          celltext.ModernWidth(),
 	}
 }
 
@@ -58,7 +67,21 @@ func RunTerminal[Message any](
 	options TerminalOptions,
 	mapEvent func(vt.Event) EventAction[Message],
 ) error {
-	return RunTerminalContext(context.Background(), app, options, mapEvent)
+	return runTerminalContext(context.Background(), app, options, mapEvent, nil)
+}
+
+// RunTerminalWithNoticeHandler runs an application and synchronously observes
+// recovered failures and unexpected asynchronous lifecycle transitions
+func RunTerminalWithNoticeHandler[Message any](
+	app App[Message],
+	options TerminalOptions,
+	mapEvent func(vt.Event) EventAction[Message],
+	handleNotice func(RuntimeNotice),
+) error {
+	if handleNotice == nil {
+		return errors.New("nagi-tui: nil runtime notice handler")
+	}
+	return runTerminalContext(context.Background(), app, options, mapEvent, handleNotice)
 }
 
 // RunTerminalContext runs an application until normal exit, terminal EOF, or
@@ -71,6 +94,31 @@ func RunTerminalContext[Message any](
 	app App[Message],
 	options TerminalOptions,
 	mapEvent func(vt.Event) EventAction[Message],
+) error {
+	return runTerminalContext(ctx, app, options, mapEvent, nil)
+}
+
+// RunTerminalContextWithNoticeHandler is the context-aware terminal loop with
+// synchronous RuntimeNotice observation
+func RunTerminalContextWithNoticeHandler[Message any](
+	ctx context.Context,
+	app App[Message],
+	options TerminalOptions,
+	mapEvent func(vt.Event) EventAction[Message],
+	handleNotice func(RuntimeNotice),
+) error {
+	if handleNotice == nil {
+		return errors.New("nagi-tui: nil runtime notice handler")
+	}
+	return runTerminalContext(ctx, app, options, mapEvent, handleNotice)
+}
+
+func runTerminalContext[Message any](
+	ctx context.Context,
+	app App[Message],
+	options TerminalOptions,
+	mapEvent func(vt.Event) EventAction[Message],
+	handleNotice func(RuntimeNotice),
 ) error {
 	if ctx == nil {
 		return errors.New("nagi-tui: nil terminal context")
@@ -91,8 +139,10 @@ func RunTerminalContext[Message any](
 		config.QueueCapacity = options.QueueCapacity
 		config.TaskLimit = options.TaskLimit
 		config.SubscriptionCapacity = options.SubscriptionCapacity
+		config.RuntimeNoticeCapacity = options.RuntimeNoticeCapacity
 		config.MinimumFrameInterval = options.MinimumFrameInterval
-		runtime, err := newRuntimeWithClockAndWake(app, config, clock, session.Notify)
+		config.WidthProfile = options.WidthProfile
+		runtime, err := newRuntimeWithClockAndWakeContext(ctx, app, config, clock, session.Notify)
 		if err != nil {
 			return err
 		}
@@ -113,6 +163,7 @@ func RunTerminalContext[Message any](
 		if _, err := runtime.ProcessPending(); err != nil {
 			return err
 		}
+		handleRuntimeNotices(runtime, handleNotice)
 		if focusFirst {
 			focusFirst = false
 			if _, err := runtime.focusFirst(); err != nil {
@@ -161,29 +212,32 @@ func RunTerminalContext[Message any](
 				if err != nil {
 					return err
 				}
-				if dispatch.Consumed() {
-					continue
-				}
-				action := mapEvent(event)
-				switch action.Kind() {
-				case EventIgnore:
-				case EventMessage:
-					message, _ := action.Message()
-					if err := runtime.Enqueue(message); err != nil {
-						return err
+				if !dispatch.Consumed() {
+					action := mapEvent(event)
+					switch action.Kind() {
+					case EventIgnore:
+					case EventMessage:
+						message, _ := action.Message()
+						if err := runtime.Enqueue(message); err != nil {
+							return err
+						}
+					case EventExit:
+						exit = true
+					default:
+						return fmt.Errorf("nagi-tui: invalid event action %d", action.Kind())
 					}
-				case EventExit:
-					exit = true
-				default:
-					return fmt.Errorf("nagi-tui: invalid event action %d", action.Kind())
 				}
-				if exit {
+				if _, err := runtime.ProcessQueued(); err != nil {
+					return err
+				}
+				if exit || runtime.ExitRequested() {
 					break
 				}
 			}
 			if _, err := runtime.ProcessPending(); err != nil {
 				return err
 			}
+			handleRuntimeNotices(runtime, handleNotice)
 			if err := writeTerminalFrame(session, runtime, options.Capabilities); err != nil {
 				return err
 			}
@@ -193,6 +247,15 @@ func RunTerminalContext[Message any](
 		}
 		return nil
 	})
+}
+
+func handleRuntimeNotices[Message any](runtime *Runtime[Message], handler func(RuntimeNotice)) {
+	if handler == nil {
+		return
+	}
+	for _, notice := range runtime.DrainRuntimeNotices() {
+		handler(notice)
+	}
 }
 
 type terminalDeadlineSource interface {

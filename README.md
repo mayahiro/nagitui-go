@@ -46,11 +46,17 @@ define behavior shared with the Rust implementation
 ## Testing applications
 
 Package `tuitest` drives messages, terminal input, resize, virtual time,
-Effects, Subscriptions, frame inspection, and active resolved action queries
-without a real terminal
+Effects, Subscriptions, Runtime notices, frame inspection, and active resolved
+action queries without a real terminal
 
 The shared [event-driven application architecture](https://github.com/mayahiro/nagi/blob/main/docs/EVENT_DRIVEN_APPLICATIONS.md)
 explains how process output and timers enter Nagi without a second UI loop
+
+`RuntimeConfig.WidthProfile` and `TerminalOptions.WidthProfile` select one cell
+width policy for Core measurement, rendering, hit geometry, and cursor
+placement. Pass `ViewContext.WidthProfile` to width-sensitive widget builders.
+Unexpected asynchronous lifecycle transitions are available through the
+bounded Runtime notice queue or the terminal notice-handler entry points
 
 ## Examples
 
@@ -95,8 +101,9 @@ state
 
 `TextArea` keeps no-wrap behavior by default. `SoftWrap` adds visual-line
 navigation, `BoundaryNavigation` can pass Up and Down through at visual
-boundaries, and `Viewport` follows an application-identified caret without an
-extra Tab stop
+boundaries, and `Viewport` follows an application-identified zero-width typed
+cursor anchor without an extra Tab stop. The cursor does not draw a caret
+grapheme or shift following text
 
 `Composer` adds controlled submit and history recall, automatic row bounds,
 optional validation content, and insertion limits over `TextArea`. Applications
@@ -109,7 +116,9 @@ I/O, pointer selection, and redaction policy remain application concerns
 
 `Disclosure` keeps expanded state in the application and constructs its body
 only while expanded. Core Modal scopes focus their first descendant on entry
-and return to previous focus on close by default; both targets are configurable
+and return to previous focus on close by default; both targets are configurable.
+`Node.BlockUnhandledEvents` adds an opt-in hard input boundary when a modal must
+also stop unhandled raw Events and terminal fallback mapping
 
 `Dialog` composes application-defined action lists, lazy controlled details,
 explicit default and cancel targets, focus policies, and Cell-width action

@@ -91,6 +91,7 @@ type activeSubscription[Message any] struct {
 }
 
 type subscriptionSupervisor[Message any] struct {
+	parent           context.Context
 	inboxCapacity    int
 	wake             runtimeWake
 	active           map[SubscriptionKey]*activeSubscription[Message]
@@ -101,10 +102,16 @@ type subscriptionSupervisor[Message any] struct {
 	starts           uint64
 	stops            uint64
 	batchFlushes     uint64
+	notices          *runtimeNoticeQueue
 }
 
 func newSubscriptionSupervisor[Message any](inboxCapacity int) *subscriptionSupervisor[Message] {
+	return newSubscriptionSupervisorContext[Message](context.Background(), inboxCapacity)
+}
+
+func newSubscriptionSupervisorContext[Message any](parent context.Context, inboxCapacity int) *subscriptionSupervisor[Message] {
 	return &subscriptionSupervisor[Message]{
+		parent:        parent,
 		inboxCapacity: inboxCapacity,
 		active:        make(map[SubscriptionKey]*activeSubscription[Message]),
 		generations:   make(map[SubscriptionKey]uint64),
@@ -309,19 +316,39 @@ func (s *subscriptionSupervisor[Message]) startSource(
 		active.factory = source.factory
 		active.nextDue, active.hasNextDue = subscriptionTimestampAfter(now, source.interval)
 	case subscriptionStream:
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := context.WithCancel(s.parent)
 		active.cancel = cancel
 		active.finished = &atomic.Bool{}
 		finished := active.finished
 		stream := source.stream
 		sink := SubscriptionSink[Message]{inbox: inbox}
 		diagnostics := &s.atomicDiagnostic
+		notices := s.notices
+		wake := s.wake
+		tag := active.tag
 		go func() {
+			panicked := false
 			defer func() {
 				if recover() != nil {
+					panicked = true
 					diagnostics.producerPanics.Add(1)
 				}
 				finished.Store(true)
+				switch {
+				case panicked:
+					notices.push(subscriptionRuntimeNotice(
+						RuntimeNoticeSubscriptionStreamPanicked,
+						tag.key,
+						tag.generation,
+					))
+				case ctx.Err() == nil && !sink.Closed():
+					notices.push(subscriptionRuntimeNotice(
+						RuntimeNoticeSubscriptionStreamCompleted,
+						tag.key,
+						tag.generation,
+					))
+				}
+				wake.notify()
 			}()
 			stream(ctx, sink)
 		}()

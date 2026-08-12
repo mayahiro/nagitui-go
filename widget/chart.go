@@ -45,23 +45,24 @@ func DefaultChartStyle() ChartStyle {
 
 // Chart is a fixed-cell connected plot over signed integer coordinates
 type Chart[Message any] struct {
-	series    []ChartSeries
-	width     uint16
-	height    uint16
-	minimumX  int32
-	maximumX  int32
-	minimumY  int32
-	maximumY  int32
-	hasBounds bool
-	showAxes  bool
-	style     ChartStyle
+	series       []ChartSeries
+	width        uint16
+	height       uint16
+	minimumX     int32
+	maximumX     int32
+	minimumY     int32
+	maximumY     int32
+	hasBounds    bool
+	showAxes     bool
+	style        ChartStyle
+	widthProfile celltext.WidthProfile
 }
 
 // NewChart returns a connected plot using automatic data bounds
 func NewChart[Message any](series []ChartSeries, width, height uint16) Chart[Message] {
 	return Chart[Message]{
 		series: cloneChartSeries(series), width: width, height: height,
-		showAxes: true, style: DefaultChartStyle(),
+		showAxes: true, style: DefaultChartStyle(), widthProfile: celltext.ModernWidth(),
 	}
 }
 
@@ -85,6 +86,14 @@ func (c Chart[Message]) Style(style ChartStyle) Chart[Message] {
 	return c
 }
 
+// WidthProfile sets the terminal cell-width policy used by axes and markers
+//
+// Pass ViewContext.WidthProfile to keep the widget aligned with its Runtime.
+func (c Chart[Message]) WidthProfile(profile celltext.WidthProfile) Chart[Message] {
+	c.widthProfile = profile
+	return c
+}
+
 // Node builds the public semantic node for this chart
 func (c Chart[Message]) Node() tui.Node[Message] {
 	width, height := uint32(c.width), uint32(c.height)
@@ -97,16 +106,22 @@ func (c Chart[Message]) Node() tui.Node[Message] {
 	}
 	left, bottom := 0, 0
 	if c.showAxes {
+		vertical, horizontal, corner := "│", "─", "└"
+		if celltext.GraphemeWidth(vertical, c.widthProfile) != 1 ||
+			celltext.GraphemeWidth(horizontal, c.widthProfile) != 1 ||
+			celltext.GraphemeWidth(corner, c.widthProfile) != 1 {
+			vertical, horizontal, corner = "|", "-", "+"
+		}
 		left, bottom = 1, 1
 		for y := 0; y < int(height)-bottom; y++ {
-			drawing.Write(0, int32(y), "│", c.style.Axis, celltext.ModernWidth())
+			drawing.Write(0, int32(y), vertical, c.style.Axis, c.widthProfile)
 		}
 		if height > 0 {
 			axisY := int32(height - 1)
 			for x := 0; x < int(width); x++ {
-				drawing.Write(int32(x), axisY, "─", c.style.Axis, celltext.ModernWidth())
+				drawing.Write(int32(x), axisY, horizontal, c.style.Axis, c.widthProfile)
 			}
-			drawing.Write(0, axisY, "└", c.style.Axis, celltext.ModernWidth())
+			drawing.Write(0, axisY, corner, c.style.Axis, c.widthProfile)
 		}
 	}
 	plotWidth := max(int(width)-left, 0)
@@ -116,7 +131,7 @@ func (c Chart[Message]) Node() tui.Node[Message] {
 	}
 	minimumX, maximumX, minimumY, maximumY := c.chartBounds()
 	for _, series := range c.series {
-		marker := chartMarker(series.Marker)
+		marker := chartMarker(series.Marker, c.widthProfile)
 		mapped := make([]chartCellPoint, len(series.Points))
 		for index, point := range series.Points {
 			mapped[index] = chartCellPoint{
@@ -124,11 +139,11 @@ func (c Chart[Message]) Node() tui.Node[Message] {
 				y: plotHeight - 1 - chartScale(point.Y, minimumY, maximumY, plotHeight),
 			}
 			if index > 0 {
-				drawChartLine(drawing, mapped[index-1], mapped[index], series.Style)
+				drawChartLine(drawing, mapped[index-1], mapped[index], series.Style, c.widthProfile)
 			}
 		}
 		for _, point := range mapped {
-			drawing.Write(int32(point.x), int32(point.y), marker, series.Style, celltext.ModernWidth())
+			drawing.Write(int32(point.x), int32(point.y), marker, series.Style, c.widthProfile)
 		}
 	}
 	return tui.SurfaceNode[Message](drawing)
@@ -194,13 +209,16 @@ func chartScale(value, minimum, maximum int32, cells int) int {
 	return int(numerator / (int64(maximum) - int64(minimum)))
 }
 
-func chartMarker(marker string) string {
+func chartMarker(marker string, profile celltext.WidthProfile) string {
 	graphemes := celltext.IterateGraphemes(marker)
 	grapheme, ok := graphemes.Next()
-	if !ok || celltext.GraphemeWidth(grapheme.Text, celltext.ModernWidth()) != 1 {
+	if ok && celltext.GraphemeWidth(grapheme.Text, profile) == 1 {
+		return grapheme.Text
+	}
+	if celltext.GraphemeWidth("•", profile) == 1 {
 		return "•"
 	}
-	return grapheme.Text
+	return "*"
 }
 
 type chartCellPoint struct {
@@ -208,7 +226,7 @@ type chartCellPoint struct {
 	y int
 }
 
-func drawChartLine(drawing *surface.Surface, start, end chartCellPoint, style vt.Style) {
+func drawChartLine(drawing *surface.Surface, start, end chartCellPoint, style vt.Style, profile celltext.WidthProfile) {
 	x, y := start.x, start.y
 	deltaX := absChart(end.x - start.x)
 	deltaY := -absChart(end.y - start.y)
@@ -220,8 +238,12 @@ func drawChartLine(drawing *surface.Surface, start, end chartCellPoint, style vt
 		stepY = 1
 	}
 	errorValue := deltaX + deltaY
+	lineGlyph := "·"
+	if celltext.GraphemeWidth(lineGlyph, profile) != 1 {
+		lineGlyph = "."
+	}
 	for {
-		drawing.Write(int32(x), int32(y), "·", style, celltext.ModernWidth())
+		drawing.Write(int32(x), int32(y), lineGlyph, style, profile)
 		if x == end.x && y == end.y {
 			return
 		}

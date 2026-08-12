@@ -103,6 +103,7 @@ func (c *richTextLayoutCache) resolve(
 	maxWidth uint32,
 	bounded bool,
 	mode WrapMode,
+	profile celltext.WidthProfile,
 ) paragraphLayout {
 	key := richTextLayoutKey{maxWidth: maxWidth, bounded: bounded, mode: mode}
 	for index := range c.entries {
@@ -112,7 +113,7 @@ func (c *richTextLayoutCache) resolve(
 		}
 	}
 	if !c.unitsReady {
-		c.units = textSpanUnits(spans)
+		c.units = textSpanUnits(spans, profile)
 		c.unitsReady = true
 	}
 	lines := layoutParagraphUnits(c.units, maxWidth, bounded, mode)
@@ -133,12 +134,13 @@ func resolveRichTextLayout(
 	maxWidth uint32,
 	bounded bool,
 	mode WrapMode,
+	profile celltext.WidthProfile,
 ) paragraphLayout {
 	mode = normalizedWrapMode(mode)
 	if cache != nil {
-		return cache.resolve(spans, maxWidth, bounded, mode)
+		return cache.resolve(spans, maxWidth, bounded, mode, profile)
 	}
-	units := textSpanUnits(spans)
+	units := textSpanUnits(spans, profile)
 	lines := layoutParagraphUnits(units, maxWidth, bounded, mode)
 	return paragraphLayout{units: units, lines: lines, size: paragraphLayoutSize(lines)}
 }
@@ -187,7 +189,7 @@ func layoutParagraphUnits(units []paragraphUnit, maxWidth uint32, bounded bool, 
 	return lines
 }
 
-func textSpanUnits(spans []TextSpan) []paragraphUnit {
+func textSpanUnits(spans []TextSpan, profile celltext.WidthProfile) []paragraphUnit {
 	capacity := 0
 	for _, span := range spans {
 		count := utf8.RuneCountInString(span.Text)
@@ -205,7 +207,7 @@ func textSpanUnits(spans []TextSpan) []paragraphUnit {
 				units = append(units, paragraphUnit{breakLine: true})
 				continue
 			}
-			width := max(celltext.GraphemeWidth(grapheme.Text, celltext.ModernWidth()), 1)
+			width := max(celltext.GraphemeWidth(grapheme.Text, profile), 1)
 			units = append(units, paragraphUnit{
 				text:  grapheme.Text,
 				span:  spanIndex,
@@ -260,6 +262,7 @@ func measureRichText(
 	options ParagraphOptions,
 	cache *richTextLayoutCache,
 	constraints layoutConstraints,
+	profile celltext.WidthProfile,
 ) Size {
 	return resolveRichTextLayout(
 		spans,
@@ -267,6 +270,7 @@ func measureRichText(
 		constraints.width.value,
 		constraints.width.bounded,
 		options.Wrap,
+		profile,
 	).size
 }
 
@@ -276,11 +280,12 @@ func renderRichText(
 	spans []TextSpan,
 	options ParagraphOptions,
 	cache *richTextLayoutCache,
+	profile celltext.WidthProfile,
 ) {
 	if rect.Empty() {
 		return
 	}
-	layout := resolveRichTextLayout(spans, cache, rect.Width, true, options.Wrap)
+	layout := resolveRichTextLayout(spans, cache, rect.Width, true, options.Wrap, profile)
 	for lineIndex, line := range layout.lines {
 		if uint32(lineIndex) >= rect.Height {
 			break
@@ -300,7 +305,7 @@ func renderRichText(
 					y,
 					unit.text,
 					spans[unit.span].Style,
-					celltext.ModernWidth(),
+					profile,
 				)
 			}
 			x = end

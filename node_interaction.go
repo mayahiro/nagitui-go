@@ -1,25 +1,29 @@
 package tui
 
-import "github.com/mayahiro/nagi-go/vt"
+import (
+	celltext "github.com/mayahiro/nagi-go/text"
+	"github.com/mayahiro/nagi-go/vt"
+)
 
 func (n *Node[Message]) buildTreeIndex(
 	size Size,
 	interaction *InteractionState,
 	index *treeIndex,
 	actions *actionIndex[Message],
+	profile celltext.WidthProfile,
 ) error {
 	bounds := Rect{Width: size.Width, Height: size.Height}
 	index.reset()
 	actions.reset()
-	return n.buildIndex(bounds, bounds, "", false, true, "", false, interaction, index, actions)
+	return n.buildIndex(bounds, bounds, "", false, true, "", false, interaction, index, actions, profile)
 }
 
-func (n *Node[Message]) prepareInteraction(size Size, interaction *InteractionState) bool {
-	return n.prepareAt(Rect{Width: size.Width, Height: size.Height}, interaction)
+func (n *Node[Message]) prepareInteraction(size Size, interaction *InteractionState, profile celltext.WidthProfile) bool {
+	return n.prepareAt(Rect{Width: size.Width, Height: size.Height}, interaction, profile)
 }
 
-func (n *Node[Message]) prepareVirtualFlows(size Size, interaction *InteractionState) {
-	n.prepareVirtualFlowsAt(Rect{Width: size.Width, Height: size.Height}, interaction)
+func (n *Node[Message]) prepareVirtualFlows(size Size, interaction *InteractionState, profile celltext.WidthProfile) {
+	n.prepareVirtualFlowsAt(Rect{Width: size.Width, Height: size.Height}, interaction, profile)
 }
 
 func (n *Node[Message]) handleEvent(id NodeID, event vt.Event) (EventResult[Message], bool) {
@@ -105,6 +109,7 @@ func (n *Node[Message]) buildIndex(
 	interaction *InteractionState,
 	tree *treeIndex,
 	actions *actionIndex[Message],
+	profile celltext.WidthProfile,
 ) error {
 	if n.keyInteraction != nil && n.keyInteraction.hasFocusFallback {
 		focusFallback = n.keyInteraction.focusFallback
@@ -127,14 +132,15 @@ func (n *Node[Message]) buildIndex(
 			kind = interactiveModal
 		}
 		if err := tree.register(nodeRecord{
-			id:         n.id,
-			parent:     parent,
-			hasParent:  hasParent,
-			rect:       rect,
-			clip:       clip,
-			focusable:  n.focusable,
-			hasHandler: n.handler != nil,
-			kind:       kind,
+			id:              n.id,
+			parent:          parent,
+			hasParent:       hasParent,
+			rect:            rect,
+			clip:            clip,
+			focusable:       n.focusable,
+			hasHandler:      n.handler != nil,
+			blocksUnhandled: n.blocksUnhandled,
+			kind:            kind,
 		}, root); err != nil {
 			return err
 		}
@@ -160,37 +166,37 @@ func (n *Node[Message]) buildIndex(
 	}
 
 	switch n.kind {
-	case nodeText, nodeRichText, nodeSurface, nodeSpacer, nodeGap, nodeTextInput:
+	case nodeText, nodeRichText, nodeSurface, nodeSpacer, nodeGap, nodeCursorAnchor, nodeTextInput:
 		return nil
 	case nodeRow, nodeColumn:
 		horizontal := n.kind == nodeRow
-		layout := n.resolvedLinearLayout(rect, horizontal)
+		layout := n.resolvedLinearLayout(rect, horizontal, profile)
 		var offset uint32
 		for childIndex := range n.children {
 			childRect := layout.childRect(rect, horizontal, childIndex, offset)
-			if err := n.children[childIndex].buildIndex(childRect, clip, childParent, hasChildParent, false, focusFallback, hasFocusFallback, interaction, tree, actions); err != nil {
+			if err := n.children[childIndex].buildIndex(childRect, clip, childParent, hasChildParent, false, focusFallback, hasFocusFallback, interaction, tree, actions, profile); err != nil {
 				return err
 			}
 			offset = saturatingAdd32(offset, layout.allocation(childIndex))
 		}
 	case nodeStack:
 		for child := range n.children {
-			if err := n.children[child].buildIndex(rect, clip, childParent, hasChildParent, false, focusFallback, hasFocusFallback, interaction, tree, actions); err != nil {
+			if err := n.children[child].buildIndex(rect, clip, childParent, hasChildParent, false, focusFallback, hasFocusFallback, interaction, tree, actions, profile); err != nil {
 				return err
 			}
 		}
 	case nodePadding:
 		childRect := insetRect(rect, n.insets.Left, n.insets.Top, n.insets.Right, n.insets.Bottom)
-		return n.child.buildIndex(childRect, clip, childParent, hasChildParent, false, focusFallback, hasFocusFallback, interaction, tree, actions)
+		return n.child.buildIndex(childRect, clip, childParent, hasChildParent, false, focusFallback, hasFocusFallback, interaction, tree, actions, profile)
 	case nodeBorder:
-		return n.child.buildIndex(insetRect(rect, 1, 1, 1, 1), clip, childParent, hasChildParent, false, focusFallback, hasFocusFallback, interaction, tree, actions)
+		return n.child.buildIndex(insetRect(rect, 1, 1, 1, 1), clip, childParent, hasChildParent, false, focusFallback, hasFocusFallback, interaction, tree, actions, profile)
 	case nodeAlign:
-		return n.child.buildIndex(alignedChildRect(rect, n.child, n.horizontal, n.vertical), clip, childParent, hasChildParent, false, focusFallback, hasFocusFallback, interaction, tree, actions)
+		return n.child.buildIndex(alignedChildRect(rect, n.child, n.horizontal, n.vertical, profile), clip, childParent, hasChildParent, false, focusFallback, hasFocusFallback, interaction, tree, actions, profile)
 	case nodeClip:
-		return n.child.buildIndex(rect, clip.Intersection(rect), childParent, hasChildParent, false, focusFallback, hasFocusFallback, interaction, tree, actions)
+		return n.child.buildIndex(rect, clip.Intersection(rect), childParent, hasChildParent, false, focusFallback, hasFocusFallback, interaction, tree, actions, profile)
 	case nodeScrollViewport:
-		childRect := scrollChildRect(rect, n.child, interaction.ScrollOffset(n.id), n.scroll.Axis)
-		return n.child.buildIndex(childRect, clip.Intersection(rect), childParent, hasChildParent, false, focusFallback, hasFocusFallback, interaction, tree, actions)
+		childRect := scrollChildRect(rect, n.child, interaction.ScrollOffset(n.id), n.scroll.Axis, profile)
+		return n.child.buildIndex(childRect, clip.Intersection(rect), childParent, hasChildParent, false, focusFallback, hasFocusFallback, interaction, tree, actions, profile)
 	case nodeVirtualScrollViewport:
 		state := interaction.previewScroll(
 			n.id,
@@ -210,7 +216,7 @@ func (n *Node[Message]) buildIndex(
 			return nil
 		}
 		return fragment.fragment.Node.buildIndex(
-			virtualFragmentRect(rect, fragment),
+			virtualFragmentRect(rect, fragment, profile),
 			clip.Intersection(rect),
 			childParent,
 			hasChildParent,
@@ -220,6 +226,7 @@ func (n *Node[Message]) buildIndex(
 			interaction,
 			tree,
 			actions,
+			profile,
 		)
 	case nodeVirtualFlow:
 		if n.payload == nil || n.payload.virtualFlow == nil || !n.payload.virtualFlow.cache.valid {
@@ -239,62 +246,67 @@ func (n *Node[Message]) buildIndex(
 				interaction,
 				tree,
 				actions,
+				profile,
 			); err != nil {
 				return err
 			}
 		}
 		return nil
 	case nodeModal:
-		return n.child.buildIndex(rect, clip, childParent, hasChildParent, false, focusFallback, hasFocusFallback, interaction, tree, actions)
+		return n.child.buildIndex(rect, clip, childParent, hasChildParent, false, focusFallback, hasFocusFallback, interaction, tree, actions, profile)
 	case nodePanel:
 		insets := panelContentInsets(n.panel)
 		childRect := insetRect(rect, insets.Left, insets.Top, insets.Right, insets.Bottom)
-		return n.child.buildIndex(childRect, clip, childParent, hasChildParent, false, focusFallback, hasFocusFallback, interaction, tree, actions)
+		return n.child.buildIndex(childRect, clip, childParent, hasChildParent, false, focusFallback, hasFocusFallback, interaction, tree, actions, profile)
 	}
 	return nil
 }
 
-func (n *Node[Message]) prepareVirtualFlowsAt(rect Rect, interaction *InteractionState) {
+func (n *Node[Message]) prepareVirtualFlowsAt(rect Rect, interaction *InteractionState, profile celltext.WidthProfile) {
 	switch n.kind {
 	case nodeVirtualFlow:
-		prepareVirtualFlowNode(n.id, n.payload.virtualFlow, rect, interaction)
+		prepareVirtualFlowNode(n.id, n.payload.virtualFlow, rect, interaction, profile)
 	case nodeRow, nodeColumn:
 		horizontal := n.kind == nodeRow
-		layout := n.resolvedLinearLayout(rect, horizontal)
+		layout := n.resolvedLinearLayout(rect, horizontal, profile)
 		var offset uint32
 		for index := range n.children {
 			childRect := layout.childRect(rect, horizontal, index, offset)
-			n.children[index].prepareVirtualFlowsAt(childRect, interaction)
+			n.children[index].prepareVirtualFlowsAt(childRect, interaction, profile)
 			offset = saturatingAdd32(offset, layout.allocation(index))
 		}
 	case nodeStack:
 		for index := range n.children {
-			n.children[index].prepareVirtualFlowsAt(rect, interaction)
+			n.children[index].prepareVirtualFlowsAt(rect, interaction, profile)
 		}
 	case nodePadding:
 		n.child.prepareVirtualFlowsAt(
 			insetRect(rect, n.insets.Left, n.insets.Top, n.insets.Right, n.insets.Bottom),
 			interaction,
+			profile,
 		)
 	case nodeBorder:
-		n.child.prepareVirtualFlowsAt(insetRect(rect, 1, 1, 1, 1), interaction)
+		n.child.prepareVirtualFlowsAt(insetRect(rect, 1, 1, 1, 1), interaction, profile)
 	case nodeAlign:
 		n.child.prepareVirtualFlowsAt(
-			alignedChildRect(rect, n.child, n.horizontal, n.vertical),
+			alignedChildRect(rect, n.child, n.horizontal, n.vertical, profile),
 			interaction,
+			profile,
 		)
 	case nodeClip, nodeModal:
-		n.child.prepareVirtualFlowsAt(rect, interaction)
+		n.child.prepareVirtualFlowsAt(rect, interaction, profile)
 	case nodePanel:
 		insets := panelContentInsets(n.panel)
 		n.child.prepareVirtualFlowsAt(
 			insetRect(rect, insets.Left, insets.Top, insets.Right, insets.Bottom),
 			interaction,
+			profile,
 		)
 	case nodeScrollViewport:
 		n.child.prepareVirtualFlowsAt(
-			scrollChildRect(rect, n.child, interaction.ScrollOffset(n.id), n.scroll.Axis),
+			scrollChildRect(rect, n.child, interaction.ScrollOffset(n.id), n.scroll.Axis, profile),
 			interaction,
+			profile,
 		)
 	case nodeVirtualScrollViewport:
 		state := interaction.previewScroll(
@@ -312,21 +324,22 @@ func (n *Node[Message]) prepareVirtualFlowsAt(rect Rect, interaction *Interactio
 			state.Offset,
 		); ok {
 			fragment.fragment.Node.prepareVirtualFlowsAt(
-				virtualFragmentRect(rect, fragment),
+				virtualFragmentRect(rect, fragment, profile),
 				interaction,
+				profile,
 			)
 		}
 	}
 }
 
-func (n *Node[Message]) prepareAt(rect Rect, interaction *InteractionState) bool {
+func (n *Node[Message]) prepareAt(rect Rect, interaction *InteractionState, profile celltext.WidthProfile) bool {
 	switch n.kind {
 	case nodeTextInput:
 		interaction.ensureTextInput(n.id, n.content)
 		return false
 	case nodeScrollViewport:
 		previous := interaction.ScrollOffset(n.id)
-		content := n.child.measure(scrollConstraints(rect, n.scroll.Axis))
+		content := n.child.measure(scrollConstraints(rect, n.scroll.Axis), profile)
 		width := max(content.Width, rect.Width)
 		height := max(content.Height, rect.Height)
 		state := interaction.prepareScroll(
@@ -335,7 +348,7 @@ func (n *Node[Message]) prepareAt(rect Rect, interaction *InteractionState) bool
 			n.scroll.Axis,
 			n.scroll.StickToEnd,
 		)
-		childChanged := n.child.prepareAt(scrollChildRect(rect, n.child, state.Offset, n.scroll.Axis), interaction)
+		childChanged := n.child.prepareAt(scrollChildRect(rect, n.child, state.Offset, n.scroll.Axis, profile), interaction, profile)
 		return state.Offset != previous || childChanged
 	case nodeVirtualScrollViewport:
 		previousRequest := n.payload.virtualCache.request
@@ -355,43 +368,43 @@ func (n *Node[Message]) prepareAt(rect Rect, interaction *InteractionState) bool
 			rect,
 			state.Offset,
 		); ok {
-			childChanged = fragment.fragment.Node.prepareAt(virtualFragmentRect(rect, fragment), interaction)
+			childChanged = fragment.fragment.Node.prepareAt(virtualFragmentRect(rect, fragment, profile), interaction, profile)
 		}
 		cacheChanged := wasValid != n.payload.virtualCache.valid ||
 			n.payload.virtualCache.valid && previousRequest != n.payload.virtualCache.request
 		return cacheChanged || childChanged
 	case nodeVirtualFlow:
-		return prepareVirtualFlowNode(n.id, n.payload.virtualFlow, rect, interaction)
+		return prepareVirtualFlowNode(n.id, n.payload.virtualFlow, rect, interaction, profile)
 	}
 
 	changed := false
 	switch n.kind {
 	case nodeRow, nodeColumn:
 		horizontal := n.kind == nodeRow
-		layout := n.resolvedLinearLayout(rect, horizontal)
+		layout := n.resolvedLinearLayout(rect, horizontal, profile)
 		var offset uint32
 		for index := range n.children {
 			childRect := layout.childRect(rect, horizontal, index, offset)
-			changed = n.children[index].prepareAt(childRect, interaction) || changed
+			changed = n.children[index].prepareAt(childRect, interaction, profile) || changed
 			offset = saturatingAdd32(offset, layout.allocation(index))
 		}
 	case nodeStack:
 		for index := range n.children {
-			changed = n.children[index].prepareAt(rect, interaction) || changed
+			changed = n.children[index].prepareAt(rect, interaction, profile) || changed
 		}
 	case nodePadding:
-		changed = n.child.prepareAt(insetRect(rect, n.insets.Left, n.insets.Top, n.insets.Right, n.insets.Bottom), interaction)
+		changed = n.child.prepareAt(insetRect(rect, n.insets.Left, n.insets.Top, n.insets.Right, n.insets.Bottom), interaction, profile)
 	case nodeBorder:
-		changed = n.child.prepareAt(insetRect(rect, 1, 1, 1, 1), interaction)
+		changed = n.child.prepareAt(insetRect(rect, 1, 1, 1, 1), interaction, profile)
 	case nodeAlign:
-		changed = n.child.prepareAt(alignedChildRect(rect, n.child, n.horizontal, n.vertical), interaction)
+		changed = n.child.prepareAt(alignedChildRect(rect, n.child, n.horizontal, n.vertical, profile), interaction, profile)
 	case nodeClip:
-		changed = n.child.prepareAt(rect, interaction)
+		changed = n.child.prepareAt(rect, interaction, profile)
 	case nodeModal:
-		changed = n.child.prepareAt(rect, interaction)
+		changed = n.child.prepareAt(rect, interaction, profile)
 	case nodePanel:
 		insets := panelContentInsets(n.panel)
-		changed = n.child.prepareAt(insetRect(rect, insets.Left, insets.Top, insets.Right, insets.Bottom), interaction)
+		changed = n.child.prepareAt(insetRect(rect, insets.Left, insets.Top, insets.Right, insets.Bottom), interaction, profile)
 	}
 	return changed
 }

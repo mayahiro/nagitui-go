@@ -3,6 +3,7 @@ package widget
 import (
 	"testing"
 
+	celltext "github.com/mayahiro/nagi-go/text"
 	"github.com/mayahiro/nagitui-go"
 )
 
@@ -129,11 +130,11 @@ func TestTreeActionDescriptorDefaultsDoNotAllocate(t *testing.T) {
 
 func TestTextAreaActionDescriptorDefaultsDoNotAllocate(t *testing.T) {
 	textAreaActionDescriptorSink = textAreaActionDescriptors(
-		true, true, true, TextAreaBoundaryConsume, TextAreaState{}, 0, false,
+		true, true, true, TextAreaBoundaryConsume, TextAreaState{}, 0, false, celltext.ModernWidth(),
 	)
 	allocations := testing.AllocsPerRun(1_000, func() {
 		textAreaActionDescriptorSink = textAreaActionDescriptors(
-			true, true, true, TextAreaBoundaryConsume, TextAreaState{}, 0, false,
+			true, true, true, TextAreaBoundaryConsume, TextAreaState{}, 0, false, celltext.ModernWidth(),
 		)
 	})
 	if allocations != 0 {

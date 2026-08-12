@@ -1,10 +1,12 @@
 package tui
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"time"
 
+	celltext "github.com/mayahiro/nagi-go/text"
 	"github.com/mayahiro/nagi-go/vt"
 	"github.com/mayahiro/nagitui-go/surface"
 )
@@ -19,6 +21,10 @@ const DefaultTaskLimit = 64
 // capacity
 const DefaultSubscriptionCapacity = 256
 
+// DefaultRuntimeNoticeCapacity is the default maximum number of retained
+// asynchronous lifecycle notices
+const DefaultRuntimeNoticeCapacity = 256
+
 var (
 	// ErrZeroQueueCapacity indicates that runtime queue capacity is zero
 	ErrZeroQueueCapacity = errors.New("runtime queue capacity must be positive")
@@ -28,6 +34,8 @@ var (
 	ErrZeroTaskLimit = errors.New("runtime task limit must be positive")
 	// ErrZeroSubscriptionCapacity indicates that subscription capacity is zero
 	ErrZeroSubscriptionCapacity = errors.New("runtime subscription capacity must be positive")
+	// ErrZeroRuntimeNoticeCapacity indicates that runtime notice capacity is zero
+	ErrZeroRuntimeNoticeCapacity = errors.New("runtime notice capacity must be positive")
 	// ErrNegativeFrameInterval indicates that a frame interval is negative
 	ErrNegativeFrameInterval = errors.New("runtime minimum frame interval must not be negative")
 )
@@ -42,17 +50,25 @@ type RuntimeConfig struct {
 	TaskLimit int
 	// SubscriptionCapacity is the maximum pending values retained per source
 	SubscriptionCapacity int
+	// RuntimeNoticeCapacity is the maximum retained asynchronous lifecycle notices
+	RuntimeNoticeCapacity int
 	// MinimumFrameInterval limits non-urgent rendering; zero disables the limit
 	MinimumFrameInterval time.Duration
+	// WidthProfile is the terminal cell-width policy used by the complete view
+	//
+	// A custom override must return stable widths for this Runtime's lifetime.
+	WidthProfile celltext.WidthProfile
 }
 
 // NewRuntimeConfig returns settings with the default bounded queue capacity
 func NewRuntimeConfig(size Size) RuntimeConfig {
 	return RuntimeConfig{
-		Size:                 size,
-		QueueCapacity:        DefaultQueueCapacity,
-		TaskLimit:            DefaultTaskLimit,
-		SubscriptionCapacity: DefaultSubscriptionCapacity,
+		Size:                  size,
+		QueueCapacity:         DefaultQueueCapacity,
+		TaskLimit:             DefaultTaskLimit,
+		SubscriptionCapacity:  DefaultSubscriptionCapacity,
+		RuntimeNoticeCapacity: DefaultRuntimeNoticeCapacity,
+		WidthProfile:          celltext.ModernWidth(),
 	}
 }
 
@@ -89,6 +105,7 @@ type Runtime[Message any] struct {
 	dirty                   bool
 	urgentFrame             bool
 	minimumFrameInterval    time.Duration
+	widthProfile            celltext.WidthProfile
 	lastFrame               Timestamp
 	hasLastFrame            bool
 	previousSurface         *surface.Surface
@@ -105,6 +122,7 @@ type Runtime[Message any] struct {
 	hasResolvedActionRoute  bool
 	effects                 *effectSupervisor[Message]
 	subscriptions           *subscriptionSupervisor[Message]
+	notices                 *runtimeNoticeQueue
 	subscriptionsDirty      bool
 	exitRequested           bool
 	pendingFocus            NodeID
@@ -127,9 +145,27 @@ func NewRuntime[Message any](app App[Message], size Size) (*Runtime[Message], er
 	return NewRuntimeWithClock(app, NewRuntimeConfig(size), NewSystemClock())
 }
 
+// NewRuntimeContext returns a runtime whose Effect tasks and Subscription
+// streams inherit values, deadlines, cancellation, and cancellation causes
+// from parent
+func NewRuntimeContext[Message any](parent context.Context, app App[Message], size Size) (*Runtime[Message], error) {
+	return NewRuntimeWithClockContext(parent, app, NewRuntimeConfig(size), NewSystemClock())
+}
+
 // NewRuntimeWithClock returns a runtime using explicit settings and clock
 func NewRuntimeWithClock[Message any](app App[Message], config RuntimeConfig, clock Clock) (*Runtime[Message], error) {
 	return newRuntimeWithClockAndWake(app, config, clock, nil)
+}
+
+// NewRuntimeWithClockContext returns a context-aware runtime using explicit
+// settings and clock
+func NewRuntimeWithClockContext[Message any](
+	parent context.Context,
+	app App[Message],
+	config RuntimeConfig,
+	clock Clock,
+) (*Runtime[Message], error) {
+	return newRuntimeWithClockAndWakeContext(parent, app, config, clock, nil)
 }
 
 func newRuntimeWithClockAndWake[Message any](
@@ -138,6 +174,19 @@ func newRuntimeWithClockAndWake[Message any](
 	clock Clock,
 	wake runtimeWake,
 ) (*Runtime[Message], error) {
+	return newRuntimeWithClockAndWakeContext(context.Background(), app, config, clock, wake)
+}
+
+func newRuntimeWithClockAndWakeContext[Message any](
+	parent context.Context,
+	app App[Message],
+	config RuntimeConfig,
+	clock Clock,
+	wake runtimeWake,
+) (*Runtime[Message], error) {
+	if parent == nil {
+		return nil, errors.New("nagi-tui: nil runtime context")
+	}
 	if config.QueueCapacity <= 0 {
 		return nil, ErrZeroQueueCapacity
 	}
@@ -146,6 +195,9 @@ func newRuntimeWithClockAndWake[Message any](
 	}
 	if config.SubscriptionCapacity <= 0 {
 		return nil, ErrZeroSubscriptionCapacity
+	}
+	if config.RuntimeNoticeCapacity <= 0 {
+		return nil, ErrZeroRuntimeNoticeCapacity
 	}
 	if config.MinimumFrameInterval < 0 {
 		return nil, ErrNegativeFrameInterval
@@ -158,10 +210,13 @@ func newRuntimeWithClockAndWake[Message any](
 	}
 	startup := app.Init()
 	declaredSubscriptions := app.Subscriptions()
-	effects := newEffectSupervisor[Message](config.TaskLimit)
+	notices := newRuntimeNoticeQueue(config.RuntimeNoticeCapacity)
+	effects := newEffectSupervisorContext[Message](parent, config.TaskLimit)
+	effects.notices = notices
 	effects.wake = wake
 	effects.schedule(startup, clock.Now())
-	subscriptions := newSubscriptionSupervisor[Message](config.SubscriptionCapacity)
+	subscriptions := newSubscriptionSupervisorContext[Message](parent, config.SubscriptionCapacity)
+	subscriptions.notices = notices
 	subscriptions.wake = wake
 	if _, err := subscriptions.reconcile(declaredSubscriptions, clock.Now()); err != nil {
 		effects.close()
@@ -176,11 +231,13 @@ func newRuntimeWithClockAndWake[Message any](
 		dirty:                true,
 		urgentFrame:          true,
 		minimumFrameInterval: config.MinimumFrameInterval,
+		widthProfile:         config.WidthProfile,
 		interaction:          NewInteractionState(),
 		treeIndex:            newTreeIndex(),
 		nextTreeIndex:        newTreeIndex(),
 		effects:              effects,
 		subscriptions:        subscriptions,
+		notices:              notices,
 	}
 	runtime.applyEffectCommands()
 	return runtime, nil
@@ -213,6 +270,7 @@ func (r *Runtime[Message]) Resize(size Size) {
 		r.size = size
 		r.dirty = true
 		r.urgentFrame = true
+		r.viewTree = nil
 	}
 }
 
@@ -320,6 +378,21 @@ func (r *Runtime[Message]) SubscriptionDiagnostics() SubscriptionDiagnostics {
 	return r.subscriptions.diagnostics()
 }
 
+// PendingRuntimeNotices returns retained asynchronous lifecycle notices
+func (r *Runtime[Message]) PendingRuntimeNotices() int {
+	return r.notices.pending()
+}
+
+// DrainRuntimeNotices removes and returns retained notices in occurrence order
+func (r *Runtime[Message]) DrainRuntimeNotices() []RuntimeNotice {
+	return r.notices.drain()
+}
+
+// RuntimeNoticeDiagnostics returns bounded notice queue counters
+func (r *Runtime[Message]) RuntimeNoticeDiagnostics() RuntimeNoticeDiagnostics {
+	return r.notices.diagnostics()
+}
+
 // TimeUntilEffectDeadline returns time until the next clock-driven deadline
 func (r *Runtime[Message]) TimeUntilEffectDeadline() (time.Duration, bool) {
 	return r.effects.timeUntilDeadline(r.clock.Now())
@@ -357,6 +430,25 @@ func (r *Runtime[Message]) ProcessPendingWith(observe func(Message)) (int, error
 	}
 	r.PollEffects()
 	r.PollSubscriptions()
+	return r.processQueuedWith(observe)
+}
+
+// ProcessQueued applies messages already in the application queue without
+// polling asynchronous Effects or Subscriptions
+func (r *Runtime[Message]) ProcessQueued() (int, error) {
+	return r.ProcessQueuedWith(nil)
+}
+
+// ProcessQueuedWith applies messages already in the application queue and
+// observes each immediately before Update without polling asynchronous sources
+func (r *Runtime[Message]) ProcessQueuedWith(observe func(Message)) (int, error) {
+	if err := r.reconcileSubscriptions(); err != nil {
+		return 0, err
+	}
+	return r.processQueuedWith(observe)
+}
+
+func (r *Runtime[Message]) processQueuedWith(observe func(Message)) (int, error) {
 	processed := 0
 	for len(r.queue) > 0 {
 		queued := r.queue[0]
@@ -372,6 +464,7 @@ func (r *Runtime[Message]) ProcessPendingWith(observe func(Message)) (int, error
 		r.applyEffectCommands()
 		if !withoutRedraw {
 			r.dirty = true
+			r.viewTree = nil
 		}
 		r.subscriptionsDirty = true
 		if err := r.reconcileSubscriptions(); err != nil {
@@ -400,6 +493,7 @@ func (r *Runtime[Message]) applyEffectCommands() {
 		}
 		r.dirty = true
 		r.urgentFrame = true
+		r.viewTree = nil
 	}
 }
 
@@ -491,6 +585,7 @@ func (r *Runtime[Message]) SetScrollOffset(id NodeID, offset ScrollOffset) bool 
 	if changed {
 		r.dirty = true
 		r.urgentFrame = true
+		r.viewTree = nil
 	}
 	return true
 }
@@ -618,6 +713,10 @@ func (r *Runtime[Message]) DispatchEvent(event vt.Event) (EventDispatch, error) 
 			if dispatch.consumed {
 				break
 			}
+		}
+		if record.blocksUnhandled {
+			dispatch.consumed = true
+			break
 		}
 	}
 	return dispatch, nil
@@ -1015,38 +1114,39 @@ func (r *Runtime[Message]) ensureTargetVisible(
 		return nil
 	}
 	r.interaction.requestScroll(viewportID, next)
-	view.prepareInteraction(r.size, r.interaction)
-	return view.buildTreeIndex(r.size, r.interaction, index, actions)
+	view.prepareInteraction(r.size, r.interaction, r.widthProfile)
+	return view.buildTreeIndex(r.size, r.interaction, index, actions, r.widthProfile)
 }
 
 func (r *Runtime[Message]) ensureTree() error {
 	if r.viewTree != nil {
 		return nil
 	}
-	view := r.app.View(ViewContext{Size: r.size})
-	view.prepareVirtualFlows(r.size, r.interaction)
+	view := r.app.View(ViewContext{Size: r.size, WidthProfile: r.widthProfile})
+	view.prepareVirtualFlows(r.size, r.interaction, r.widthProfile)
 	index := &r.nextTreeIndex
 	actions := &r.nextActionIndex
-	if err := view.buildTreeIndex(r.size, r.interaction, index, actions); err != nil {
+	if err := view.buildTreeIndex(r.size, r.interaction, index, actions, r.widthProfile); err != nil {
 		return err
 	}
+	focusFallback, hasFocusFallback := r.treeIndex.focusFallback(r.interaction.focused)
 	r.interaction.reconcile(
 		index.active,
-		nil,
+		r.treeIndex.focusScope(),
 		index.focusScope(),
 		index.activeModal,
 		index.hasModal,
 		index.activeModalFocus,
-		"",
-		false,
+		focusFallback,
+		hasFocusFallback,
 	)
 	if r.interaction.hasCapture && !index.allowsInteraction(r.interaction.pointerCapture) {
 		r.interaction.pointerCapture = ""
 		r.interaction.hasCapture = false
 	}
 	r.applyPendingInteraction(*index)
-	if view.prepareInteraction(r.size, r.interaction) {
-		if err := view.buildTreeIndex(r.size, r.interaction, index, actions); err != nil {
+	if view.prepareInteraction(r.size, r.interaction, r.widthProfile) {
+		if err := view.buildTreeIndex(r.size, r.interaction, index, actions, r.widthProfile); err != nil {
 			return err
 		}
 	}
@@ -1086,11 +1186,11 @@ func (r *Runtime[Message]) renderIfDirty(recycleSurface bool) (*Frame, error) {
 	if !r.urgentFrame && r.minimumFrameInterval > 0 && r.hasLastFrame && now < r.lastFrame.Add(r.minimumFrameInterval) {
 		return nil, nil
 	}
-	view := r.app.View(ViewContext{Size: r.size})
-	view.prepareVirtualFlows(r.size, r.interaction)
+	view := r.app.View(ViewContext{Size: r.size, WidthProfile: r.widthProfile})
+	view.prepareVirtualFlows(r.size, r.interaction, r.widthProfile)
 	index := &r.nextTreeIndex
 	actions := &r.nextActionIndex
-	if err := view.buildTreeIndex(r.size, r.interaction, index, actions); err != nil {
+	if err := view.buildTreeIndex(r.size, r.interaction, index, actions, r.widthProfile); err != nil {
 		return nil, err
 	}
 	focusFallback, hasFocusFallback := NodeID(""), false
@@ -1112,8 +1212,8 @@ func (r *Runtime[Message]) renderIfDirty(recycleSurface bool) (*Frame, error) {
 		r.interaction.hasCapture = false
 	}
 	r.applyPendingInteraction(*index)
-	if view.prepareInteraction(r.size, r.interaction) {
-		if err := view.buildTreeIndex(r.size, r.interaction, index, actions); err != nil {
+	if view.prepareInteraction(r.size, r.interaction, r.widthProfile) {
+		if err := view.buildTreeIndex(r.size, r.interaction, index, actions, r.widthProfile); err != nil {
 			return nil, err
 		}
 	}
@@ -1143,7 +1243,7 @@ func (r *Runtime[Message]) renderIfDirty(recycleSurface bool) (*Frame, error) {
 			return nil, fmt.Errorf("construct runtime surface: %w", err)
 		}
 	}
-	view.renderTo(current, r.interaction)
+	view.renderToProfile(current, r.interaction, r.widthProfile)
 	previous := r.previousSurface
 	operations := rendererOperations(previous, current)
 	// Frame only exposes independent clones, so the immutable rendered surface

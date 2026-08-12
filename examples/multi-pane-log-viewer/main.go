@@ -90,7 +90,7 @@ func (a *logViewer) Subscriptions() tui.Subscription[message] {
 	})
 }
 
-func (a *logViewer) View(_ tui.ViewContext) tui.Node[message] {
+func (a *logViewer) View(context tui.ViewContext) tui.Node[message] {
 	sourceItems := make([]widget.ListItem, 0, len(sources))
 	for index, source := range sources {
 		sourceItems = append(sourceItems, widget.NewListItem(
@@ -161,7 +161,7 @@ func (a *logViewer) View(_ tui.ViewContext) tui.Node[message] {
 			widget.NewHelpBinding("Up/Down", "select"),
 			widget.NewHelpBinding("p", "pause"),
 			widget.NewHelpBinding("Esc", "exit"),
-		}).Node().WithLength(tui.Fixed(1)),
+		}).WidthProfile(context.WidthProfile).Node().WithLength(tui.Fixed(1)),
 	)
 }
 

@@ -127,6 +127,7 @@ func (a *gallery) View(viewContext tui.ViewContext) tui.Node[message] {
 		widget.ConfirmDialogDefaultCancel(),
 	).Title(tui.StyledText[message]("Confirm action", vt.Style{Bold: true})).
 		Details(details).
+		WidthProfile(viewContext.WidthProfile).
 		ActionWrapWidth(max(viewContext.Size.Width, 5) - 4).
 		Node()
 	return tui.Stack(content, dialog)

@@ -237,7 +237,7 @@ func (r *resolvedActionRoute[Message]) matchDeclaredEvent(
 	for actionIndex, resolved := range group.resolved.actions {
 		matched := false
 		for _, binding := range resolved.bindings {
-			if binding.Matches(event) {
+			if bindingMatchesAvailability(binding, event, resolved.availability) {
 				matched = true
 				break
 			}
@@ -279,7 +279,7 @@ func (r *resolvedActionRoute[Message]) matchCoreEvent(
 	for actionIndex, resolved := range group.resolved.actions {
 		matched := false
 		for _, binding := range resolved.bindings {
-			if binding.Matches(event) {
+			if bindingMatchesAvailability(binding, event, resolved.availability) {
 				matched = true
 				break
 			}
@@ -297,6 +297,13 @@ func (r *resolvedActionRoute[Message]) matchCoreEvent(
 		}
 	}
 	return 0, coreActionNone
+}
+
+func bindingMatchesAvailability(binding KeyBinding, event vt.Event, availability ActionAvailability) bool {
+	if availability == ActionDisabledConsume {
+		return binding.MatchesStroke(event)
+	}
+	return binding.Matches(event)
 }
 
 func (r *resolvedActionRoute[Message]) actionGroups() []ResolvedActions {

@@ -117,6 +117,32 @@ func TestGapAndSpacerReserveDeterministicLayoutSpace(t *testing.T) {
 	assertNodeCell(t, target, 0, 3, "C")
 }
 
+func TestCursorAnchorUsesNoLayoutWidthAndFollowsFocus(t *testing.T) {
+	node := Row(
+		Text[nodeTestMessage]("A"),
+		CursorAnchor[nodeTestMessage]("editor"),
+		Text[nodeTestMessage]("B"),
+	)
+	target := newNodeTestSurface(t, 2, 1)
+	interaction := NewInteractionState()
+	interaction.focused = "editor"
+	interaction.hasFocus = true
+
+	node.renderTo(target, interaction)
+
+	assertNodeCell(t, target, 0, 0, "A")
+	assertNodeCell(t, target, 1, 0, "B")
+	if cursor, ok := target.Cursor(); !ok || cursor != (surface.Cursor{X: 1, Y: 0}) {
+		t.Fatalf("cursor = %+v, %t, want 1,0", cursor, ok)
+	}
+
+	unfocused := newNodeTestSurface(t, 2, 1)
+	node.renderTo(unfocused, NewInteractionState())
+	if cursor, ok := unfocused.Cursor(); ok {
+		t.Fatalf("unfocused cursor = %+v", cursor)
+	}
+}
+
 func newNodeTestSurface(t *testing.T, width, height uint32) *surface.Surface {
 	t.Helper()
 	target, err := surface.New(width, height)

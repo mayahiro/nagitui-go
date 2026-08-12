@@ -104,8 +104,6 @@ const (
 type TextAreaStyle struct {
 	// Normal is used by editable text
 	Normal vt.Style
-	// Cursor is used by the visible cursor marker
-	Cursor vt.Style
 	// Placeholder is used by placeholder text
 	Placeholder vt.Style
 	// Focused is merged over the area while it owns focus
@@ -117,8 +115,8 @@ type TextAreaStyle struct {
 // DefaultTextAreaStyle returns the standard text area styles
 func DefaultTextAreaStyle() TextAreaStyle {
 	return TextAreaStyle{
-		Cursor: vt.Style{Reverse: true}, Placeholder: vt.Style{Dim: true},
-		Focused: vt.Style{Underline: true}, Disabled: vt.Style{Dim: true},
+		Placeholder: vt.Style{Dim: true}, Focused: vt.Style{Underline: true},
+		Disabled: vt.Style{Dim: true},
 	}
 }
 
@@ -133,6 +131,7 @@ type TextArea[Message any] struct {
 	enabled        bool
 	style          TextAreaStyle
 	selectionStyle vt.Style
+	widthProfile   celltext.WidthProfile
 	wrapWidth      int
 	hasWrap        bool
 	boundary       TextAreaBoundaryNavigation
@@ -157,7 +156,8 @@ func NewTextArea[Message any](id tui.NodeID, state TextAreaState, onChange func(
 	state = normalizeTextAreaState(state)
 	return TextArea[Message]{
 		id: id, state: state, enabled: onChange != nil,
-		style: DefaultTextAreaStyle(), selectionStyle: vt.Style{Reverse: true}, onChange: onChange,
+		style: DefaultTextAreaStyle(), selectionStyle: vt.Style{Reverse: true},
+		widthProfile: celltext.ModernWidth(), onChange: onChange,
 	}
 }
 
@@ -182,6 +182,14 @@ func (a TextArea[Message]) Style(style TextAreaStyle) TextArea[Message] {
 // SelectionStyle sets the style merged over selected text
 func (a TextArea[Message]) SelectionStyle(style vt.Style) TextArea[Message] {
 	a.selectionStyle = style
+	return a
+}
+
+// WidthProfile sets the terminal cell-width policy used by editing and layout
+//
+// Pass ViewContext.WidthProfile to keep the widget aligned with its Runtime.
+func (a TextArea[Message]) WidthProfile(profile celltext.WidthProfile) TextArea[Message] {
+	a.widthProfile = profile
 	return a
 }
 
@@ -240,6 +248,7 @@ func (a TextArea[Message]) ActionDescriptors() []tui.ActionDescriptor {
 	descriptors := textAreaActionDescriptors(
 		a.enabled, a.onUndo != nil, a.onRedo != nil,
 		a.boundary, a.state, a.wrapWidth, a.hasWrap,
+		a.widthProfile,
 	)
 	return append([]tui.ActionDescriptor(nil), descriptors[:]...)
 }
@@ -249,6 +258,7 @@ func (a TextArea[Message]) Node() tui.Node[Message] {
 	descriptors := textAreaActionDescriptors(
 		a.enabled, a.onUndo != nil, a.onRedo != nil,
 		a.boundary, a.state, a.wrapWidth, a.hasWrap,
+		a.widthProfile,
 	)
 	return a.nodeWithActions(descriptors, nil, nil)
 }
@@ -265,7 +275,8 @@ func (a TextArea[Message]) nodeWithActions(
 	}
 	content := textAreaContent[Message](
 		a.state, a.placeholder, a.enabled, a.style, a.selectionStyle,
-		a.wrapWidth, a.hasWrap, caretID, hasCaretID,
+		a.wrapWidth, a.hasWrap, a.id, caretID, hasCaretID,
+		a.widthProfile,
 	)
 	if !a.enabled {
 		textActions := disabledTextAreaActions[Message](descriptors)
@@ -281,7 +292,8 @@ func (a TextArea[Message]) nodeWithActions(
 	}
 	context := &textAreaActionContext[Message]{
 		id: a.id, state: a.state, wrapWidth: a.wrapWidth, hasWrap: a.hasWrap,
-		onChange: a.onChange, onUndo: a.onUndo, onRedo: a.onRedo,
+		widthProfile: a.widthProfile,
+		onChange:     a.onChange, onUndo: a.onUndo, onRedo: a.onRedo,
 		insertionPolicy: insertionPolicy,
 	}
 	textActions := newTextAreaActions(descriptors, context)
@@ -448,10 +460,11 @@ func textAreaActionDescriptors(
 	state TextAreaState,
 	wrapWidth int,
 	hasWrap bool,
+	profile celltext.WidthProfile,
 ) [textAreaActionCount]tui.ActionDescriptor {
 	hasUp, hasDown := true, true
 	if boundary == TextAreaBoundaryBubble {
-		hasUp, hasDown = textAreaVisualLineDirections(state, wrapWidth, hasWrap)
+		hasUp, hasDown = textAreaVisualLineDirections(state, wrapWidth, hasWrap, profile)
 	}
 	descriptors := defaultTextAreaActionDescriptors
 	for index := range descriptors {
@@ -480,6 +493,7 @@ type textAreaActionContext[Message any] struct {
 	state           TextAreaState
 	wrapWidth       int
 	hasWrap         bool
+	widthProfile    celltext.WidthProfile
 	onChange        func(TextAreaState) Message
 	onUndo          func() Message
 	onRedo          func() Message
@@ -534,7 +548,7 @@ func textAreaActionResult[Message any](
 	default:
 		return textAreaChangeResult(
 			context,
-			textAreaStateForAction(context.state, action, context.wrapWidth, context.hasWrap),
+			textAreaStateForAction(context.state, action, context.wrapWidth, context.hasWrap, context.widthProfile),
 		)
 	}
 }
@@ -555,6 +569,7 @@ func textAreaStateForAction(
 	action textAreaSemanticAction,
 	wrapWidth int,
 	hasWrap bool,
+	profile celltext.WidthProfile,
 ) TextAreaState {
 	switch action {
 	case textAreaCursorLeft:
@@ -562,9 +577,9 @@ func textAreaStateForAction(
 	case textAreaCursorRight:
 		return applyTextAreaMovement(state, textAreaRight, false)
 	case textAreaCursorUp:
-		return applyVerticalTextAreaMovement(state, false, false, wrapWidth, hasWrap)
+		return applyVerticalTextAreaMovement(state, false, false, wrapWidth, hasWrap, profile)
 	case textAreaCursorDown:
-		return applyVerticalTextAreaMovement(state, true, false, wrapWidth, hasWrap)
+		return applyVerticalTextAreaMovement(state, true, false, wrapWidth, hasWrap, profile)
 	case textAreaCursorLineStart:
 		return applyTextAreaMovement(state, textAreaHome, false)
 	case textAreaCursorLineEnd:
@@ -574,9 +589,9 @@ func textAreaStateForAction(
 	case textAreaSelectionExtendRight:
 		return applyTextAreaMovement(state, textAreaRight, true)
 	case textAreaSelectionExtendUp:
-		return applyVerticalTextAreaMovement(state, false, true, wrapWidth, hasWrap)
+		return applyVerticalTextAreaMovement(state, false, true, wrapWidth, hasWrap, profile)
 	case textAreaSelectionExtendDown:
-		return applyVerticalTextAreaMovement(state, true, true, wrapWidth, hasWrap)
+		return applyVerticalTextAreaMovement(state, true, true, wrapWidth, hasWrap, profile)
 	case textAreaSelectionExtendLineStart:
 		return applyTextAreaMovement(state, textAreaHome, true)
 	case textAreaSelectionExtendLineEnd:
@@ -602,38 +617,49 @@ func textAreaContent[Message any](
 	selectionStyle vt.Style,
 	wrapWidth int,
 	hasWrap bool,
+	focusOwner tui.NodeID,
 	caretID tui.NodeID,
 	hasCaretID bool,
+	profile celltext.WidthProfile,
 ) tui.Node[Message] {
 	state = normalizeTextAreaState(state)
 	if state.value == "" {
 		if enabled {
 			return tui.Row(
-				textAreaCaret[Message](style.Cursor, caretID, hasCaretID),
+				textAreaCaret[Message](focusOwner, caretID, hasCaretID),
 				tui.StyledText[Message](placeholder, style.Placeholder),
 			)
 		}
 		return tui.StyledText[Message](placeholder, style.Disabled)
 	}
 
-	lines := textAreaVisualLineRanges(state.value, wrapWidth, hasWrap)
+	lines := textAreaVisualLineRanges(state.value, wrapWidth, hasWrap, profile)
 	cursorLine := textAreaVisualLineIndex(lines, state.cursor)
+	cursorWraps := textAreaCursorWraps(state, lines[cursorLine], wrapWidth, hasWrap, profile)
 	horizontalOffset := state.horizontalOffset
 	if hasWrap {
 		horizontalOffset = 0
 	}
-	nodes := make([]tui.Node[Message], 0, len(lines))
+	nodes := make([]tui.Node[Message], 0, len(lines)+1)
 	for index, line := range lines {
 		lineStyle := style.Normal
 		if !enabled {
 			lineStyle = style.Disabled
 		}
-		lineHasCaretID := enabled && index == cursorLine && hasCaretID
+		lineHasCaretID := enabled && index == cursorLine && !cursorWraps && hasCaretID
 		nodes = append(nodes, textAreaLineContent[Message](
-			state, line, enabled && index == cursorLine,
-			lineStyle, style.Cursor, selectionStyle, horizontalOffset,
-			caretID, lineHasCaretID,
+			state, line, enabled && index == cursorLine && !cursorWraps,
+			lineStyle, selectionStyle, horizontalOffset,
+			focusOwner, caretID, lineHasCaretID,
+			profile,
 		))
+		if index == cursorLine && cursorWraps {
+			if enabled {
+				nodes = append(nodes, textAreaCaret[Message](focusOwner, caretID, hasCaretID))
+			} else {
+				nodes = append(nodes, tui.StyledText[Message]("", style.Disabled))
+			}
+		}
 	}
 	return tui.Column(nodes...)
 }
@@ -642,13 +668,15 @@ func textAreaLineContent[Message any](
 	state TextAreaState,
 	line textAreaRange,
 	cursorLine bool,
-	normalStyle, cursorStyle, selectionStyle vt.Style,
+	normalStyle, selectionStyle vt.Style,
 	horizontalOffset int,
+	focusOwner tui.NodeID,
 	caretID tui.NodeID,
 	hasCaretID bool,
+	profile celltext.WidthProfile,
 ) tui.Node[Message] {
 	lineText := state.value[line.start:line.end]
-	visibleStart := line.start + textAreaVisibleStart(lineText, horizontalOffset)
+	visibleStart := line.start + textAreaVisibleStart(lineText, horizontalOffset, profile)
 	selectionStart, selectionEnd, selected := state.Selection()
 	boundaries := []int{visibleStart, line.end}
 	if selected {
@@ -663,7 +691,7 @@ func textAreaLineContent[Message any](
 
 	cursorVisible := false
 	if cursorLine && state.cursor >= line.start && state.cursor <= line.end {
-		cursorCell, ok := celltext.CellAtByte(lineText, state.cursor-line.start, celltext.ModernWidth())
+		cursorCell, ok := celltext.CellAtByte(lineText, state.cursor-line.start, profile)
 		cursorVisible = ok && cursorCell >= horizontalOffset
 	}
 	parts := make([]tui.Node[Message], 0, len(boundaries)*2)
@@ -673,7 +701,7 @@ func textAreaLineContent[Message any](
 	for index := 0; index+1 < len(boundaries); index++ {
 		start, end := boundaries[index], boundaries[index+1]
 		if cursorVisible && state.cursor == start {
-			parts = append(parts, textAreaCaret[Message](cursorStyle, caretID, hasCaretID))
+			parts = append(parts, textAreaCaret[Message](focusOwner, caretID, hasCaretID))
 			cursorVisible = false
 		}
 		if start == end {
@@ -686,7 +714,7 @@ func textAreaLineContent[Message any](
 		parts = append(parts, tui.StyledText[Message](state.value[start:end], partStyle))
 	}
 	if cursorVisible && state.cursor == line.end {
-		parts = append(parts, textAreaCaret[Message](cursorStyle, caretID, hasCaretID))
+		parts = append(parts, textAreaCaret[Message](focusOwner, caretID, hasCaretID))
 	}
 	if len(parts) == 0 {
 		return tui.StyledText[Message]("", normalStyle)
@@ -694,8 +722,8 @@ func textAreaLineContent[Message any](
 	return tui.Row(parts...)
 }
 
-func textAreaCaret[Message any](style vt.Style, id tui.NodeID, hasID bool) tui.Node[Message] {
-	caret := tui.StyledText[Message]("▏", style)
+func textAreaCaret[Message any](focusOwner, id tui.NodeID, hasID bool) tui.Node[Message] {
+	caret := tui.CursorAnchor[Message](focusOwner)
 	if hasID {
 		caret = caret.WithID(id)
 	}
@@ -722,7 +750,7 @@ func compactTextAreaBoundaries(boundaries []int) []int {
 	return output
 }
 
-func textAreaVisibleStart(line string, offset int) int {
+func textAreaVisibleStart(line string, offset int, profile celltext.WidthProfile) int {
 	if offset <= 0 {
 		return 0
 	}
@@ -732,7 +760,7 @@ func textAreaVisibleStart(line string, offset int) int {
 		if cells >= offset {
 			return grapheme.Start
 		}
-		cells += celltext.GraphemeWidth(grapheme.Text, celltext.ModernWidth())
+		cells += celltext.GraphemeWidth(grapheme.Text, profile)
 	}
 	return len(line)
 }
@@ -813,9 +841,9 @@ func applyTextAreaEdit(state TextAreaState, edit textAreaEdit, inserted string) 
 	case textAreaRight:
 		return applyTextAreaMovement(state, edit, false)
 	case textAreaUp:
-		return applyVerticalTextAreaMovement(state, false, false, 0, false)
+		return applyVerticalTextAreaMovement(state, false, false, 0, false, celltext.ModernWidth())
 	case textAreaDown:
-		return applyVerticalTextAreaMovement(state, true, false, 0, false)
+		return applyVerticalTextAreaMovement(state, true, false, 0, false, celltext.ModernWidth())
 	case textAreaHome:
 		return applyTextAreaMovement(state, edit, false)
 	case textAreaEnd:
@@ -889,9 +917,10 @@ func applyVerticalTextAreaMovement(
 	extend bool,
 	wrapWidth int,
 	hasWrap bool,
+	profile celltext.WidthProfile,
 ) TextAreaState {
 	state = normalizeTextAreaState(state)
-	lines := textAreaVisualLineRanges(state.value, wrapWidth, hasWrap)
+	lines := textAreaVisualLineRanges(state.value, wrapWidth, hasWrap, profile)
 	current := textAreaVisualLineIndex(lines, state.cursor)
 	target := max(current-1, 0)
 	if down {
@@ -907,14 +936,14 @@ func applyVerticalTextAreaMovement(
 		preferred, ok = celltext.CellAtByte(
 			currentLine,
 			state.cursor-lines[current].start,
-			celltext.ModernWidth(),
+			profile,
 		)
 		if !ok {
 			preferred = 0
 		}
 	}
 	targetLine := state.value[lines[target].start:lines[target].end]
-	relative := len(celltext.Truncate(targetLine, preferred, celltext.ModernWidth()))
+	relative := len(celltext.Truncate(targetLine, preferred, profile))
 	return textAreaMovedState(
 		state,
 		lines[target].start+relative,
@@ -971,7 +1000,7 @@ func currentTextAreaLine(value string, cursor int) textAreaRange {
 	return textAreaRange{start: len(value), end: len(value)}
 }
 
-func textAreaVisualLineRanges(value string, wrapWidth int, hasWrap bool) []textAreaRange {
+func textAreaVisualLineRanges(value string, wrapWidth int, hasWrap bool, profile celltext.WidthProfile) []textAreaRange {
 	logicalLines := textAreaLineRanges(value)
 	if !hasWrap {
 		return logicalLines
@@ -988,7 +1017,7 @@ func textAreaVisualLineRanges(value string, wrapWidth int, hasWrap bool) []textA
 		graphemes := celltext.IterateGraphemes(value[logical.start:logical.end])
 		for grapheme, ok := graphemes.Next(); ok; grapheme, ok = graphemes.Next() {
 			graphemeStart := logical.start + grapheme.Start
-			width := celltext.GraphemeWidth(grapheme.Text, celltext.ModernWidth())
+			width := celltext.GraphemeWidth(grapheme.Text, profile)
 			next := cells + width
 			if width != 0 && graphemeStart != start && next > wrapWidth {
 				visualLines = append(visualLines, textAreaRange{start: start, end: graphemeStart})
@@ -1003,9 +1032,25 @@ func textAreaVisualLineRanges(value string, wrapWidth int, hasWrap bool) []textA
 	return visualLines
 }
 
-func textAreaVisualLineCount(state TextAreaState, wrapWidth int, hasWrap bool) int {
+func textAreaCursorWraps(
+	state TextAreaState,
+	line textAreaRange,
+	wrapWidth int,
+	hasWrap bool,
+	profile celltext.WidthProfile,
+) bool {
+	return hasWrap && state.cursor == line.end && line.start != line.end &&
+		celltext.Width(state.value[line.start:line.end], profile) == max(wrapWidth, 1)
+}
+
+func textAreaVisualLineCount(state TextAreaState, wrapWidth int, hasWrap bool, profile celltext.WidthProfile) int {
 	state = normalizeTextAreaState(state)
-	return len(textAreaVisualLineRanges(state.value, wrapWidth, hasWrap))
+	lines := textAreaVisualLineRanges(state.value, wrapWidth, hasWrap, profile)
+	count := len(lines)
+	if textAreaCursorWraps(state, lines[textAreaVisualLineIndex(lines, state.cursor)], wrapWidth, hasWrap, profile) {
+		count++
+	}
+	return count
 }
 
 func textAreaVisualLineIndex(lines []textAreaRange, cursor int) int {
@@ -1024,9 +1069,10 @@ func textAreaVisualLineDirections(
 	state TextAreaState,
 	wrapWidth int,
 	hasWrap bool,
+	profile celltext.WidthProfile,
 ) (bool, bool) {
 	state = normalizeTextAreaState(state)
-	lines := textAreaVisualLineRanges(state.value, wrapWidth, hasWrap)
+	lines := textAreaVisualLineRanges(state.value, wrapWidth, hasWrap, profile)
 	current := textAreaVisualLineIndex(lines, state.cursor)
 	return current > 0, current+1 < len(lines)
 }

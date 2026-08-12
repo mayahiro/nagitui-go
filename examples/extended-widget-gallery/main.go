@@ -145,8 +145,7 @@ func (a *gallery) View(viewContext tui.ViewContext) tui.Node[message] {
 		a.page,
 		func(index int) message { return message{kind: "page", index: index} },
 	).Node().WithLength(tui.Fixed(1))
-	composerWidth := max(int(viewContext.Size.Width)-4, 1)
-	page := a.inputsPage(composerWidth)
+	page := a.inputsPage(viewContext)
 	if a.page == 1 {
 		page = a.dataPage()
 	} else if a.page >= 2 {
@@ -181,12 +180,14 @@ func (a *gallery) View(viewContext tui.ViewContext) tui.Node[message] {
 	).Title(tui.StyledText[message]("Generic dialog", vt.Style{Bold: true})).
 		DefaultAction(tui.NewNodeID("dialog-cancel")).
 		CancelAction(tui.NewNodeID("dialog-cancel")).
+		WidthProfile(viewContext.WidthProfile).
 		ActionWrapWidth(max(viewContext.Size.Width, 5) - 4).
 		Node()
 	return tui.Stack(content, dialog)
 }
 
-func (a *gallery) inputsPage(composerWidth int) tui.Node[message] {
+func (a *gallery) inputsPage(viewContext tui.ViewContext) tui.Node[message] {
+	composerWidth := max(int(viewContext.Size.Width)-4, 1)
 	composerValid := strings.TrimSpace(a.composer.TextArea().Value()) != ""
 	composer := widget.NewComposer(
 		tui.NewNodeID("composer"),
@@ -198,6 +199,7 @@ func (a *gallery) inputsPage(composerWidth int) tui.Node[message] {
 		},
 		func() message { return message{kind: "submit-composer"} },
 	).Placeholder("Enter a message").
+		WidthProfile(viewContext.WidthProfile).
 		SoftWrap(composerWidth).
 		Rows(1, 3).
 		History(a.history).
@@ -226,7 +228,7 @@ func (a *gallery) inputsPage(composerWidth int) tui.Node[message] {
 		tui.Border(
 			widget.NewTextArea(tui.NewNodeID("notes"), a.notes, func(state widget.TextAreaState) message {
 				return message{kind: "notes", textArea: state}
-			}).Placeholder("Enter notes").Node(),
+			}).Placeholder("Enter notes").WidthProfile(viewContext.WidthProfile).Node(),
 			vt.Style{},
 		),
 		tui.Text[message]("Composer: Enter submits, Shift-Enter inserts a line"),

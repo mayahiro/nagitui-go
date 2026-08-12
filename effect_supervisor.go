@@ -112,6 +112,7 @@ type runtimeCommand struct {
 }
 
 type effectSupervisor[Message any] struct {
+	parent           context.Context
 	taskLimit        int
 	wake             runtimeWake
 	outcomes         chan effectTaskOutcome[Message]
@@ -126,6 +127,7 @@ type effectSupervisor[Message any] struct {
 	barriers         map[uint64]*effectBarrier
 	ready            []Message
 	commands         []runtimeCommand
+	notices          *runtimeNoticeQueue
 	nextIdentifier   uint64
 	nextOrder        uint64
 	diagnostics      EffectDiagnostics
@@ -133,7 +135,12 @@ type effectSupervisor[Message any] struct {
 }
 
 func newEffectSupervisor[Message any](taskLimit int) *effectSupervisor[Message] {
+	return newEffectSupervisorContext[Message](context.Background(), taskLimit)
+}
+
+func newEffectSupervisorContext[Message any](parent context.Context, taskLimit int) *effectSupervisor[Message] {
 	return &effectSupervisor[Message]{
+		parent:           parent,
 		taskLimit:        taskLimit,
 		outcomes:         make(chan effectTaskOutcome[Message], taskLimit),
 		tasks:            make(map[uint64]*effectTaskState[Message]),
@@ -330,7 +337,7 @@ func (s *effectSupervisor[Message]) startTask(
 	now Timestamp,
 ) uint64 {
 	id := s.identifier()
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(s.parent)
 	s.tasks[id] = &effectTaskState[Message]{
 		task:            task,
 		status:          effectTaskPending,
@@ -402,6 +409,12 @@ func (s *effectSupervisor[Message]) finishTask(outcome effectTaskOutcome[Message
 	}
 	if outcome.panicked {
 		s.diagnostics.taskPanics = saturatingAdd64(s.diagnostics.taskPanics, 1)
+		s.notices.push(effectRuntimeNotice(
+			RuntimeNoticeEffectPanicked,
+			state.latestKey,
+			state.latest.generation,
+			state.hasLatest,
+		))
 	} else if !state.cancelled && latestMatches {
 		s.ready = append(s.ready, outcome.message)
 	} else {

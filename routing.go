@@ -159,14 +159,15 @@ func (k interactiveKind) isScrollViewport() bool {
 }
 
 type nodeRecord struct {
-	id         NodeID
-	parent     NodeID
-	hasParent  bool
-	rect       Rect
-	clip       Rect
-	focusable  bool
-	hasHandler bool
-	kind       interactiveKind
+	id              NodeID
+	parent          NodeID
+	hasParent       bool
+	rect            Rect
+	clip            Rect
+	focusable       bool
+	hasHandler      bool
+	blocksUnhandled bool
+	kind            interactiveKind
 }
 
 type treeIndex struct {

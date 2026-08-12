@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	celltext "github.com/mayahiro/nagi-go/text"
 	"github.com/mayahiro/nagi-go/vt"
 	"github.com/mayahiro/nagitui-go/surface"
 )
@@ -24,6 +25,157 @@ type runtimeMessage struct {
 type counterApp struct {
 	value   uint32
 	updates []uint32
+}
+
+type runtimeWidthProfileApp struct {
+	observed int
+}
+
+func (*runtimeWidthProfileApp) Init() Effect[runtimeMessage] {
+	return NoneEffect[runtimeMessage]()
+}
+
+func (*runtimeWidthProfileApp) Update(runtimeMessage) Effect[runtimeMessage] {
+	return NoneEffect[runtimeMessage]()
+}
+
+func (a *runtimeWidthProfileApp) View(context ViewContext) Node[runtimeMessage] {
+	a.observed = celltext.Width("·", context.WidthProfile)
+	return Border(Text[runtimeMessage]("·X"), vt.Style{})
+}
+
+func (*runtimeWidthProfileApp) Subscriptions() Subscription[runtimeMessage] {
+	return NoneSubscription[runtimeMessage]()
+}
+
+func TestRuntimeWidthProfileControlsContextLayoutAndFallbackGlyphs(t *testing.T) {
+	app := &runtimeWidthProfileApp{}
+	config := NewRuntimeConfig(Size{Width: 4, Height: 3})
+	config.WidthProfile = celltext.CJKWidth()
+	runtimeUnderTest, err := NewRuntimeWithClock[runtimeMessage](app, config, NewVirtualClock())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtimeUnderTest.Close()
+	frame, err := runtimeUnderTest.RenderIfDirty()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if frame == nil {
+		t.Fatal("runtime did not render")
+	}
+	if app.observed != 2 {
+		t.Fatalf("ViewContext ambiguous width = %d, want 2", app.observed)
+	}
+	surface := frame.Surface()
+	assertNodeCell(t, surface, 0, 0, "+")
+	assertNodeCell(t, surface, 1, 1, "·")
+	continuation, _ := surface.Cell(2, 1)
+	if !continuation.Continuation() {
+		t.Fatal("ambiguous CJK grapheme did not occupy two cells")
+	}
+}
+
+type runtimeContextKey struct{}
+
+type runtimeContextObservation struct {
+	value       string
+	deadline    time.Time
+	hasDeadline bool
+}
+
+type runtimeContextApp struct {
+	effectStarted chan runtimeContextObservation
+	streamStarted chan runtimeContextObservation
+	effectCause   chan error
+	streamCause   chan error
+}
+
+func observeRuntimeContext(ctx context.Context) runtimeContextObservation {
+	value, _ := ctx.Value(runtimeContextKey{}).(string)
+	deadline, hasDeadline := ctx.Deadline()
+	return runtimeContextObservation{value: value, deadline: deadline, hasDeadline: hasDeadline}
+}
+
+func (a *runtimeContextApp) Init() Effect[runtimeMessage] {
+	return RunEffect(func(ctx context.Context) runtimeMessage {
+		a.effectStarted <- observeRuntimeContext(ctx)
+		<-ctx.Done()
+		a.effectCause <- context.Cause(ctx)
+		return runtimeMessage{}
+	})
+}
+
+func (a *runtimeContextApp) Update(runtimeMessage) Effect[runtimeMessage] {
+	return NoneEffect[runtimeMessage]()
+}
+
+func (a *runtimeContextApp) View(ViewContext) Node[runtimeMessage] {
+	return Text[runtimeMessage]("")
+}
+
+func (a *runtimeContextApp) Subscriptions() Subscription[runtimeMessage] {
+	return StreamSubscription("context", ReliableDelivery(), func(ctx context.Context, _ SubscriptionSink[runtimeMessage]) {
+		a.streamStarted <- observeRuntimeContext(ctx)
+		<-ctx.Done()
+		a.streamCause <- context.Cause(ctx)
+	})
+}
+
+func TestRuntimeContextPropagatesToEffectsAndSubscriptions(t *testing.T) {
+	deadline := time.Now().Add(time.Minute)
+	valueContext := context.WithValue(context.Background(), runtimeContextKey{}, "trace-value")
+	deadlineContext, stopDeadline := context.WithDeadline(valueContext, deadline)
+	defer stopDeadline()
+	parent, cancel := context.WithCancelCause(deadlineContext)
+
+	app := &runtimeContextApp{
+		effectStarted: make(chan runtimeContextObservation, 1),
+		streamStarted: make(chan runtimeContextObservation, 1),
+		effectCause:   make(chan error, 1),
+		streamCause:   make(chan error, 1),
+	}
+	runtime, err := NewRuntimeWithClockContext(parent, app, NewRuntimeConfig(Size{Width: 1, Height: 1}), NewVirtualClock())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+
+	for name, started := range map[string]<-chan runtimeContextObservation{
+		"effect":       app.effectStarted,
+		"subscription": app.streamStarted,
+	} {
+		select {
+		case observation := <-started:
+			if observation.value != "trace-value" || !observation.hasDeadline || !observation.deadline.Equal(deadline) {
+				t.Fatalf("%s context = %+v", name, observation)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for %s context", name)
+		}
+	}
+
+	cause := errors.New("runtime parent stopped")
+	cancel(cause)
+	for name, observed := range map[string]<-chan error{
+		"effect":       app.effectCause,
+		"subscription": app.streamCause,
+	} {
+		select {
+		case actual := <-observed:
+			if !errors.Is(actual, cause) {
+				t.Fatalf("%s cause = %v, want %v", name, actual, cause)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for %s cancellation", name)
+		}
+	}
+}
+
+func TestNewRuntimeContextRejectsNilParent(t *testing.T) {
+	if _, err := NewRuntimeContext[runtimeMessage](nil, &counterApp{}, Size{}); err == nil {
+		t.Fatal("NewRuntimeContext accepted nil parent")
+	}
 }
 
 func (a *counterApp) Init() Effect[runtimeMessage] {
@@ -715,6 +867,7 @@ func TestRuntimeFocusFallbackAndAncestorRouting(t *testing.T) {
 
 type modalApp struct {
 	visits []string
+	hard   bool
 }
 
 func (*modalApp) Init() Effect[focusMessage] { return NoneEffect[focusMessage]() }
@@ -725,7 +878,7 @@ func (a *modalApp) Update(message focusMessage) Effect[focusMessage] {
 	a.visits = append(a.visits, message.visit)
 	return NoneEffect[focusMessage]()
 }
-func (*modalApp) View(_ ViewContext) Node[focusMessage] {
+func (a *modalApp) View(_ ViewContext) Node[focusMessage] {
 	background := Text[focusMessage]("background").Focusable("background").OnEvent("background", func(vt.Event) EventResult[focusMessage] {
 		return IgnoreResult[focusMessage]().Emit(focusMessage{visit: "background"})
 	})
@@ -735,9 +888,40 @@ func (*modalApp) View(_ ViewContext) Node[focusMessage] {
 	modal := Modal("modal", input).OnEvent("modal", func(vt.Event) EventResult[focusMessage] {
 		return IgnoreResult[focusMessage]().Emit(focusMessage{visit: "modal"})
 	})
+	if a.hard {
+		modal = modal.BlockUnhandledEvents()
+	}
 	return Stack(background, modal).OnEvent("root", func(vt.Event) EventResult[focusMessage] {
 		return MessageResult(focusMessage{visit: "root"})
 	})
+}
+
+func TestRuntimeEventBoundaryStopsUnhandledEventAtModal(t *testing.T) {
+	app := &modalApp{hard: true}
+	runtime, err := NewRuntimeWithClock[focusMessage](app, NewRuntimeConfig(Size{Width: 12, Height: 1}), NewVirtualClock())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.RenderIfDirty(); err != nil {
+		t.Fatal(err)
+	}
+	if focused, err := runtime.RequestFocus("input"); err != nil || !focused {
+		t.Fatalf("RequestFocus(input) = %t, %v", focused, err)
+	}
+
+	routed, err := runtime.DispatchEvent(vt.Event{Kind: vt.EventKey, Key: vt.KeyEvent{Code: vt.KeyRight}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !routed.Consumed() || routed.Messages() != 2 {
+		t.Fatalf("dispatch = %+v", routed)
+	}
+	if _, err := runtime.Step(); err != nil {
+		t.Fatal(err)
+	}
+	if len(app.visits) != 2 || app.visits[0] != "input" || app.visits[1] != "modal" {
+		t.Fatalf("visits = %v", app.visits)
+	}
 }
 
 func TestRuntimeModalRestrictsFocusAndRoutesThroughModalAncestors(t *testing.T) {

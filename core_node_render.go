@@ -6,7 +6,7 @@ import (
 	"github.com/mayahiro/nagitui-go/surface"
 )
 
-func renderSurfaceNode(target *surface.Surface, rect, clip Rect, source *surface.Surface) {
+func renderSurfaceNode(target *surface.Surface, rect, clip Rect, source *surface.Surface, profile celltext.WidthProfile) {
 	if source == nil || rect.Empty() {
 		return
 	}
@@ -34,7 +34,10 @@ func renderSurfaceNode(target *surface.Surface, rect, clip Rect, source *surface
 				}
 				continue
 			}
-			target.Write(targetX, targetY, cell.Content(), cell.Style(), celltext.ModernWidth())
+			if celltext.GraphemeWidth(cell.Content(), profile) != int(span) {
+				continue
+			}
+			target.Write(targetX, targetY, cell.Content(), cell.Style(), profile)
 		}
 	}
 	if cursor, ok := source.Cursor(); ok {
@@ -54,23 +57,24 @@ func renderPanel[Message any](
 	title string,
 	options PanelOptions,
 	interaction *InteractionState,
+	profile celltext.WidthProfile,
 ) {
 	if rect.Empty() {
 		return
 	}
 	background := rect.Intersection(clip)
 	target.Fill(background.X, background.Y, background.Width, background.Height, options.Style.Background)
-	renderBorderWithGlyphs(target, rect, clip, options.Style.Border, glyphsForBorder(options.Border))
-	renderPanelTitle(target, rect, clip, title, options.Style.Title)
+	renderBorderWithGlyphs(target, rect, clip, options.Style.Border, profileAwareBorderGlyphs(glyphsForBorder(options.Border), profile), profile)
+	renderPanelTitle(target, rect, clip, title, options.Style.Title, profile)
 	insets := panelContentInsets(options)
-	child.render(target, insetRect(rect, insets.Left, insets.Top, insets.Right, insets.Bottom), clip, interaction)
+	child.render(target, insetRect(rect, insets.Left, insets.Top, insets.Right, insets.Bottom), clip, interaction, profile)
 }
 
-func renderPanelTitle(target *surface.Surface, rect, clip Rect, title string, style vt.Style) {
+func renderPanelTitle(target *surface.Surface, rect, clip Rect, title string, style vt.Style, profile celltext.WidthProfile) {
 	if title == "" || rect.Width < 4 {
 		return
 	}
-	content := " " + celltext.Truncate(title, int(rect.Width-4), celltext.ModernWidth()) + " "
+	content := " " + celltext.Truncate(title, int(rect.Width-4), profile) + " "
 	x := saturatingCoordinate(rect.X, 1)
-	renderSingleLine(target, Rect{X: x, Y: rect.Y, Width: rect.Width - 2, Height: 1}, clip, content, style)
+	renderSingleLine(target, Rect{X: x, Y: rect.Y, Width: rect.Width - 2, Height: 1}, clip, content, style, profile)
 }
