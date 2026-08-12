@@ -31,13 +31,17 @@ const (
 	logMessage messageKind = iota
 	sourceMessage
 	rowMessage
+	resizeMessage
 	toggleMessage
+	toggleDetailsMessage
+	dismissDetailsMessage
 )
 
 type message struct {
 	kind     messageKind
 	sequence uint64
 	index    int
+	panes    widget.SplitPaneState
 }
 
 type logViewer struct {
@@ -46,10 +50,12 @@ type logViewer struct {
 	row      int
 	sequence atomic.Uint64
 	logs     []logEntry
+	panes    widget.SplitPaneState
+	details  bool
 }
 
 func newLogViewer() *logViewer {
-	viewer := &logViewer{}
+	viewer := &logViewer{panes: widget.NewSplitPaneState(2_500)}
 	for sequence := uint64(1); sequence <= 5; sequence++ {
 		viewer.logs = append(viewer.logs, generatedLog(sequence))
 	}
@@ -75,8 +81,14 @@ func (a *logViewer) Update(received message) tui.Effect[message] {
 		a.row = 0
 	case rowMessage:
 		a.row = received.index
+	case resizeMessage:
+		a.panes = received.panes
 	case toggleMessage:
 		a.paused = !a.paused
+	case toggleDetailsMessage:
+		a.details = !a.details
+	case dismissDetailsMessage:
+		a.details = false
 	}
 	return tui.NoneEffect[message]()
 }
@@ -143,26 +155,47 @@ func (a *logViewer) View(context tui.ViewContext) tui.Node[message] {
 		status = "PAUSED"
 	}
 
-	return tui.Column(
+	panes := widget.NewSplitPane(
+		tui.NewNodeID("log-panes"),
+		tui.Panel(sourceList, "Sources"),
+		tui.Panel(table, "Events"),
+		a.panes,
+	).Minimums(18, 30).
+		Collapse(tui.SplitPaneCollapsePrimary).
+		FocusTargets(tui.NewNodeID("sources"), tui.NewNodeID("logs")).
+		OnResize(func(state widget.SplitPaneState) message {
+			return message{kind: resizeMessage, panes: state}
+		}).Node().WithLength(tui.Flex(1))
+
+	base := tui.Column(
 		tui.StyledText[message](
 			fmt.Sprintf("Multi-pane log viewer  %s  buffered: %d", status, len(a.logs)),
 			vt.Style{Bold: true},
 		).WithLength(tui.Fixed(1)),
-		tui.Row(
-			tui.Panel(sourceList, "Sources").WithLength(tui.Fixed(22)),
-			tui.Panel(table, "Events").WithLength(tui.Flex(1)),
-		).WithLength(tui.Flex(1)),
-		tui.Panel(tui.Paragraph[message](
-			[]tui.TextSpan{tui.NewTextSpan(detail, vt.Style{})},
-			tui.DefaultParagraphOptions(),
-		), "Details").WithLength(tui.Fixed(5)),
+		panes,
 		widget.NewHelp[message]([]widget.HelpBinding{
-			widget.NewHelpBinding("Tab", "pane focus"),
+			widget.NewHelpBinding("F6", "pane focus"),
+			widget.NewHelpBinding("Alt+Left/Right", "resize"),
 			widget.NewHelpBinding("Up/Down", "select"),
 			widget.NewHelpBinding("p", "pause"),
+			widget.NewHelpBinding("d", "details"),
 			widget.NewHelpBinding("Esc", "exit"),
 		}).WidthProfile(context.WidthProfile).Node().WithLength(tui.Fixed(1)),
 	)
+	return widget.NewDrawer(tui.NewNodeID("details-drawer"), base, a.details).
+		Side(widget.DrawerBottom).
+		Size(tui.Fixed(5)).
+		Body(func() tui.Node[message] {
+			return tui.Column(
+				tui.StyledText[message]("Details", vt.Style{Bold: true}),
+				tui.Paragraph[message](
+					[]tui.TextSpan{tui.NewTextSpan(detail, vt.Style{})},
+					tui.DefaultParagraphOptions(),
+				),
+			)
+		}).
+		OnDismiss(func() message { return message{kind: dismissDetailsMessage} }).
+		Node()
 }
 
 func (a *logViewer) filteredLogs() []logEntry {
@@ -202,6 +235,9 @@ func mapEvent(event vt.Event) tui.EventAction[message] {
 	if isPauseToggle(event) {
 		return tui.MessageAction(message{kind: toggleMessage})
 	}
+	if isDetailsToggle(event) {
+		return tui.MessageAction(message{kind: toggleDetailsMessage})
+	}
 	switch {
 	case event.Kind == vt.EventKey && event.Key.Code == vt.KeyEscape:
 		return tui.ExitAction[message]()
@@ -210,6 +246,18 @@ func mapEvent(event vt.Event) tui.EventAction[message] {
 	default:
 		return tui.IgnoreAction[message]()
 	}
+}
+
+func isDetailsToggle(event vt.Event) bool {
+	if event.Kind == vt.EventText {
+		return event.Text == "d" || event.Text == "D"
+	}
+	if event.Kind != vt.EventKey || event.Key.Action == vt.KeyRelease || event.Key.Code != vt.KeyCharacter {
+		return false
+	}
+	modifiers := event.Key.Modifiers
+	return !modifiers.Alt && !modifiers.Control && !modifiers.Meta &&
+		(event.Key.Character == 'd' || event.Key.Character == 'D')
 }
 
 func isPauseToggle(event vt.Event) bool {
@@ -228,7 +276,7 @@ func run() error {
 	options := tui.DefaultTerminalOptions()
 	options.MinimumFrameInterval = 33 * time.Millisecond
 	options.FocusFirst = true
-	mouseTracking := vt.MouseTrackingPress
+	mouseTracking := vt.MouseTrackingButton
 	options.MouseTracking = &mouseTracking
 	return tui.RunTerminal[message](newLogViewer(), options, mapEvent)
 }

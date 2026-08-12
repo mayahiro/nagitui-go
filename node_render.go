@@ -27,6 +27,8 @@ func (n Node[Message]) render(target *surface.Surface, rect, clip Rect, interact
 		renderLinear(target, rect, clip, n.children, n.resolvedLinearLayout(rect, true, profile), interaction, profile)
 	case nodeColumn:
 		renderLinear(target, rect, clip, n.children, n.resolvedLinearLayout(rect, false, profile), interaction, profile)
+	case nodeSplitPane:
+		renderSplitPane(target, rect, clip, n.children, n.split, interaction, profile)
 	case nodeStack:
 		for _, child := range n.children {
 			child.render(target, rect, clip, interaction, profile)
@@ -95,6 +97,37 @@ func (n Node[Message]) render(target *surface.Surface, rect, clip Rect, interact
 	if focused, ok := interaction.Focused(); ok && n.hasID && focused == n.id && n.hasFocusedStyle {
 		overlay := rect.Intersection(clip)
 		mergeNodeStyle(target, overlay, n.focusedStyle)
+	}
+}
+
+func renderSplitPane[Message any](
+	target *surface.Surface,
+	rect, clip Rect,
+	panes []Node[Message],
+	options SplitPaneOptions,
+	interaction *InteractionState,
+	profile celltext.WidthProfile,
+) {
+	layout := resolveSplitPaneLayout(rect, options)
+	if !layout.hasCollapsed || layout.collapsed != SplitPaneCollapsePrimary {
+		panes[0].render(target, layout.primary, clip, interaction, profile)
+	}
+	if layout.hasDivider {
+		glyphs := profileAwareBorderGlyphs(glyphsForBorder(BorderSingle), profile)
+		if normalizedSplitPaneAxis(options.Axis) == SplitPaneVertical {
+			end := int64(layout.divider.X) + int64(layout.divider.Width)
+			for x := int64(layout.divider.X); x < end; x++ {
+				writeBorderCell(target, clip, x, int64(layout.divider.Y), glyphs.horizontal, options.DividerStyle, profile)
+			}
+		} else {
+			end := int64(layout.divider.Y) + int64(layout.divider.Height)
+			for y := int64(layout.divider.Y); y < end; y++ {
+				writeBorderCell(target, clip, int64(layout.divider.X), y, glyphs.vertical, options.DividerStyle, profile)
+			}
+		}
+	}
+	if !layout.hasCollapsed || layout.collapsed != SplitPaneCollapseSecondary {
+		panes[1].render(target, layout.secondary, clip, interaction, profile)
 	}
 }
 

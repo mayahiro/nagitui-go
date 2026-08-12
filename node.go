@@ -272,6 +272,7 @@ type Node[Message any] struct {
 	style            vt.Style
 	spans            []TextSpan
 	paragraph        ParagraphOptions
+	split            SplitPaneOptions
 	richTextCache    *richTextLayoutCache
 	payload          *nodePayload[Message]
 	intrinsicSize    Size
@@ -313,6 +314,7 @@ const (
 	nodeTextInput
 	nodeRow
 	nodeColumn
+	nodeSplitPane
 	nodeStack
 	nodeAnchoredOverlay
 	nodePadding
@@ -425,6 +427,16 @@ func Row[Message any](children ...Node[Message]) Node[Message] {
 // mutate that slice after construction.
 func Column[Message any](children ...Node[Message]) Node[Message] {
 	return Node[Message]{kind: nodeColumn, children: children, linearCache: &linearLayoutCache{}}
+}
+
+// SplitPane returns a responsive two-pane container with a one-Cell divider
+//
+// Both supplied Nodes are eager, but only panes present in the resolved layout
+// participate in preparation, semantic indexing, hit testing, and rendering
+// The configured collapse pane is omitted when the assigned main-axis extent
+// cannot satisfy both normalized minima plus the divider
+func SplitPane[Message any](primary, secondary Node[Message], options SplitPaneOptions) Node[Message] {
+	return Node[Message]{kind: nodeSplitPane, children: []Node[Message]{primary, secondary}, split: options}
 }
 
 // Stack returns a front-to-back overlay container
@@ -829,6 +841,8 @@ func (n Node[Message]) measure(constraints layoutConstraints, profile celltext.W
 		measured = measureLinear(n.children, constraints, true, profile)
 	case nodeColumn:
 		measured = measureLinear(n.children, constraints, false, profile)
+	case nodeSplitPane:
+		measured = measureSplitPane(n.children[0], n.children[1], constraints, n.split, profile)
 	case nodeStack:
 		for _, child := range n.children {
 			childSize := child.measure(constraints, profile)
@@ -866,6 +880,33 @@ func (n Node[Message]) measure(constraints layoutConstraints, profile celltext.W
 		panic("nagi-tui: invalid node kind")
 	}
 	return clampNodeSize(measured, constraints)
+}
+
+func measureSplitPane[Message any](
+	primary, secondary Node[Message],
+	constraints layoutConstraints,
+	options SplitPaneOptions,
+	profile celltext.WidthProfile,
+) Size {
+	childConstraints := constraints
+	axis := normalizedSplitPaneAxis(options.Axis)
+	if axis == SplitPaneVertical {
+		childConstraints.height = layoutLimit{}
+	} else {
+		childConstraints.width = layoutLimit{}
+	}
+	primarySize := primary.measure(childConstraints, profile)
+	secondarySize := secondary.measure(childConstraints, profile)
+	if axis == SplitPaneVertical {
+		return Size{
+			Width:  max(primarySize.Width, secondarySize.Width),
+			Height: saturatingAdd32(saturatingAdd32(primarySize.Height, 1), secondarySize.Height),
+		}
+	}
+	return Size{
+		Width:  saturatingAdd32(saturatingAdd32(primarySize.Width, 1), secondarySize.Width),
+		Height: max(primarySize.Height, secondarySize.Height),
+	}
 }
 
 func measureText(content string, constraints layoutConstraints, profile celltext.WidthProfile) Size {

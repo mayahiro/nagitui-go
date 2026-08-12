@@ -102,7 +102,7 @@ func (n *Node[Message]) find(id NodeID) *Node[Message] {
 		return n
 	}
 	switch n.kind {
-	case nodeRow, nodeColumn, nodeStack:
+	case nodeRow, nodeColumn, nodeSplitPane, nodeStack:
 		for index := range n.children {
 			if found := n.children[index].find(id); found != nil {
 				return found
@@ -153,6 +153,20 @@ func (n *Node[Message]) findNodeGeometry(
 				return foundRect, foundClip, true
 			}
 			offset = saturatingAdd32(offset, layout.allocation(index))
+		}
+	case nodeSplitPane:
+		layout := resolveSplitPaneLayout(rect, n.split)
+		if !layout.hasCollapsed || layout.collapsed != SplitPaneCollapsePrimary {
+			if foundRect, foundClip, ok := n.children[0].findNodeGeometry(
+				id, layout.primary, clip, interaction, profile,
+			); ok {
+				return foundRect, foundClip, true
+			}
+		}
+		if !layout.hasCollapsed || layout.collapsed != SplitPaneCollapseSecondary {
+			return n.children[1].findNodeGeometry(
+				id, layout.secondary, clip, interaction, profile,
+			)
 		}
 	case nodeStack:
 		for index := range n.children {
@@ -321,6 +335,24 @@ func (n *Node[Message]) buildIndex(
 			}
 			offset = saturatingAdd32(offset, layout.allocation(childIndex))
 		}
+	case nodeSplitPane:
+		layout := resolveSplitPaneLayout(rect, n.split)
+		if !layout.hasCollapsed || layout.collapsed != SplitPaneCollapsePrimary {
+			if err := n.children[0].buildIndex(
+				layout.primary, clip, childParent, hasChildParent, false,
+				focusFallback, hasFocusFallback, interaction, tree, actions, profile,
+			); err != nil {
+				return err
+			}
+		}
+		if !layout.hasCollapsed || layout.collapsed != SplitPaneCollapseSecondary {
+			if err := n.children[1].buildIndex(
+				layout.secondary, clip, childParent, hasChildParent, false,
+				focusFallback, hasFocusFallback, interaction, tree, actions, profile,
+			); err != nil {
+				return err
+			}
+		}
 	case nodeStack:
 		for child := range n.children {
 			if err := n.children[child].buildIndex(rect, clip, childParent, hasChildParent, false, focusFallback, hasFocusFallback, interaction, tree, actions, profile); err != nil {
@@ -433,6 +465,14 @@ func (n *Node[Message]) prepareVirtualFlowsAt(rect Rect, interaction *Interactio
 			childRect := layout.childRect(rect, horizontal, index, offset)
 			n.children[index].prepareVirtualFlowsAt(childRect, interaction, profile)
 			offset = saturatingAdd32(offset, layout.allocation(index))
+		}
+	case nodeSplitPane:
+		layout := resolveSplitPaneLayout(rect, n.split)
+		if !layout.hasCollapsed || layout.collapsed != SplitPaneCollapsePrimary {
+			n.children[0].prepareVirtualFlowsAt(layout.primary, interaction, profile)
+		}
+		if !layout.hasCollapsed || layout.collapsed != SplitPaneCollapseSecondary {
+			n.children[1].prepareVirtualFlowsAt(layout.secondary, interaction, profile)
 		}
 	case nodeStack:
 		for index := range n.children {
@@ -553,6 +593,14 @@ func (n *Node[Message]) prepareAt(rect Rect, interaction *InteractionState, prof
 			childRect := layout.childRect(rect, horizontal, index, offset)
 			changed = n.children[index].prepareAt(childRect, interaction, profile) || changed
 			offset = saturatingAdd32(offset, layout.allocation(index))
+		}
+	case nodeSplitPane:
+		layout := resolveSplitPaneLayout(rect, n.split)
+		if !layout.hasCollapsed || layout.collapsed != SplitPaneCollapsePrimary {
+			changed = n.children[0].prepareAt(layout.primary, interaction, profile) || changed
+		}
+		if !layout.hasCollapsed || layout.collapsed != SplitPaneCollapseSecondary {
+			changed = n.children[1].prepareAt(layout.secondary, interaction, profile) || changed
 		}
 	case nodeStack:
 		for index := range n.children {

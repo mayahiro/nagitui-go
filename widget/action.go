@@ -101,6 +101,18 @@ const SuggestionDismissActionID tui.ActionID = "nagi.suggestion.dismiss"
 // InspectorCopyActionID is the stable Action ID for copying the selected inspector value
 const InspectorCopyActionID tui.ActionID = "nagi.inspector.copy"
 
+// PaneFocusPreviousActionID is the stable Action ID for moving focus to the previous pane
+const PaneFocusPreviousActionID tui.ActionID = "nagi.pane.focus-previous"
+
+// PaneFocusNextActionID is the stable Action ID for moving focus to the next pane
+const PaneFocusNextActionID tui.ActionID = "nagi.pane.focus-next"
+
+// PaneResizePreviousActionID is the stable Action ID for moving a split divider toward its start
+const PaneResizePreviousActionID tui.ActionID = "nagi.pane.resize-previous"
+
+// PaneResizeNextActionID is the stable Action ID for moving a split divider toward its end
+const PaneResizeNextActionID tui.ActionID = "nagi.pane.resize-next"
+
 const (
 	activateActionLabel                 = "Activate"
 	selectionPreviousActionLabel        = "Previous"
