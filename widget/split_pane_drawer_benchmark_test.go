@@ -45,3 +45,31 @@ func BenchmarkDrawerOpenConstruction(b *testing.B) {
 		_ = drawer.Node()
 	}
 }
+
+func BenchmarkStatusBarThreeSlotConstruction(b *testing.B) {
+	b.ReportAllocs()
+	for b.Loop() {
+		bar := NewStatusBar([]StatusBarSlot[struct{}]{
+			NewStatusBarSlot(tui.Text[struct{}]("connected")).Priority(StatusBarHigh),
+			NewStatusBarSlot(tui.Text[struct{}]("running")).
+				Placement(tui.ResponsiveRowCenter).
+				Priority(StatusBarCritical),
+			NewStatusBarSlot(tui.Text[struct{}]("usage 42%")).Placement(tui.ResponsiveRowEnd),
+		})
+		_ = bar.Node()
+	}
+}
+
+func BenchmarkToastRegionEightRecordsThreeVisible(b *testing.B) {
+	b.ReportAllocs()
+	for b.Loop() {
+		toasts := make([]Toast[struct{}], 8)
+		for index := range toasts {
+			index := index
+			toasts[index] = NewToast(tui.NodeID("toast"), func() tui.Node[struct{}] {
+				return tui.Text[struct{}](string(rune('0' + index)))
+			}).Tone(ToastInfo)
+		}
+		_ = NewToastRegion(tui.Text[struct{}]("base"), toasts).VisibleLimit(3).Node()
+	}
+}

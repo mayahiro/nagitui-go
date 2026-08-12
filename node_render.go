@@ -27,12 +27,23 @@ func (n Node[Message]) render(target *surface.Surface, rect, clip Rect, interact
 		renderLinear(target, rect, clip, n.children, n.resolvedLinearLayout(rect, true, profile), interaction, profile)
 	case nodeColumn:
 		renderLinear(target, rect, clip, n.children, n.resolvedLinearLayout(rect, false, profile), interaction, profile)
+	case nodeResponsiveRow:
+		responsive := n.payload.responsive
+		layout := responsive.resolvedLayout(rect, profile)
+		for index, itemRect := range layout.slice() {
+			if itemRect.visible {
+				responsive.items[index].node.render(target, itemRect.rect, clip, interaction, profile)
+			}
+		}
 	case nodeSplitPane:
 		renderSplitPane(target, rect, clip, n.children, n.split, interaction, profile)
 	case nodeStack:
 		for _, child := range n.children {
 			child.render(target, rect, clip, interaction, profile)
 		}
+	case nodeOverlay:
+		n.children[0].render(target, rect, clip, interaction, profile)
+		n.children[1].render(target, rect, clip, interaction, profile)
 	case nodeAnchoredOverlay:
 		anchored := n.payload.anchored
 		anchored.base.render(target, rect, clip, interaction, profile)

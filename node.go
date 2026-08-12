@@ -224,6 +224,7 @@ type nodePayload[Message any] struct {
 	virtualBuilder func(VirtualViewport) VirtualFragment[Message]
 	virtualCache   virtualCacheState[Message]
 	virtualFlow    *virtualFlowNodePayload[Message]
+	responsive     *responsiveRowPayload[Message]
 	anchored       *anchoredOverlayPayload[Message]
 }
 
@@ -314,8 +315,10 @@ const (
 	nodeTextInput
 	nodeRow
 	nodeColumn
+	nodeResponsiveRow
 	nodeSplitPane
 	nodeStack
+	nodeOverlay
 	nodeAnchoredOverlay
 	nodePadding
 	nodeBorder
@@ -429,6 +432,25 @@ func Column[Message any](children ...Node[Message]) Node[Message] {
 	return Node[Message]{kind: nodeColumn, children: children, linearCache: &linearLayoutCache{}}
 }
 
+// ResponsiveRow returns a priority-aware three-region horizontal container
+//
+// Supplied item Nodes are eager. Items that do not fit the assigned width are
+// omitted from preparation, semantic indexing, hit testing, routing, and
+// rendering. Higher priorities are retained first and source order breaks
+// equal-priority ties. The returned node retains the supplied item slice;
+// callers must not mutate it after construction.
+func ResponsiveRow[Message any](
+	items []ResponsiveRowItem[Message],
+	options ResponsiveRowOptions,
+) Node[Message] {
+	return Node[Message]{
+		kind: nodeResponsiveRow,
+		payload: &nodePayload[Message]{responsive: &responsiveRowPayload[Message]{
+			items: items, options: options,
+		}},
+	}
+}
+
 // SplitPane returns a responsive two-pane container with a one-Cell divider
 //
 // Both supplied Nodes are eager, but only panes present in the resolved layout
@@ -445,6 +467,14 @@ func SplitPane[Message any](primary, secondary Node[Message], options SplitPaneO
 // mutate that slice after construction.
 func Stack[Message any](children ...Node[Message]) Node[Message] {
 	return Node[Message]{kind: nodeStack, children: children}
+}
+
+// Overlay places a front layer over a base without adding the layer to measurement
+//
+// Both children receive the complete assigned rectangle. The base is prepared,
+// indexed, and rendered first, so the layer is topmost for overlapping pointer hits.
+func Overlay[Message any](base, layer Node[Message]) Node[Message] {
+	return Node[Message]{kind: nodeOverlay, children: []Node[Message]{base, layer}}
 }
 
 // AnchoredOverlay places a front layer relative to an identified base descendant
@@ -841,6 +871,8 @@ func (n Node[Message]) measure(constraints layoutConstraints, profile celltext.W
 		measured = measureLinear(n.children, constraints, true, profile)
 	case nodeColumn:
 		measured = measureLinear(n.children, constraints, false, profile)
+	case nodeResponsiveRow:
+		measured = measureResponsiveRow(n.payload.responsive, constraints, profile)
 	case nodeSplitPane:
 		measured = measureSplitPane(n.children[0], n.children[1], constraints, n.split, profile)
 	case nodeStack:
@@ -849,6 +881,8 @@ func (n Node[Message]) measure(constraints layoutConstraints, profile celltext.W
 			measured.Width = max(measured.Width, childSize.Width)
 			measured.Height = max(measured.Height, childSize.Height)
 		}
+	case nodeOverlay:
+		measured = n.children[0].measure(constraints, profile)
 	case nodeAnchoredOverlay:
 		measured = n.payload.anchored.base.measure(constraints, profile)
 	case nodePadding:

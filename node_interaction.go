@@ -102,9 +102,15 @@ func (n *Node[Message]) find(id NodeID) *Node[Message] {
 		return n
 	}
 	switch n.kind {
-	case nodeRow, nodeColumn, nodeSplitPane, nodeStack:
+	case nodeRow, nodeColumn, nodeSplitPane, nodeStack, nodeOverlay:
 		for index := range n.children {
 			if found := n.children[index].find(id); found != nil {
+				return found
+			}
+		}
+	case nodeResponsiveRow:
+		for index := range n.payload.responsive.items {
+			if found := n.payload.responsive.items[index].node.find(id); found != nil {
 				return found
 			}
 		}
@@ -154,6 +160,19 @@ func (n *Node[Message]) findNodeGeometry(
 			}
 			offset = saturatingAdd32(offset, layout.allocation(index))
 		}
+	case nodeResponsiveRow:
+		responsive := n.payload.responsive
+		layout := responsive.resolvedLayout(rect, profile)
+		for index, itemRect := range layout.slice() {
+			if !itemRect.visible {
+				continue
+			}
+			if foundRect, foundClip, ok := responsive.items[index].node.findNodeGeometry(
+				id, itemRect.rect, clip, interaction, profile,
+			); ok {
+				return foundRect, foundClip, true
+			}
+		}
 	case nodeSplitPane:
 		layout := resolveSplitPaneLayout(rect, n.split)
 		if !layout.hasCollapsed || layout.collapsed != SplitPaneCollapsePrimary {
@@ -168,7 +187,7 @@ func (n *Node[Message]) findNodeGeometry(
 				id, layout.secondary, clip, interaction, profile,
 			)
 		}
-	case nodeStack:
+	case nodeStack, nodeOverlay:
 		for index := range n.children {
 			if foundRect, foundClip, ok := n.children[index].findNodeGeometry(
 				id, rect, clip, interaction, profile,
@@ -335,6 +354,20 @@ func (n *Node[Message]) buildIndex(
 			}
 			offset = saturatingAdd32(offset, layout.allocation(childIndex))
 		}
+	case nodeResponsiveRow:
+		responsive := n.payload.responsive
+		layout := responsive.resolvedLayout(rect, profile)
+		for index, itemRect := range layout.slice() {
+			if !itemRect.visible {
+				continue
+			}
+			if err := responsive.items[index].node.buildIndex(
+				itemRect.rect, clip, childParent, hasChildParent, false,
+				focusFallback, hasFocusFallback, interaction, tree, actions, profile,
+			); err != nil {
+				return err
+			}
+		}
 	case nodeSplitPane:
 		layout := resolveSplitPaneLayout(rect, n.split)
 		if !layout.hasCollapsed || layout.collapsed != SplitPaneCollapsePrimary {
@@ -353,7 +386,7 @@ func (n *Node[Message]) buildIndex(
 				return err
 			}
 		}
-	case nodeStack:
+	case nodeStack, nodeOverlay:
 		for child := range n.children {
 			if err := n.children[child].buildIndex(rect, clip, childParent, hasChildParent, false, focusFallback, hasFocusFallback, interaction, tree, actions, profile); err != nil {
 				return err
@@ -466,6 +499,14 @@ func (n *Node[Message]) prepareVirtualFlowsAt(rect Rect, interaction *Interactio
 			n.children[index].prepareVirtualFlowsAt(childRect, interaction, profile)
 			offset = saturatingAdd32(offset, layout.allocation(index))
 		}
+	case nodeResponsiveRow:
+		responsive := n.payload.responsive
+		layout := responsive.resolvedLayout(rect, profile)
+		for index, itemRect := range layout.slice() {
+			if itemRect.visible {
+				responsive.items[index].node.prepareVirtualFlowsAt(itemRect.rect, interaction, profile)
+			}
+		}
 	case nodeSplitPane:
 		layout := resolveSplitPaneLayout(rect, n.split)
 		if !layout.hasCollapsed || layout.collapsed != SplitPaneCollapsePrimary {
@@ -474,7 +515,7 @@ func (n *Node[Message]) prepareVirtualFlowsAt(rect Rect, interaction *Interactio
 		if !layout.hasCollapsed || layout.collapsed != SplitPaneCollapseSecondary {
 			n.children[1].prepareVirtualFlowsAt(layout.secondary, interaction, profile)
 		}
-	case nodeStack:
+	case nodeStack, nodeOverlay:
 		for index := range n.children {
 			n.children[index].prepareVirtualFlowsAt(rect, interaction, profile)
 		}
@@ -594,6 +635,14 @@ func (n *Node[Message]) prepareAt(rect Rect, interaction *InteractionState, prof
 			changed = n.children[index].prepareAt(childRect, interaction, profile) || changed
 			offset = saturatingAdd32(offset, layout.allocation(index))
 		}
+	case nodeResponsiveRow:
+		responsive := n.payload.responsive
+		layout := responsive.resolvedLayout(rect, profile)
+		for index, itemRect := range layout.slice() {
+			if itemRect.visible {
+				changed = responsive.items[index].node.prepareAt(itemRect.rect, interaction, profile) || changed
+			}
+		}
 	case nodeSplitPane:
 		layout := resolveSplitPaneLayout(rect, n.split)
 		if !layout.hasCollapsed || layout.collapsed != SplitPaneCollapsePrimary {
@@ -602,7 +651,7 @@ func (n *Node[Message]) prepareAt(rect Rect, interaction *InteractionState, prof
 		if !layout.hasCollapsed || layout.collapsed != SplitPaneCollapseSecondary {
 			changed = n.children[1].prepareAt(layout.secondary, interaction, profile) || changed
 		}
-	case nodeStack:
+	case nodeStack, nodeOverlay:
 		for index := range n.children {
 			changed = n.children[index].prepareAt(rect, interaction, profile) || changed
 		}

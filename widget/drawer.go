@@ -154,5 +154,5 @@ func (d Drawer[Message]) Node() tui.Node[Message] {
 	default:
 		layer = tui.Row(drawer, filler)
 	}
-	return tui.Stack(d.base, layer)
+	return tui.Overlay(d.base, layer)
 }
