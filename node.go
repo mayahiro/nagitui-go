@@ -49,6 +49,49 @@ const (
 	AlignBottom
 )
 
+// AnchoredOverlaySide selects the preferred vertical side of an anchor
+type AnchoredOverlaySide uint8
+
+const (
+	// AnchoredOverlayBelow places the overlay after the anchor row
+	AnchoredOverlayBelow AnchoredOverlaySide = iota
+	// AnchoredOverlayAbove places the overlay before the anchor row
+	AnchoredOverlayAbove
+)
+
+// AnchoredOverlayFallback controls placement when the preferred side is too small
+type AnchoredOverlayFallback uint8
+
+const (
+	// AnchoredOverlayFlip uses the opposite side when it has more available rows
+	AnchoredOverlayFlip AnchoredOverlayFallback = iota
+	// AnchoredOverlayClip keeps the preferred side and clips to its available rows
+	AnchoredOverlayClip
+)
+
+// AnchoredOverlayOptions controls anchored front-layer placement and size
+//
+// Unknown Side, Alignment, and Fallback values use Below, Start, and Flip
+type AnchoredOverlayOptions struct {
+	// Side is the preferred vertical side of the anchor
+	Side AnchoredOverlaySide
+	// Alignment positions the layer horizontally relative to the anchor
+	Alignment HorizontalAlignment
+	// Gap is the number of empty rows between the anchor and layer
+	Gap uint32
+	// Fallback controls placement when the preferred side cannot contain the natural height
+	Fallback AnchoredOverlayFallback
+	// MaximumWidth is the greatest layer width, or zero for the available boundary width
+	MaximumWidth uint32
+	// MaximumHeight is the greatest layer height, or zero for the available boundary height
+	MaximumHeight uint32
+}
+
+// DefaultAnchoredOverlayOptions returns below-start placement with flip fallback
+func DefaultAnchoredOverlayOptions() AnchoredOverlayOptions {
+	return AnchoredOverlayOptions{}
+}
+
 // ScrollViewportOptions controls ScrollViewport behavior
 type ScrollViewportOptions[Message any] struct {
 	// Axis selects the axes controlled by user and programmatic scrolling
@@ -181,6 +224,23 @@ type nodePayload[Message any] struct {
 	virtualBuilder func(VirtualViewport) VirtualFragment[Message]
 	virtualCache   virtualCacheState[Message]
 	virtualFlow    *virtualFlowNodePayload[Message]
+	anchored       *anchoredOverlayPayload[Message]
+}
+
+type anchoredOverlayPayload[Message any] struct {
+	base    Node[Message]
+	anchor  NodeID
+	overlay Node[Message]
+	options AnchoredOverlayOptions
+	cache   anchoredOverlayFrame
+}
+
+type anchoredOverlayFrame struct {
+	valid      bool
+	rect       Rect
+	clip       Rect
+	overlay    Rect
+	hasOverlay bool
 }
 
 type virtualFlowNodePayload[Message any] struct {
@@ -254,6 +314,7 @@ const (
 	nodeRow
 	nodeColumn
 	nodeStack
+	nodeAnchoredOverlay
 	nodePadding
 	nodeBorder
 	nodeAlign
@@ -372,6 +433,36 @@ func Column[Message any](children ...Node[Message]) Node[Message] {
 // mutate that slice after construction.
 func Stack[Message any](children ...Node[Message]) Node[Message] {
 	return Node[Message]{kind: nodeStack, children: children}
+}
+
+// AnchoredOverlay places a front layer relative to an identified base descendant
+//
+// The default prefers below-start placement, flips above when that side has
+// more room, and constrains the layer to this node's visible boundary
+func AnchoredOverlay[Message any](
+	base Node[Message],
+	anchor NodeID,
+	overlay Node[Message],
+) Node[Message] {
+	return AnchoredOverlayWithOptions(base, anchor, overlay, DefaultAnchoredOverlayOptions())
+}
+
+// AnchoredOverlayWithOptions places a configured front layer relative to an identified descendant
+//
+// The overlay does not affect measurement and is omitted from rendering, hit
+// testing, and routing while the anchor is absent or not visible
+func AnchoredOverlayWithOptions[Message any](
+	base Node[Message],
+	anchor NodeID,
+	overlay Node[Message],
+	options AnchoredOverlayOptions,
+) Node[Message] {
+	return Node[Message]{
+		kind: nodeAnchoredOverlay,
+		payload: &nodePayload[Message]{anchored: &anchoredOverlayPayload[Message]{
+			base: base, anchor: anchor, overlay: overlay, options: options,
+		}},
+	}
 }
 
 // Padding wraps a child in fixed padding
@@ -744,6 +835,8 @@ func (n Node[Message]) measure(constraints layoutConstraints, profile celltext.W
 			measured.Width = max(measured.Width, childSize.Width)
 			measured.Height = max(measured.Height, childSize.Height)
 		}
+	case nodeAnchoredOverlay:
+		measured = n.payload.anchored.base.measure(constraints, profile)
 	case nodePadding:
 		measured = addNodeSize(
 			n.child.measure(shrinkConstraints(constraints, n.insets), profile),

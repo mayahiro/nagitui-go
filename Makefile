@@ -4,6 +4,7 @@ bench:
 	GOTOOLCHAIN=local go test -run '^$$' -bench '^Benchmark((ScrollViewport(Eager|Virtual|VirtualStickToEndGrowth|VirtualIdentified)|VirtualFlowVariableHeight)100K|ContentProjection(VisibleSubtree|BoundedFailure100K))$$' -benchmem -benchtime=5x -count=3 .
 	GOTOOLCHAIN=local go test -run '^$$' -bench '^BenchmarkClipboardEncoding(Small|1MiB)$$' -benchmem -benchtime=1s -count=3 .
 	GOTOOLCHAIN=local go test -run '^$$' -bench '^BenchmarkPointerTextHit100K$$' -benchmem -benchtime=1s -count=3 .
+	GOTOOLCHAIN=local go test -run '^$$' -bench '^BenchmarkSuggestionPopupCandidates$$' -benchmem -benchtime=10000x -count=3 ./widget
 
 build:
 	GOTOOLCHAIN=local go build ./...

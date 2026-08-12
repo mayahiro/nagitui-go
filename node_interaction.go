@@ -108,6 +108,11 @@ func (n *Node[Message]) find(id NodeID) *Node[Message] {
 				return found
 			}
 		}
+	case nodeAnchoredOverlay:
+		if found := n.payload.anchored.base.find(id); found != nil {
+			return found
+		}
+		return n.payload.anchored.overlay.find(id)
 	case nodePadding, nodeBorder, nodeAlign, nodeClip, nodeScrollViewport, nodeModal, nodePanel:
 		return n.child.find(id)
 	case nodeVirtualScrollViewport:
@@ -124,6 +129,117 @@ func (n *Node[Message]) find(id NodeID) *Node[Message] {
 		}
 	}
 	return nil
+}
+
+func (n *Node[Message]) findNodeGeometry(
+	id NodeID,
+	rect, clip Rect,
+	interaction *InteractionState,
+	profile celltext.WidthProfile,
+) (Rect, Rect, bool) {
+	if n.hasID && n.id == id {
+		return rect, clip, true
+	}
+	switch n.kind {
+	case nodeRow, nodeColumn:
+		horizontal := n.kind == nodeRow
+		layout := n.resolvedLinearLayout(rect, horizontal, profile)
+		var offset uint32
+		for index := range n.children {
+			childRect := layout.childRect(rect, horizontal, index, offset)
+			if foundRect, foundClip, ok := n.children[index].findNodeGeometry(
+				id, childRect, clip, interaction, profile,
+			); ok {
+				return foundRect, foundClip, true
+			}
+			offset = saturatingAdd32(offset, layout.allocation(index))
+		}
+	case nodeStack:
+		for index := range n.children {
+			if foundRect, foundClip, ok := n.children[index].findNodeGeometry(
+				id, rect, clip, interaction, profile,
+			); ok {
+				return foundRect, foundClip, true
+			}
+		}
+	case nodeAnchoredOverlay:
+		anchored := n.payload.anchored
+		if foundRect, foundClip, ok := anchored.base.findNodeGeometry(
+			id, rect, clip, interaction, profile,
+		); ok {
+			return foundRect, foundClip, true
+		}
+		if overlayRect, ok := anchoredOverlayRect(anchored, rect, clip, interaction, profile); ok {
+			return anchored.overlay.findNodeGeometry(
+				id, overlayRect, clip.Intersection(rect), interaction, profile,
+			)
+		}
+	case nodePadding:
+		return n.child.findNodeGeometry(
+			id,
+			insetRect(rect, n.insets.Left, n.insets.Top, n.insets.Right, n.insets.Bottom),
+			clip, interaction, profile,
+		)
+	case nodeBorder:
+		return n.child.findNodeGeometry(id, insetRect(rect, 1, 1, 1, 1), clip, interaction, profile)
+	case nodeAlign:
+		return n.child.findNodeGeometry(
+			id, alignedChildRect(rect, n.child, n.horizontal, n.vertical, profile),
+			clip, interaction, profile,
+		)
+	case nodeClip:
+		return n.child.findNodeGeometry(id, rect, clip.Intersection(rect), interaction, profile)
+	case nodeScrollViewport:
+		return n.child.findNodeGeometry(
+			id,
+			scrollChildRect(rect, n.child, interaction.ScrollOffset(n.id), n.scroll.Axis, profile),
+			clip.Intersection(rect), interaction, profile,
+		)
+	case nodeVirtualScrollViewport:
+		state := interaction.previewScroll(
+			n.id,
+			virtualScrollMaximum(n.payload.virtualSize, rect, n.scroll.Axis),
+			n.scroll.Axis,
+			n.scroll.StickToEnd,
+		)
+		if fragment, ok := ensureVirtualFragment(
+			n.payload.virtualSize,
+			n.scroll.Axis,
+			n.payload.virtualBuilder,
+			&n.payload.virtualCache,
+			rect,
+			state.Offset,
+		); ok {
+			return fragment.fragment.Node.findNodeGeometry(
+				id, virtualFragmentRect(rect, fragment, profile), clip.Intersection(rect),
+				interaction, profile,
+			)
+		}
+	case nodeVirtualFlow:
+		if n.payload != nil && n.payload.virtualFlow != nil && n.payload.virtualFlow.cache.valid {
+			frame := &n.payload.virtualFlow.cache
+			for index := range frame.items {
+				item := &frame.items[index]
+				if foundRect, foundClip, ok := item.node.findNodeGeometry(
+					id,
+					virtualFlowItemRect(rect, frame.offset, item.origin, item.height),
+					clip.Intersection(rect), interaction, profile,
+				); ok {
+					return foundRect, foundClip, true
+				}
+			}
+		}
+	case nodeModal:
+		return n.child.findNodeGeometry(id, rect, clip, interaction, profile)
+	case nodePanel:
+		insets := panelContentInsets(n.panel)
+		return n.child.findNodeGeometry(
+			id,
+			insetRect(rect, insets.Left, insets.Top, insets.Right, insets.Bottom),
+			clip, interaction, profile,
+		)
+	}
+	return Rect{}, Rect{}, false
 }
 
 func (n *Node[Message]) buildIndex(
@@ -210,6 +326,23 @@ func (n *Node[Message]) buildIndex(
 			if err := n.children[child].buildIndex(rect, clip, childParent, hasChildParent, false, focusFallback, hasFocusFallback, interaction, tree, actions, profile); err != nil {
 				return err
 			}
+		}
+	case nodeAnchoredOverlay:
+		anchored := n.payload.anchored
+		if err := anchored.base.buildIndex(
+			rect, clip, childParent, hasChildParent, false,
+			focusFallback, hasFocusFallback, interaction, tree, actions, profile,
+		); err != nil {
+			return err
+		}
+		anchored.cache.valid = false
+		if overlayRect, ok := anchoredOverlayRect(
+			anchored, rect, clip, interaction, profile,
+		); ok {
+			return anchored.overlay.buildIndex(
+				overlayRect, clip.Intersection(rect), childParent, hasChildParent, false,
+				focusFallback, hasFocusFallback, interaction, tree, actions, profile,
+			)
 		}
 	case nodePadding:
 		childRect := insetRect(rect, n.insets.Left, n.insets.Top, n.insets.Right, n.insets.Bottom)
@@ -304,6 +437,13 @@ func (n *Node[Message]) prepareVirtualFlowsAt(rect Rect, interaction *Interactio
 	case nodeStack:
 		for index := range n.children {
 			n.children[index].prepareVirtualFlowsAt(rect, interaction, profile)
+		}
+	case nodeAnchoredOverlay:
+		anchored := n.payload.anchored
+		anchored.base.prepareVirtualFlowsAt(rect, interaction, profile)
+		anchored.cache.valid = false
+		if overlayRect, ok := anchoredOverlayRect(anchored, rect, rect, interaction, profile); ok {
+			anchored.overlay.prepareVirtualFlowsAt(overlayRect, interaction, profile)
 		}
 	case nodePadding:
 		n.child.prepareVirtualFlowsAt(
@@ -417,6 +557,13 @@ func (n *Node[Message]) prepareAt(rect Rect, interaction *InteractionState, prof
 	case nodeStack:
 		for index := range n.children {
 			changed = n.children[index].prepareAt(rect, interaction, profile) || changed
+		}
+	case nodeAnchoredOverlay:
+		anchored := n.payload.anchored
+		changed = anchored.base.prepareAt(rect, interaction, profile)
+		anchored.cache.valid = false
+		if overlayRect, ok := anchoredOverlayRect(anchored, rect, rect, interaction, profile); ok {
+			changed = anchored.overlay.prepareAt(overlayRect, interaction, profile) || changed
 		}
 	case nodePadding:
 		changed = n.child.prepareAt(insetRect(rect, n.insets.Left, n.insets.Top, n.insets.Right, n.insets.Bottom), interaction, profile)

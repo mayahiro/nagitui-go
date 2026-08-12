@@ -74,6 +74,12 @@ const HistoryPreviousActionID tui.ActionID = "nagi.history.previous"
 // HistoryNextActionID is the stable Action ID for recalling the next history entry
 const HistoryNextActionID tui.ActionID = "nagi.history.next"
 
+// SuggestionAcceptActionID is the stable Action ID for accepting the selected suggestion
+const SuggestionAcceptActionID tui.ActionID = "nagi.suggestion.accept"
+
+// SuggestionDismissActionID is the stable Action ID for dismissing an open suggestion popup
+const SuggestionDismissActionID tui.ActionID = "nagi.suggestion.dismiss"
+
 const (
 	activateActionLabel                 = "Activate"
 	selectionPreviousActionLabel        = "Previous"

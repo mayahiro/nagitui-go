@@ -57,6 +57,7 @@ Go repository rootから実terminalで実行します
 | [Counter](examples/counter/README.md) | `go run ./examples/counter` |
 | [Command palette](examples/command-palette/README.md) | `go run ./examples/command-palette` |
 | [Async search](examples/async-search/README.md) | `go run ./examples/async-search` |
+| [Suggestion popup](examples/suggestion-popup/README.md) | `go run ./examples/suggestion-popup` |
 | [Event-driven log viewer](examples/log-viewer/README.md) | `go run ./examples/log-viewer` |
 | [Virtual scroll](examples/virtual-scroll/README.md) | `go run ./examples/virtual-scroll` |
 | [Variable-height feed](examples/virtual-feed/README.md) | `go run ./examples/virtual-feed` |
@@ -79,6 +80,8 @@ Terminal inputとoutputはterminalへ接続されている必要があります�
 `TextArea`はdefaultでno-wrap挙動を維持します。`SoftWrap`はvisual-line navigationを追加し、`BoundaryNavigation`はvisual boundaryのUpとDownをpass-throughへ切り替えられ、`Viewport`はTab stopを増やさずapplication suppliedのzero-width typed cursor anchorへ追従します。Cursorはcaret graphemeを描かず後続textを移動しません
 
 `Composer`は`TextArea`へcontrolled submitとhistory recall、自動row境界、任意のvalidation content、挿入制限を加えます。Applicationはmessageの意味、history persistence、sensitive value policyを引き続き所有します
+
+`widget.SuggestionPopup`はgeneric `AnchoredOverlay`へcontrolled stable candidate ID、selected rowを含むbounded window、差し替え可能なloadingとempty content、semantic action、focusを維持するpointer activationを組み合わせます。Query解析、ranking、async Effect、cancellation、acceptの意味はApplicationが所有します
 
 `SelectableText`はimmutableなstyled contentへgrapheme境界に揃えたcontrolled keyboardと左button drag selectionを加えます
 

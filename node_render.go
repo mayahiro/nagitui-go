@@ -1,10 +1,10 @@
 package tui
 
 import (
-	"github.com/mayahiro/nagi-go/vt"
 	"math"
 
 	celltext "github.com/mayahiro/nagi-go/text"
+	"github.com/mayahiro/nagi-go/vt"
 	"github.com/mayahiro/nagitui-go/surface"
 )
 
@@ -30,6 +30,16 @@ func (n Node[Message]) render(target *surface.Surface, rect, clip Rect, interact
 	case nodeStack:
 		for _, child := range n.children {
 			child.render(target, rect, clip, interaction, profile)
+		}
+	case nodeAnchoredOverlay:
+		anchored := n.payload.anchored
+		anchored.base.render(target, rect, clip, interaction, profile)
+		if overlayRect, ok := anchoredOverlayRect(
+			anchored, rect, clip, interaction, profile,
+		); ok {
+			anchored.overlay.render(
+				target, overlayRect, clip.Intersection(rect), interaction, profile,
+			)
 		}
 	case nodePadding:
 		childRect := insetRect(rect, n.insets.Left, n.insets.Top, n.insets.Right, n.insets.Bottom)
@@ -108,6 +118,156 @@ func renderCursorAnchor(
 		return
 	}
 	target.SetCursor(surface.Cursor{X: uint32(point.X), Y: uint32(point.Y)})
+}
+
+func anchoredOverlayRect[Message any](
+	anchored *anchoredOverlayPayload[Message],
+	rect, clip Rect,
+	interaction *InteractionState,
+	profile celltext.WidthProfile,
+) (Rect, bool) {
+	if anchored.cache.valid && anchored.cache.rect == rect && anchored.cache.clip == clip {
+		return anchored.cache.overlay, anchored.cache.hasOverlay
+	}
+	boundary := rect.Intersection(clip)
+	anchorRect, anchorClip, found := anchored.base.findNodeGeometry(
+		anchored.anchor, rect, clip, interaction, profile,
+	)
+	overlayRect, ok := Rect{}, false
+	if found {
+		overlayRect, ok = resolveAnchoredOverlayRect(
+			anchorRect,
+			anchorClip,
+			boundary,
+			&anchored.overlay,
+			anchored.options,
+			profile,
+		)
+	}
+	anchored.cache = anchoredOverlayFrame{
+		valid: true, rect: rect, clip: clip, overlay: overlayRect, hasOverlay: ok,
+	}
+	return overlayRect, ok
+}
+
+func resolveAnchoredOverlayRect[Message any](
+	anchor, anchorClip, boundary Rect,
+	overlay *Node[Message],
+	options AnchoredOverlayOptions,
+	profile celltext.WidthProfile,
+) (Rect, bool) {
+	if !anchoredOverlayAnchorVisible(anchor, anchorClip, boundary) {
+		return Rect{}, false
+	}
+	widthLimit := boundary.Width
+	if options.MaximumWidth != 0 {
+		widthLimit = min(widthLimit, options.MaximumWidth)
+	}
+	heightLimit := boundary.Height
+	if options.MaximumHeight != 0 {
+		heightLimit = min(heightLimit, options.MaximumHeight)
+	}
+	desired := overlay.measure(boundedConstraints(Size{Width: widthLimit, Height: heightLimit}), profile)
+	if desired.Empty() {
+		return Rect{}, false
+	}
+
+	side := options.Side
+	if side != AnchoredOverlayAbove {
+		side = AnchoredOverlayBelow
+	}
+	fallback := options.Fallback
+	if fallback != AnchoredOverlayClip {
+		fallback = AnchoredOverlayFlip
+	}
+	boundaryTop := int64(boundary.Y)
+	boundaryBottom := boundaryTop + int64(boundary.Height)
+	anchorTop := int64(anchor.Y)
+	anchorBottom := anchorTop + int64(anchor.Height)
+	gap := int64(options.Gap)
+	belowStart := anchorBottom + gap
+	aboveEnd := anchorTop - gap
+	below := overlayExtent(belowStart, boundaryBottom)
+	above := overlayExtent(boundaryTop, aboveEnd)
+	preferred, opposite := below, above
+	if side == AnchoredOverlayAbove {
+		preferred, opposite = above, below
+	}
+	if fallback == AnchoredOverlayFlip && desired.Height > preferred && opposite > preferred {
+		if side == AnchoredOverlayBelow {
+			side = AnchoredOverlayAbove
+		} else {
+			side = AnchoredOverlayBelow
+		}
+	}
+	availableHeight := below
+	if side == AnchoredOverlayAbove {
+		availableHeight = above
+	}
+	height := min(desired.Height, availableHeight)
+	width := min(desired.Width, boundary.Width)
+	if width == 0 || height == 0 {
+		return Rect{}, false
+	}
+
+	alignment := options.Alignment
+	if alignment != AlignCenter && alignment != AlignEnd {
+		alignment = AlignStart
+	}
+	anchorLeft := int64(anchor.X)
+	anchorRight := anchorLeft + int64(anchor.Width)
+	candidateX := anchorLeft
+	switch alignment {
+	case AlignCenter:
+		candidateX = anchorLeft + int64(anchor.Width)/2 - int64(width)/2
+	case AlignEnd:
+		candidateX = anchorRight - int64(width)
+	}
+	boundaryLeft := int64(boundary.X)
+	boundaryRight := boundaryLeft + int64(boundary.Width)
+	maximumX := boundaryRight - int64(width)
+	x := min(max(candidateX, boundaryLeft), maximumX)
+	y := max(belowStart, boundaryTop)
+	if side == AnchoredOverlayAbove {
+		y = max(aboveEnd-int64(height), boundaryTop)
+	}
+	return Rect{
+		X: clampInt64ToInt32(x), Y: clampInt64ToInt32(y), Width: width, Height: height,
+	}, true
+}
+
+func anchoredOverlayAnchorVisible(anchor, anchorClip, boundary Rect) bool {
+	if anchor.Height == 0 || anchorClip.Empty() || boundary.Empty() {
+		return false
+	}
+	anchorTop := int64(anchor.Y)
+	anchorBottom := anchorTop + int64(anchor.Height)
+	visibleTop := max(anchorTop, int64(anchorClip.Y), int64(boundary.Y))
+	visibleBottom := min(
+		anchorBottom,
+		int64(anchorClip.Y)+int64(anchorClip.Height),
+		int64(boundary.Y)+int64(boundary.Height),
+	)
+	if visibleBottom <= visibleTop {
+		return false
+	}
+	if anchor.Width != 0 {
+		return !anchor.Intersection(anchorClip).Intersection(boundary).Empty()
+	}
+	anchorX := int64(anchor.X)
+	visibleLeft := max(int64(anchorClip.X), int64(boundary.X))
+	visibleRight := min(
+		int64(anchorClip.X)+int64(anchorClip.Width),
+		int64(boundary.X)+int64(boundary.Width),
+	)
+	return anchorX >= visibleLeft && anchorX < visibleRight
+}
+
+func overlayExtent(start, end int64) uint32 {
+	if end <= start {
+		return 0
+	}
+	return uint32(min(end-start, int64(math.MaxUint32)))
 }
 
 func mergeNodeStyle(target *surface.Surface, rect Rect, overlay vt.Style) {

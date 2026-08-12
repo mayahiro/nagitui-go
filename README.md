@@ -69,6 +69,7 @@ Run commands from the Go repository root in a real terminal
 | [Counter](examples/counter/README.md) | `go run ./examples/counter` |
 | [Command palette](examples/command-palette/README.md) | `go run ./examples/command-palette` |
 | [Async search](examples/async-search/README.md) | `go run ./examples/async-search` |
+| [Suggestion popup](examples/suggestion-popup/README.md) | `go run ./examples/suggestion-popup` |
 | [Event-driven log viewer](examples/log-viewer/README.md) | `go run ./examples/log-viewer` |
 | [Virtual scroll](examples/virtual-scroll/README.md) | `go run ./examples/virtual-scroll` |
 | [Variable-height feed](examples/virtual-feed/README.md) | `go run ./examples/virtual-feed` |
@@ -110,6 +111,12 @@ grapheme or shift following text
 optional validation content, and insertion limits over `TextArea`. Applications
 retain ownership of message meaning, history persistence, and sensitive-value
 policy
+
+`widget.SuggestionPopup` composes a generic `AnchoredOverlay` with controlled
+stable candidate IDs, a bounded selected row window, replaceable loading and
+empty content, semantic actions, and focus-preserving pointer activation. The
+application owns query parsing, ranking, asynchronous Effects, cancellation,
+and acceptance meaning
 
 `SelectableText` adds controlled grapheme-aligned keyboard and left-button
 drag selection over immutable styled content. Stable-ID pointer capture
