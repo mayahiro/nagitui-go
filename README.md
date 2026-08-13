@@ -61,9 +61,14 @@ Unexpected asynchronous lifecycle transitions are available through the
 bounded Runtime notice queue or the terminal notice-handler entry points
 
 `SuspendTerminalEffect` runs an application-owned blocking task after the
-standard runner restores the ordinary terminal and leaves the alternate screen.
-Returning from the task resumes configured modes, resets pending input, and
-forces a full redraw
+standard runner restores the ordinary terminal and leaves its configured
+viewport. Returning from the task resumes a full-screen viewport or reserves a
+fresh inline region, resets pending decoder state, and forces a full redraw
+
+`NewInlineTerminalViewport(height)` runs the same Runtime in a bounded region
+of the main screen and leaves its final frame in terminal history. The standard
+runner owns cursor discovery, resize placement, coordinate translation, and
+restoration
 
 ## Examples
 
@@ -81,6 +86,7 @@ Run commands from the Go repository root in a real terminal
 | [Diff view](examples/diff-view/README.md) | `go run ./examples/diff-view` |
 | [Event-driven log viewer](examples/log-viewer/README.md) | `go run ./examples/log-viewer` |
 | [Terminal suspend and resume](examples/terminal-suspend/README.md) | `go run ./examples/terminal-suspend` |
+| [Inline terminal viewport](examples/inline-terminal/README.md) | `go run ./examples/inline-terminal` |
 | [Virtual scroll](examples/virtual-scroll/README.md) | `go run ./examples/virtual-scroll` |
 | [Variable-height feed](examples/virtual-feed/README.md) | `go run ./examples/virtual-feed` |
 | [Widget gallery](examples/widget-gallery/README.md) | `go run ./examples/widget-gallery` |

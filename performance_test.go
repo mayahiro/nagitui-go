@@ -429,6 +429,7 @@ func BenchmarkContentProjectionBoundedFailure100K(b *testing.B) {
 var benchmarkProjectionNode Node[struct{}]
 
 var benchmarkClipboardOutput []byte
+var benchmarkViewportOutput []byte
 
 func benchmarkClipboardEncoding(b *testing.B, text string, reuse bool) {
 	b.Helper()
@@ -475,6 +476,31 @@ func BenchmarkClipboardEncoding1MiB(b *testing.B) {
 		b.Run(test.name, func(b *testing.B) {
 			benchmarkClipboardEncoding(b, text, test.reuse)
 		})
+	}
+}
+
+func BenchmarkViewportOriginEncoding(b *testing.B) {
+	operations := []vt.TerminalOp{
+		vt.HideCursor(),
+		vt.MoveTo(0, 0),
+		vt.WriteText("status"),
+		vt.MoveTo(0, 1),
+		vt.WriteText("ready"),
+		vt.MoveTo(0, 0),
+	}
+	output := vt.EncodeAt(operations, vt.BaselineCapabilities(), 0, 17)
+	output = output[:0]
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		output = vt.AppendEncodedAt(
+			output[:0],
+			operations,
+			vt.BaselineCapabilities(),
+			0,
+			17,
+		)
+		benchmarkViewportOutput = output
 	}
 }
 

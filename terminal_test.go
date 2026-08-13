@@ -18,11 +18,30 @@ func TestDefaultTerminalOptionsPreserveUnfocusedNonMouseBehavior(t *testing.T) {
 	if options.Clipboard != TerminalClipboardDisabled {
 		t.Fatalf("Clipboard = %d, want disabled", options.Clipboard)
 	}
+	if _, inline := options.Viewport.InlineHeight(); inline {
+		t.Fatal("Viewport is inline, want fullscreen")
+	}
+	if options.CursorQueryTimeout != 100*time.Millisecond {
+		t.Fatalf("CursorQueryTimeout = %s, want 100ms", options.CursorQueryTimeout)
+	}
 	if options.FocusFirst {
 		t.Fatal("FocusFirst = true, want false")
 	}
 	if options.MinimumFrameInterval != (time.Second+119)/120 {
 		t.Fatalf("MinimumFrameInterval = %s, want 120 FPS cap", options.MinimumFrameInterval)
+	}
+}
+
+func TestInlineTerminalViewportRequiresPositiveHeight(t *testing.T) {
+	if _, err := NewInlineTerminalViewport(0); !errors.Is(err, ErrZeroInlineViewportHeight) {
+		t.Fatalf("error = %v, want ErrZeroInlineViewportHeight", err)
+	}
+	viewport, err := NewInlineTerminalViewport(4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if height, ok := viewport.InlineHeight(); !ok || height != 4 {
+		t.Fatalf("InlineHeight = %d, %t, want 4, true", height, ok)
 	}
 }
 

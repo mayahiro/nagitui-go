@@ -47,7 +47,9 @@ Root packageはapplicationから使いやすくするためSurfaceのGeometry型
 
 `RuntimeConfig.WidthProfile`と`TerminalOptions.WidthProfile`はCoreのmeasure、render、hit geometry、cursor配置で使うcell幅policyを1個選択します。幅計算を行うWidget builderには`ViewContext.WidthProfile`を渡します。予期しないasync lifecycle transitionは上限付きRuntime notice queueまたはterminal notice-handler entry pointから観測できます
 
-`SuspendTerminalEffect`は標準runnerが通常terminalを復元してalternate screenを離れた後にApplication所有のblocking taskを実行します。Task return後は設定済みmodeを再開し、pending inputをresetしてfull redrawを強制します
+`SuspendTerminalEffect`は標準runnerが通常terminalを復元して設定済みviewportを離れた後にApplication所有のblocking taskを実行します。Task return後はfull-screen viewportを再開するか新しいinline領域を確保し、pending decoder stateをresetしてfull redrawを強制します
+
+`NewInlineTerminalViewport(height)`は同じRuntimeをmain screenの上限付き領域で実行し、最終frameをterminal historyへ残します。標準runnerがcursor取得、resize配置、座標変換、復元を所有します
 
 ## Example
 
@@ -65,6 +67,7 @@ Go repository rootから実terminalで実行します
 | [Diff view](examples/diff-view/README.md) | `go run ./examples/diff-view` |
 | [Event-driven log viewer](examples/log-viewer/README.md) | `go run ./examples/log-viewer` |
 | [Terminal suspendとresume](examples/terminal-suspend/README.md) | `go run ./examples/terminal-suspend` |
+| [Inline terminal viewport](examples/inline-terminal/README.md) | `go run ./examples/inline-terminal` |
 | [Virtual scroll](examples/virtual-scroll/README.md) | `go run ./examples/virtual-scroll` |
 | [Variable-height feed](examples/virtual-feed/README.md) | `go run ./examples/virtual-feed` |
 | [Widget gallery](examples/widget-gallery/README.md) | `go run ./examples/widget-gallery` |

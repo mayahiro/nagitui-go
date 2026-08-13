@@ -4,15 +4,18 @@ package ttyunix
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/mayahiro/nagi-go/vt"
+	"github.com/mayahiro/nagitui-go/internal/conformance"
 )
 
 type fakeResizeWatcher struct {
@@ -38,10 +41,20 @@ type fakeBackend struct {
 	setCount    int
 	failSetAt   int
 	watcher     *fakeResizeWatcher
+	reads       [][]byte
+	failWait    bool
+	columns     uint16
+	rows        uint16
 }
 
 func newFakeBackend() *fakeBackend {
-	return &fakeBackend{failWriteAt: -1, failSetAt: -1, watcher: &fakeResizeWatcher{}}
+	return &fakeBackend{
+		failWriteAt: -1,
+		failSetAt:   -1,
+		watcher:     &fakeResizeWatcher{},
+		columns:     80,
+		rows:        24,
+	}
 }
 
 func (backend *fakeBackend) getState(fd int) (terminalState, error) {
@@ -71,6 +84,11 @@ func (backend *fakeBackend) startResizeWatcher(_ func()) (resizeWatcher, error) 
 }
 
 func (backend *fakeBackend) read(_ int, buffer []byte) (int, error) {
+	if len(backend.reads) != 0 {
+		input := backend.reads[0]
+		backend.reads = backend.reads[1:]
+		return copy(buffer, input), nil
+	}
 	return copy(buffer, []byte("input")), nil
 }
 
@@ -85,11 +103,14 @@ func (backend *fakeBackend) write(_ int, buffer []byte) (int, error) {
 }
 
 func (backend *fakeBackend) wait(_, _ int, _ time.Duration, _ bool) (waitResult, error) {
+	if backend.failWait {
+		return waitResult{}, errors.New("injected wait failure")
+	}
 	return waitResult{input: true}, nil
 }
 
 func (backend *fakeBackend) size(_ int) (uint16, uint16, error) {
-	return 80, 24, nil
+	return backend.columns, backend.rows, nil
 }
 
 func TestNormalCloseRestoresTerminalState(t *testing.T) {
@@ -381,6 +402,278 @@ func TestWriteRejectsZeroProgress(t *testing.T) {
 	if err := session.Write([]byte("x")); !errors.Is(err, io.ErrShortWrite) {
 		t.Fatalf("Write error = %v, want io.ErrShortWrite", err)
 	}
+}
+
+func TestInlinePlacementsMatchSharedFixtures(t *testing.T) {
+	records, err := conformance.Load(
+		"tui/terminal-viewport.txt",
+		"terminal-viewport",
+		"terminal", "requested", "cursor", "offset", "expected",
+	)
+	if errors.Is(err, conformance.ErrNoFixtureRoot) {
+		t.Skip(err)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, record := range records {
+		terminal := fixtureUint16Pair(t, record.Field("terminal"))
+		cursor := fixtureUint16Pair(t, record.Field("cursor"))
+		requested := fixtureUint16(t, record.Field("requested"))
+		offset := fixtureUint16(t, record.Field("offset"))
+		placement := computeInlinePlacement(terminal[1], requested, cursor[1], offset)
+		got := fmt.Sprintf(
+			"origin:%d;height:%d;lines:%d",
+			placement.originY,
+			placement.height,
+			placement.linesAfterCursor,
+		)
+		if got != record.Field("expected") {
+			t.Errorf("case %s: placement = %s, want %s", record.ID, got, record.Field("expected"))
+		}
+	}
+}
+
+func TestInlineSessionPreservesInputTranslatesFramesAndLeavesOutput(t *testing.T) {
+	backend := newFakeBackend()
+	backend.reads = [][]byte{[]byte("typed\x1B[23;5Rtail")}
+	session, err := startSession(backend, 0, 1, Options{
+		MouseTracking:      pointerTo(vt.MouseTrackingPress),
+		InlineHeight:       4,
+		CursorQueryTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	columns, rows, err := session.ViewportSize()
+	if err != nil || columns != 80 || rows != 4 {
+		t.Fatalf("ViewportSize = %d, %d, %v", columns, rows, err)
+	}
+	backend.failWait = true
+	if ready, err := session.Wait(time.Second, true); err != nil || !ready {
+		t.Fatalf("Wait with preserved input = %t, %v", ready, err)
+	}
+	input := make([]byte, 16)
+	read, err := session.Read(input)
+	if err != nil || string(input[:read]) != "typedtail" {
+		t.Fatalf("Read = %q, %v", input[:read], err)
+	}
+	frame := []vt.TerminalOp{vt.MoveTo(1, 2), vt.WriteText("view")}
+	if err := session.WriteViewportOperations(frame, 2, true, vt.BaselineCapabilities()); err != nil {
+		t.Fatal(err)
+	}
+	wantFrame := vt.EncodeAt(frame, vt.BaselineCapabilities(), 0, 20)
+	if !bytes.Equal(backend.writes[3], wantFrame) {
+		t.Fatalf("frame = %q, want %q", backend.writes[3], wantFrame)
+	}
+	inside := vt.Event{Kind: vt.EventMouse, Mouse: vt.MouseEvent{X: 3, Y: 22}}
+	localized, ok := session.LocalizeEvent(inside)
+	if !ok || localized.Mouse.Y != 2 {
+		t.Fatalf("localized mouse = %#v, %t", localized, ok)
+	}
+	outside := vt.Event{Kind: vt.EventMouse, Mouse: vt.MouseEvent{X: 3, Y: 19}}
+	if _, ok := session.LocalizeEvent(outside); ok {
+		t.Fatal("outside mouse was accepted")
+	}
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(backend.writes[0], []byte("\x1B[?1049")) {
+		t.Fatalf("inline startup entered alternate screen: %q", backend.writes[0])
+	}
+	if string(backend.writes[1]) != "\x1B[6n" {
+		t.Fatalf("query = %q", backend.writes[1])
+	}
+	if !bytes.HasSuffix(backend.writes[len(backend.writes)-1], []byte("\x1B[24;1H\x1BE\x1B[?25h")) {
+		t.Fatalf("finish = %q", backend.writes[len(backend.writes)-1])
+	}
+}
+
+func TestInlineHiddenCursorIsParkedAtViewportOrigin(t *testing.T) {
+	backend := newFakeBackend()
+	backend.reads = [][]byte{[]byte("\x1B[6;5R")}
+	session, err := startSession(backend, 0, 1, Options{
+		InlineHeight:       3,
+		CursorQueryTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	operations := []vt.TerminalOp{vt.MoveTo(2, 1), vt.WriteText("view")}
+
+	if err := session.WriteViewportOperations(
+		operations,
+		0,
+		false,
+		vt.BaselineCapabilities(),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	want := vt.EncodeAt(operations, vt.BaselineCapabilities(), 0, 5)
+	want = vt.AppendEncodedAt(
+		want,
+		[]vt.TerminalOp{vt.MoveTo(0, 0)},
+		vt.BaselineCapabilities(),
+		0,
+		5,
+	)
+	if !bytes.Equal(backend.writes[3], want) {
+		t.Fatalf("frame = %q, want %q", backend.writes[3], want)
+	}
+	if session.inlineRegion.cursorOffsetY != 0 {
+		t.Fatalf("cursor offset = %d, want 0", session.inlineRegion.cursorOffsetY)
+	}
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestInlineSuspendFinalizesThenResumeReservesFreshRegion(t *testing.T) {
+	backend := newFakeBackend()
+	backend.reads = [][]byte{[]byte("\x1B[6;1R"), []byte("\x1B[12;1R")}
+	session, err := startSession(backend, 0, 1, Options{
+		InlineHeight:       3,
+		CursorQueryTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.inlineRegion.originY != 5 {
+		t.Fatalf("initial origin = %d, want 5", session.inlineRegion.originY)
+	}
+
+	if err := session.Suspend(); err != nil {
+		t.Fatal(err)
+	}
+	if session.inlineRegion != nil {
+		t.Fatal("Suspend retained the finalized inline region")
+	}
+	if err := session.Resume(); err != nil {
+		t.Fatal(err)
+	}
+	if session.inlineRegion.originY != 11 {
+		t.Fatalf("resumed origin = %d, want 11", session.inlineRegion.originY)
+	}
+
+	if !bytes.HasSuffix(backend.writes[3], []byte("\x1B[9;1H\x1B[?25h")) {
+		t.Fatalf("suspend output = %q", backend.writes[3])
+	}
+	if string(backend.writes[5]) != "\x1B[6n" {
+		t.Fatalf("resume query = %q", backend.writes[5])
+	}
+	for _, write := range backend.writes {
+		if bytes.Contains(write, []byte("\x1B[?1049")) {
+			t.Fatalf("inline lifecycle entered alternate screen: %q", write)
+		}
+	}
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestInlineCursorQueryTimeoutRestoresTerminal(t *testing.T) {
+	backend := newFakeBackend()
+	_, err := startSession(backend, 0, 1, Options{
+		InlineHeight:       3,
+		CursorQueryTimeout: 0,
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("startSession error = %v, want context deadline", err)
+	}
+	if got := backend.calls[len(backend.calls)-1]; got != "set:0:7" {
+		t.Fatalf("last backend call = %q, want original mode", got)
+	}
+	if !backend.watcher.closed {
+		t.Fatal("resize watcher was not closed")
+	}
+}
+
+func TestInlineCursorQueryRejectsMoreThanInputLimit(t *testing.T) {
+	backend := newFakeBackend()
+	for range 9 {
+		backend.reads = append(backend.reads, bytes.Repeat([]byte{'x'}, 8_192))
+	}
+	_, err := startSession(backend, 0, 1, Options{
+		InlineHeight:       3,
+		CursorQueryTimeout: time.Second,
+	})
+	if err == nil || !strings.Contains(err.Error(), "cursor-query limit") {
+		t.Fatalf("startSession error = %v, want cursor-query limit", err)
+	}
+	if got := backend.calls[len(backend.calls)-1]; got != "set:0:7" {
+		t.Fatalf("last backend call = %q, want original mode", got)
+	}
+	if !backend.watcher.closed {
+		t.Fatal("resize watcher was not closed")
+	}
+}
+
+func TestCursorReportParserSkipsInvalidAndPreservesOtherInput(t *testing.T) {
+	input := []byte("a\x1B[999999;1Rb\x1B[3;4Rc")
+	x, y, ok := takeCursorPositionReport(&input)
+	if !ok || x != 3 || y != 2 {
+		t.Fatalf("position = %d, %d, %t", x, y, ok)
+	}
+	if string(input) != "a\x1B[999999;1Rbc" {
+		t.Fatalf("remaining input = %q", input)
+	}
+}
+
+func TestInlineResizePreservesLogicalCursorOffset(t *testing.T) {
+	backend := newFakeBackend()
+	backend.reads = [][]byte{[]byte("\x1B[6;5R")}
+	session, err := startSession(backend, 0, 1, Options{
+		InlineHeight:       5,
+		CursorQueryTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := session.WriteViewportOperations(
+		[]vt.TerminalOp{vt.MoveTo(0, 2)},
+		2,
+		true,
+		vt.BaselineCapabilities(),
+	); err != nil {
+		t.Fatal(err)
+	}
+	backend.columns = 100
+	backend.rows = 30
+	backend.reads = append(backend.reads, []byte("\x1B[19;13R"))
+
+	columns, rows, err := session.RefreshViewport()
+	if err != nil || columns != 100 || rows != 5 {
+		t.Fatalf("RefreshViewport = %d, %d, %v", columns, rows, err)
+	}
+	if session.inlineRegion.originY != 16 {
+		t.Fatalf("originY = %d, want 16", session.inlineRegion.originY)
+	}
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func pointerTo[T any](value T) *T {
+	return &value
+}
+
+func fixtureUint16Pair(t *testing.T, value string) [2]uint16 {
+	t.Helper()
+	fields := strings.Split(value, ",")
+	if len(fields) != 2 {
+		t.Fatalf("invalid pair %q", value)
+	}
+	return [2]uint16{fixtureUint16(t, fields[0]), fixtureUint16(t, fields[1])}
+}
+
+func fixtureUint16(t *testing.T, value string) uint16 {
+	t.Helper()
+	parsed, err := strconv.ParseUint(value, 10, 16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return uint16(parsed)
 }
 
 type zeroWriteBackend struct{ *fakeBackend }

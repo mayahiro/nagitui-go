@@ -13,6 +13,40 @@ import (
 
 const defaultMinimumFrameInterval = (time.Second + 119) / 120
 
+// ErrZeroInlineViewportHeight reports an invalid inline terminal viewport
+var ErrZeroInlineViewportHeight = errors.New("nagi-tui: an inline terminal viewport requires a positive height")
+
+type terminalViewportKind uint8
+
+const (
+	terminalViewportFullscreen terminalViewportKind = iota
+	terminalViewportInline
+)
+
+// TerminalViewport is the screen region owned by the standard terminal runner
+//
+// Its zero value is a full-screen alternate-screen viewport.
+type TerminalViewport struct {
+	kind         terminalViewportKind
+	inlineHeight uint16
+}
+
+// NewInlineTerminalViewport returns a main-screen viewport with a positive
+// requested row count
+//
+// The terminal runner clamps this height to the current terminal height.
+func NewInlineTerminalViewport(height uint16) (TerminalViewport, error) {
+	if height == 0 {
+		return TerminalViewport{}, ErrZeroInlineViewportHeight
+	}
+	return TerminalViewport{kind: terminalViewportInline, inlineHeight: height}, nil
+}
+
+// InlineHeight returns the requested row count for an inline viewport
+func (v TerminalViewport) InlineHeight() (uint16, bool) {
+	return v.inlineHeight, v.kind == terminalViewportInline
+}
+
 // TerminalClipboard selects standard terminal handling for clipboard requests
 type TerminalClipboard uint8
 
@@ -34,6 +68,11 @@ type TerminalOptions struct {
 	MouseTracking *vt.MouseTracking
 	// Clipboard selects terminal clipboard output and defaults to disabled
 	Clipboard TerminalClipboard
+	// Viewport is the terminal screen region owned by the runner
+	Viewport TerminalViewport
+	// CursorQueryTimeout is the maximum wait for an inline viewport cursor report
+	// Zero performs an immediate query check.
+	CursorQueryTimeout time.Duration
 	// FocusFirst focuses the first focusable node before the initial frame
 	FocusFirst bool
 	// EscapeTimeout disambiguates a lone ESC from an escape sequence
@@ -60,6 +99,7 @@ type TerminalOptions struct {
 func DefaultTerminalOptions() TerminalOptions {
 	return TerminalOptions{
 		Capabilities:          vt.BaselineCapabilities(),
+		CursorQueryTimeout:    100 * time.Millisecond,
 		EscapeTimeout:         25 * time.Millisecond,
 		QueueCapacity:         DefaultQueueCapacity,
 		TaskLimit:             DefaultTaskLimit,
@@ -145,8 +185,13 @@ func runTerminalContext[Message any](
 	if options.Clipboard > TerminalClipboardOSC52 {
 		return fmt.Errorf("nagi-tui: invalid terminal clipboard mode %d", options.Clipboard)
 	}
-	return ttyunix.Run(ttyunix.Options{MouseTracking: options.MouseTracking}, func(session *ttyunix.Session) error {
-		columns, rows, err := session.Size()
+	inlineHeight, _ := options.Viewport.InlineHeight()
+	return ttyunix.Run(ttyunix.Options{
+		MouseTracking:      options.MouseTracking,
+		InlineHeight:       inlineHeight,
+		CursorQueryTimeout: options.CursorQueryTimeout,
+	}, func(session *ttyunix.Session) error {
+		columns, rows, err := session.ViewportSize()
 		if err != nil {
 			return err
 		}
@@ -170,7 +215,7 @@ func runTerminalContext[Message any](
 		input := make([]byte, 8_192)
 
 		if session.TakeResize() {
-			columns, rows, err = session.Size()
+			columns, rows, err = session.RefreshViewport()
 			if err != nil {
 				return err
 			}
@@ -212,7 +257,7 @@ func runTerminalContext[Message any](
 				return err
 			}
 			if session.TakeResize() {
-				columns, rows, err = session.Size()
+				columns, rows, err = session.RefreshViewport()
 				if err != nil {
 					return err
 				}
@@ -233,6 +278,10 @@ func runTerminalContext[Message any](
 
 			exit := false
 			for _, event := range events {
+				event, insideViewport := session.LocalizeEvent(event)
+				if !insideViewport {
+					continue
+				}
 				dispatch, err := runtime.DispatchEvent(event)
 				if err != nil {
 					return err
@@ -319,7 +368,7 @@ func runPendingTerminalTasks[Message any](
 		}
 
 		runtime.InvalidateTerminalSurface()
-		columns, rows, err := session.Size()
+		columns, rows, err := session.ViewportSize()
 		if err != nil {
 			return true, err
 		}
@@ -378,27 +427,59 @@ func writeTerminalOutput[Message any](
 	capabilities vt.Capabilities,
 	clipboard TerminalClipboard,
 ) error {
-	operations, err := pendingTerminalOutputOperations(runtime, clipboard)
+	output, err := pendingTerminalOutput(runtime, clipboard)
 	if err != nil {
 		return err
 	}
-	if len(operations) == 0 {
+	if len(output.operations) == 0 {
 		return nil
 	}
-	return session.WriteOperations(operations, capabilities)
+	if output.hasFrame {
+		return session.WriteViewportOperations(
+			output.operations,
+			output.cursorY,
+			output.hasCursor,
+			capabilities,
+		)
+	}
+	return session.WriteOperations(output.operations, capabilities)
+}
+
+type terminalOutput struct {
+	operations []vt.TerminalOp
+	hasFrame   bool
+	hasCursor  bool
+	cursorY    uint32
+}
+
+func pendingTerminalOutput[Message any](
+	runtime *Runtime[Message],
+	clipboard TerminalClipboard,
+) (terminalOutput, error) {
+	frame, err := runtime.renderIfDirty(true)
+	if err != nil {
+		return terminalOutput{}, err
+	}
+	output := terminalOutput{}
+	if frame != nil {
+		output.operations = frame.operations
+		output.hasFrame = true
+		if cursor, ok := frame.surface.Cursor(); ok {
+			output.hasCursor = true
+			output.cursorY = cursor.Y
+		}
+	}
+	request, ok := runtime.TakeClipboardRequest()
+	if ok && clipboard == TerminalClipboardOSC52 {
+		output.operations = append(output.operations, vt.SetClipboard(request.Text()))
+	}
+	return output, nil
 }
 
 func pendingTerminalOutputOperations[Message any](
 	runtime *Runtime[Message],
 	clipboard TerminalClipboard,
 ) ([]vt.TerminalOp, error) {
-	operations, err := runtime.terminalOperationsIfDirty()
-	if err != nil {
-		return nil, err
-	}
-	request, ok := runtime.TakeClipboardRequest()
-	if ok && clipboard == TerminalClipboardOSC52 {
-		operations = append(operations, vt.SetClipboard(request.Text()))
-	}
-	return operations, nil
+	output, err := pendingTerminalOutput(runtime, clipboard)
+	return output.operations, err
 }
