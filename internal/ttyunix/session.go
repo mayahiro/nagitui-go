@@ -30,6 +30,18 @@ type Options struct {
 	CursorQueryTimeout time.Duration
 }
 
+// KeyboardSupport is the active-query result for extended keyboard input
+type KeyboardSupport uint8
+
+const (
+	// KeyboardSupportUnknown means the query did not establish support
+	KeyboardSupportUnknown KeyboardSupport = iota
+	// KeyboardSupportUnsupported means device attributes arrived without a keyboard reply
+	KeyboardSupportUnsupported
+	// KeyboardSupportSupported means a keyboard enhancement reply arrived
+	KeyboardSupportSupported
+)
+
 const maxCursorQueryInputBytes = 65_536
 
 type inlineRegion struct {
@@ -64,25 +76,28 @@ type terminalBackend interface {
 // Session owns raw mode, terminal I/O, resize signaling, and configured
 // viewport lifecycle for one process terminal.
 type Session struct {
-	backend          terminalBackend
-	inputFD          int
-	outputFD         int
-	originalState    terminalState
-	hasOriginalState bool
-	watcher          resizeWatcher
-	wake             *wakePipe
-	mouseTracking    vt.MouseTracking
-	hasMouseTracking bool
-	inlineHeight     uint16
-	cursorQueryLimit time.Duration
-	inlineRegion     *inlineRegion
-	rawModeActive    bool
-	lifecycleStarted bool
-	initialResize    bool
-	ownsProcess      bool
-	pendingInput     []byte
-	pendingOffset    int
-	outputBuffer     []byte
+	backend                    terminalBackend
+	inputFD                    int
+	outputFD                   int
+	originalState              terminalState
+	hasOriginalState           bool
+	watcher                    resizeWatcher
+	wake                       *wakePipe
+	mouseTracking              vt.MouseTracking
+	hasMouseTracking           bool
+	inlineHeight               uint16
+	cursorQueryLimit           time.Duration
+	inlineRegion               *inlineRegion
+	rawModeActive              bool
+	lifecycleStarted           bool
+	keyboardDetectionRequested bool
+	keyboardSupport            KeyboardSupport
+	keyboardEnhancementsActive bool
+	initialResize              bool
+	ownsProcess                bool
+	pendingInput               []byte
+	pendingOffset              int
+	outputBuffer               []byte
 }
 
 // Open validates stdin and stdout, enables raw mode, and enters the alternate
@@ -302,6 +317,30 @@ func (s *Session) Notify() {
 	}
 }
 
+// EnableExtendedKeyboard queries Kitty keyboard support and enables the Nagi
+// enhancement set only after a valid reply
+func (s *Session) EnableExtendedKeyboard(timeout time.Duration) (KeyboardSupport, error) {
+	s.keyboardDetectionRequested = true
+	if s.keyboardEnhancementsActive {
+		return KeyboardSupportSupported, nil
+	}
+	support, err := s.queryExtendedKeyboard(timeout)
+	if err != nil {
+		return KeyboardSupportUnknown, err
+	}
+	s.keyboardSupport = support
+	if support == KeyboardSupportSupported {
+		if err := s.WriteOperations(
+			[]vt.TerminalOp{vt.PushKeyboardEnhancements(vt.NagiKeyboardEnhancements)},
+			vt.BaselineCapabilities(),
+		); err != nil {
+			return KeyboardSupportUnknown, err
+		}
+		s.keyboardEnhancementsActive = true
+	}
+	return support, nil
+}
+
 // Size returns terminal columns and rows.
 func (s *Session) Size() (columns, rows uint16, err error) {
 	columns, rows, err = s.backend.size(s.outputFD)
@@ -408,9 +447,14 @@ func (s *Session) activateLifecycle() error {
 		operations = append(operations, vt.EnableMouse(s.mouseTracking))
 	}
 	operations = append(operations, vt.EnableFocus())
+	reactivateKeyboard := s.keyboardDetectionRequested && s.keyboardSupport == KeyboardSupportSupported
+	if reactivateKeyboard {
+		operations = append(operations, vt.PushKeyboardEnhancements(vt.NagiKeyboardEnhancements))
+	}
 	if err := s.WriteOperations(operations, vt.BaselineCapabilities()); err != nil {
 		return err
 	}
+	s.keyboardEnhancementsActive = reactivateKeyboard
 	if s.inlineHeight != 0 {
 		if err := s.establishInlineRegion(0); err != nil {
 			return err
@@ -517,6 +561,69 @@ func (s *Session) queryCursorPosition() (x, y uint16, err error) {
 	}
 }
 
+func (s *Session) queryExtendedKeyboard(timeout time.Duration) (KeyboardSupport, error) {
+	s.compactPendingInput()
+	queryStart := len(s.pendingInput)
+	if err := s.WriteOperations([]vt.TerminalOp{
+		vt.QueryKeyboardEnhancements(),
+		vt.RequestPrimaryDeviceAttributes(),
+	}, vt.BaselineCapabilities()); err != nil {
+		return KeyboardSupportUnknown, err
+	}
+	started := time.Now()
+	firstWait := true
+	keyboardResponse := false
+	var input [8_192]byte
+	for {
+		responses := takeKeyboardQueryResponses(&s.pendingInput, queryStart)
+		keyboardResponse = keyboardResponse || responses.keyboard
+		if responses.deviceAttributes {
+			if keyboardResponse {
+				return KeyboardSupportSupported, nil
+			}
+			return KeyboardSupportUnsupported, nil
+		}
+		elapsed := time.Since(started)
+		if !firstWait && elapsed >= timeout {
+			if keyboardResponse {
+				return KeyboardSupportSupported, nil
+			}
+			return KeyboardSupportUnknown, nil
+		}
+		remaining := timeout - elapsed
+		if remaining < 0 {
+			remaining = 0
+		}
+		firstWait = false
+		readable, err := s.waitBackend(remaining, true)
+		if err != nil {
+			return KeyboardSupportUnknown, err
+		}
+		if !readable {
+			if keyboardResponse {
+				return KeyboardSupportSupported, nil
+			}
+			return KeyboardSupportUnknown, nil
+		}
+		read, err := s.readBackend(input[:])
+		if err != nil {
+			return KeyboardSupportUnknown, err
+		}
+		if read == 0 {
+			if keyboardResponse {
+				return KeyboardSupportSupported, nil
+			}
+			return KeyboardSupportUnknown, nil
+		}
+		if len(s.pendingInput)+read > maxCursorQueryInputBytes {
+			return KeyboardSupportUnknown, errors.New(
+				"query terminal capabilities: terminal input exceeded the capability-query limit",
+			)
+		}
+		s.pendingInput = append(s.pendingInput, input[:read]...)
+	}
+}
+
 func (s *Session) compactPendingInput() {
 	if s.pendingOffset == 0 {
 		return
@@ -529,12 +636,16 @@ func (s *Session) compactPendingInput() {
 func (s *Session) deactivate(modeOperation string) error {
 	var firstErr error
 	if s.lifecycleStarted {
-		operations := []vt.TerminalOp{
+		operations := make([]vt.TerminalOp, 0, 8)
+		if s.keyboardEnhancementsActive {
+			operations = append(operations, vt.PopKeyboardEnhancements())
+		}
+		operations = append(operations,
 			vt.DisableMouse(),
 			vt.DisableFocus(),
 			vt.DisableBracketedPaste(),
 			vt.ResetStyle(),
-		}
+		)
 		if s.inlineHeight != 0 {
 			operations = s.appendInlineFinishOperations(operations)
 			operations = append(operations, vt.ShowCursor())
@@ -545,6 +656,7 @@ func (s *Session) deactivate(modeOperation string) error {
 			firstErr = err
 		} else {
 			s.lifecycleStarted = false
+			s.keyboardEnhancementsActive = false
 			s.inlineRegion = nil
 		}
 	}
@@ -647,4 +759,97 @@ func parseCursorCoordinate(input []byte) (uint16, bool) {
 		}
 	}
 	return uint16(value), value != 0
+}
+
+type keyboardQueryResponses struct {
+	keyboard         bool
+	deviceAttributes bool
+}
+
+type byteRange struct {
+	start int
+	end   int
+}
+
+func takeKeyboardQueryResponses(input *[]byte, start int) keyboardQueryResponses {
+	buffer := *input
+	responses := keyboardQueryResponses{}
+	var ranges []byteRange
+	if start > len(buffer) {
+		start = len(buffer)
+	}
+	for index := start; index+2 < len(buffer); {
+		if buffer[index] != '\x1B' || buffer[index+1] != '[' {
+			index++
+			continue
+		}
+		end := index + 2
+		for end < len(buffer) && buffer[end] >= 0x20 && buffer[end] <= 0x3F {
+			end++
+		}
+		if end == len(buffer) || buffer[end] < 0x40 || buffer[end] > 0x7E {
+			index++
+			continue
+		}
+		body := buffer[index+2 : end]
+		matched := false
+		switch buffer[end] {
+		case 'u':
+			if keyboardResponseBody(body) {
+				if !responses.deviceAttributes {
+					responses.keyboard = true
+				}
+				matched = true
+			}
+		case 'c':
+			if deviceAttributesBody(body) {
+				responses.deviceAttributes = true
+				matched = true
+			}
+		}
+		if matched {
+			ranges = append(ranges, byteRange{index, end + 1})
+		}
+		index = end + 1
+	}
+	for index := len(ranges) - 1; index >= 0; index-- {
+		rangeToRemove := ranges[index]
+		copy(buffer[rangeToRemove.start:], buffer[rangeToRemove.end:])
+		buffer = buffer[:len(buffer)-(rangeToRemove.end-rangeToRemove.start)]
+	}
+	*input = buffer
+	return responses
+}
+
+func keyboardResponseBody(body []byte) bool {
+	if len(body) < 2 || body[0] != '?' {
+		return false
+	}
+	for _, value := range body[1:] {
+		if value < '0' || value > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func deviceAttributesBody(body []byte) bool {
+	if len(body) < 2 || body[0] != '?' {
+		return false
+	}
+	parameterHasDigit := false
+	for _, value := range body[1:] {
+		if value == ';' {
+			if !parameterHasDigit {
+				return false
+			}
+			parameterHasDigit = false
+			continue
+		}
+		if value < '0' || value > '9' {
+			return false
+		}
+		parameterHasDigit = true
+	}
+	return parameterHasDigit
 }

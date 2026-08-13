@@ -309,6 +309,164 @@ func TestSuspendAndResumeRestoreConfiguredTerminalLifecycle(t *testing.T) {
 	}
 }
 
+func TestExtendedKeyboardQueryPreservesInputAndTracksModeStack(t *testing.T) {
+	backend := newFakeBackend()
+	backend.reads = append(backend.reads, []byte("user\x1B[?0u\x1B[?1;2c"))
+	session, err := startSession(backend, 0, 1, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	support, err := session.EnableExtendedKeyboard(100 * time.Millisecond)
+	if err != nil || support != KeyboardSupportSupported {
+		t.Fatalf("EnableExtendedKeyboard = %d, %v", support, err)
+	}
+	pending := make([]byte, 8)
+	read, err := session.Read(pending)
+	if err != nil || string(pending[:read]) != "user" {
+		t.Fatalf("preserved input = %q, %v", pending[:read], err)
+	}
+	query := vt.Encode([]vt.TerminalOp{
+		vt.QueryKeyboardEnhancements(), vt.RequestPrimaryDeviceAttributes(),
+	}, vt.BaselineCapabilities())
+	push := vt.Encode([]vt.TerminalOp{
+		vt.PushKeyboardEnhancements(vt.NagiKeyboardEnhancements),
+	}, vt.BaselineCapabilities())
+	if len(backend.writes) < 3 || !bytes.Equal(backend.writes[1], query) || !bytes.Equal(backend.writes[2], push) {
+		t.Fatalf("negotiation writes = %q", backend.writes)
+	}
+
+	if err := session.Suspend(); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.HasPrefix(backend.writes[len(backend.writes)-1], []byte("\x1B[<u")) {
+		t.Fatalf("suspend output = %q", backend.writes[len(backend.writes)-1])
+	}
+	if err := session.Resume(); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.HasSuffix(backend.writes[len(backend.writes)-1], []byte("\x1B[>27u")) {
+		t.Fatalf("resume output = %q", backend.writes[len(backend.writes)-1])
+	}
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDeviceAttributesWithoutKeyboardReplyAreUnsupported(t *testing.T) {
+	backend := newFakeBackend()
+	backend.reads = append(backend.reads, []byte("x\x1B[?1;2c"))
+	session, err := startSession(backend, 0, 1, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	support, err := session.EnableExtendedKeyboard(100 * time.Millisecond)
+	if err != nil || support != KeyboardSupportUnsupported {
+		t.Fatalf("EnableExtendedKeyboard = %d, %v", support, err)
+	}
+	if len(backend.writes) != 2 {
+		t.Fatalf("write count = %d, want startup and query", len(backend.writes))
+	}
+	pending := make([]byte, 8)
+	read, err := session.Read(pending)
+	if err != nil || string(pending[:read]) != "x" {
+		t.Fatalf("preserved input = %q, %v", pending[:read], err)
+	}
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestExtendedKeyboardZeroTimeoutReadsOnceAndPreservesUnknownInput(t *testing.T) {
+	backend := newFakeBackend()
+	session, err := startSession(backend, 0, 1, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	support, err := session.EnableExtendedKeyboard(0)
+	if err != nil || support != KeyboardSupportUnknown {
+		t.Fatalf("EnableExtendedKeyboard = %d, %v", support, err)
+	}
+	pending := make([]byte, 8)
+	read, err := session.Read(pending)
+	if err != nil || string(pending[:read]) != "input" {
+		t.Fatalf("preserved input = %q, %v", pending[:read], err)
+	}
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestKeyboardReplyWithoutDeviceAttributesIsSupportedAtTimeout(t *testing.T) {
+	backend := newFakeBackend()
+	backend.reads = append(backend.reads, []byte("\x1B[?27u"))
+	session, err := startSession(backend, 0, 1, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	support, err := session.EnableExtendedKeyboard(0)
+	if err != nil || support != KeyboardSupportSupported {
+		t.Fatalf("EnableExtendedKeyboard = %d, %v", support, err)
+	}
+	if len(backend.writes) != 3 {
+		t.Fatalf("write count = %d, want startup, query, and push", len(backend.writes))
+	}
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestExtendedKeyboardQueryRejectsInputAboveRetainedLimit(t *testing.T) {
+	backend := newFakeBackend()
+	for range 9 {
+		backend.reads = append(backend.reads, bytes.Repeat([]byte{'x'}, 8_192))
+	}
+	session, err := startSession(backend, 0, 1, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = session.EnableExtendedKeyboard(time.Second)
+	if err == nil || !strings.Contains(err.Error(), "capability-query limit") {
+		t.Fatalf("EnableExtendedKeyboard error = %v", err)
+	}
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestKeyboardQueryExtractionRetainsUnrelatedBytes(t *testing.T) {
+	input := []byte("before\x1B[?27u-middle\x1B[?1;2c-after")
+	responses := takeKeyboardQueryResponses(&input, 6)
+	if !responses.keyboard || !responses.deviceAttributes {
+		t.Fatalf("responses = %#v", responses)
+	}
+	if string(input) != "before-middle-after" {
+		t.Fatalf("retained input = %q", input)
+	}
+}
+
+func TestKeyboardReplyAfterDeviceAttributesDoesNotEstablishSupport(t *testing.T) {
+	input := []byte("before\x1B[?1;2c-middle\x1B[?27u-after")
+	responses := takeKeyboardQueryResponses(&input, 6)
+	if responses.keyboard || !responses.deviceAttributes {
+		t.Fatalf("responses = %#v", responses)
+	}
+	if string(input) != "before-middle-after" {
+		t.Fatalf("retained input = %q", input)
+	}
+}
+
+func TestKeyboardQueryIgnoresMalformedDeviceAttributes(t *testing.T) {
+	input := []byte("before\x1B[?;2c-after")
+	responses := takeKeyboardQueryResponses(&input, 6)
+	if responses.keyboard || responses.deviceAttributes {
+		t.Fatalf("responses = %#v", responses)
+	}
+	if string(input) != "before\x1B[?;2c-after" {
+		t.Fatalf("retained input = %q", input)
+	}
+}
+
 func TestFailedResumeOutputRollsBackToOriginalMode(t *testing.T) {
 	backend := newFakeBackend()
 	session, err := startSession(backend, 0, 1, Options{})

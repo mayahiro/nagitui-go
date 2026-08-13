@@ -133,10 +133,11 @@ const (
 
 // KeyStroke is one normalized logical key and exact modifier set
 type KeyStroke struct {
-	code      vt.KeyCode
-	character rune
-	function  uint8
-	modifiers vt.Modifiers
+	code       vt.KeyCode
+	character  rune
+	function   uint8
+	functional uint32
+	modifiers  vt.Modifiers
 }
 
 // NewKeyStroke returns a named-key stroke
@@ -144,17 +145,22 @@ type KeyStroke struct {
 // Use NewCharacterKeyStroke for vt.KeyCharacter and NewFunctionKeyStroke for
 // vt.KeyFunction.
 func NewKeyStroke(code vt.KeyCode, modifiers vt.Modifiers) KeyStroke {
-	return KeyStroke{code: code, modifiers: modifiers}
+	return KeyStroke{code: code, modifiers: modifiers.WithoutLocks()}
 }
 
 // NewCharacterKeyStroke returns a Character stroke
 func NewCharacterKeyStroke(character rune, modifiers vt.Modifiers) KeyStroke {
-	return KeyStroke{code: vt.KeyCharacter, character: character, modifiers: modifiers}
+	return KeyStroke{code: vt.KeyCharacter, character: character, modifiers: modifiers.WithoutLocks()}
 }
 
 // NewFunctionKeyStroke returns a Function-key stroke
 func NewFunctionKeyStroke(number uint8, modifiers vt.Modifiers) KeyStroke {
-	return KeyStroke{code: vt.KeyFunction, function: number, modifiers: modifiers}
+	return KeyStroke{code: vt.KeyFunction, function: number, modifiers: modifiers.WithoutLocks()}
+}
+
+// NewFunctionalKeyStroke returns a protocol-defined functional-key stroke
+func NewFunctionalKeyStroke(number uint32, modifiers vt.Modifiers) KeyStroke {
+	return KeyStroke{code: vt.KeyFunctional, functional: number, modifiers: modifiers.WithoutLocks()}
 }
 
 // Code returns the logical key category
@@ -170,6 +176,11 @@ func (s KeyStroke) Character() (rune, bool) {
 // Function returns the number for a Function-key stroke
 func (s KeyStroke) Function() (uint8, bool) {
 	return s.function, s.code == vt.KeyFunction
+}
+
+// Functional returns the protocol-defined number for a Functional-key stroke
+func (s KeyStroke) Functional() (uint32, bool) {
+	return s.functional, s.code == vt.KeyFunctional
 }
 
 // Modifiers returns the exact modifier set
@@ -204,6 +215,8 @@ func keyStrokeFromKeyEvent(event vt.KeyEvent) KeyStroke {
 		return NewCharacterKeyStroke(event.Character, event.Modifiers)
 	case vt.KeyFunction:
 		return NewFunctionKeyStroke(event.Function, event.Modifiers)
+	case vt.KeyFunctional:
+		return NewFunctionalKeyStroke(event.Functional, event.Modifiers)
 	default:
 		return NewKeyStroke(event.Code, event.Modifiers)
 	}
@@ -223,6 +236,12 @@ func (s KeyStroke) Notation() string {
 	}
 	if s.modifiers.Meta {
 		notation.WriteString("Meta+")
+	}
+	if s.modifiers.Super {
+		notation.WriteString("Super+")
+	}
+	if s.modifiers.Hyper {
+		notation.WriteString("Hyper+")
 	}
 	switch s.code {
 	case vt.KeyCharacter:
@@ -264,6 +283,8 @@ func (s KeyStroke) Notation() string {
 		notation.WriteString("PageDown")
 	case vt.KeyFunction:
 		fmt.Fprintf(&notation, "F%d", s.function)
+	case vt.KeyFunctional:
+		fmt.Fprintf(&notation, "Functional(%d)", s.functional)
 	default:
 		notation.WriteString("Unknown")
 	}

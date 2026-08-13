@@ -47,6 +47,8 @@ Root packageはapplicationから使いやすくするためSurfaceのGeometry型
 
 `RuntimeConfig.WidthProfile`と`TerminalOptions.WidthProfile`はCoreのmeasure、render、hit geometry、cursor配置で使うcell幅policyを1個選択します。幅計算を行うWidget builderには`ViewContext.WidthProfile`を渡します。予期しないasync lifecycle transitionは上限付きRuntime notice queueまたはterminal notice-handler entry pointから観測できます
 
+`TerminalOptions.CapabilityDetection`は保守的なenvironment hintとactiveなKitty keyboard queryを明示的に有効化します。Immutableな結果は`ViewContext.TerminalCapabilities`から参照できます。検出は既定で無効であり、設定済みcolor outputを昇格させず上限として制約し、OSC 52やその他のoutput policyを許可しません。VTの`Capabilities.ColorLevel`はMonochrome、ANSI 16、Indexed 256、True Color outputを選択します
+
 `SuspendTerminalEffect`は標準runnerが通常terminalを復元して設定済みviewportを離れた後にApplication所有のblocking taskを実行します。Task return後はfull-screen viewportを再開するか新しいinline領域を確保し、pending decoder stateをresetしてfull redrawを強制します
 
 `NewInlineTerminalViewport(height)`は同じRuntimeをmain screenの上限付き領域で実行し、最終frameをterminal historyへ残します。標準runnerがcursor取得、resize配置、座標変換、復元を所有します
@@ -59,6 +61,7 @@ Go repository rootから実terminalで実行します
 | --- | --- |
 | [Presentation RulesとContent projection](examples/presentation/README.md) | `go run ./examples/presentation` |
 | [Counter](examples/counter/README.md) | `go run ./examples/counter` |
+| [Terminal capability](examples/terminal-capabilities/README.md) | `go run ./examples/terminal-capabilities` |
 | [Command palette](examples/command-palette/README.md) | `go run ./examples/command-palette` |
 | [Async search](examples/async-search/README.md) | `go run ./examples/async-search` |
 | [Suggestion popup](examples/suggestion-popup/README.md) | `go run ./examples/suggestion-popup` |

@@ -60,6 +60,13 @@ placement. Pass `ViewContext.WidthProfile` to width-sensitive widget builders.
 Unexpected asynchronous lifecycle transitions are available through the
 bounded Runtime notice queue or the terminal notice-handler entry points
 
+`TerminalOptions.CapabilityDetection` explicitly enables conservative
+environment hints and an active Kitty keyboard query. The immutable result is
+available as `ViewContext.TerminalCapabilities`. Detection is disabled by
+default, bounds configured color output without promoting it, and never
+grants OSC 52 or another output policy. VT `Capabilities.ColorLevel` selects
+Monochrome, ANSI 16, Indexed 256, or True Color output
+
 `SuspendTerminalEffect` runs an application-owned blocking task after the
 standard runner restores the ordinary terminal and leaves its configured
 viewport. Returning from the task resumes a full-screen viewport or reserves a
@@ -78,6 +85,7 @@ Run commands from the Go repository root in a real terminal
 | --- | --- |
 | [Presentation Rules and Content projection](examples/presentation/README.md) | `go run ./examples/presentation` |
 | [Counter](examples/counter/README.md) | `go run ./examples/counter` |
+| [Terminal capabilities](examples/terminal-capabilities/README.md) | `go run ./examples/terminal-capabilities` |
 | [Command palette](examples/command-palette/README.md) | `go run ./examples/command-palette` |
 | [Async search](examples/async-search/README.md) | `go run ./examples/async-search` |
 | [Suggestion popup](examples/suggestion-popup/README.md) | `go run ./examples/suggestion-popup` |

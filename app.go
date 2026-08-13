@@ -9,6 +9,8 @@ type ViewContext struct {
 	Size Size
 	// WidthProfile is the runtime terminal cell-width policy
 	WidthProfile celltext.WidthProfile
+	// TerminalCapabilities contains detected features and active input mode
+	TerminalCapabilities TerminalCapabilityProfile
 }
 
 // App is one application whose state is updated by sequential messages

@@ -62,6 +62,11 @@ const (
 type TerminalOptions struct {
 	// Capabilities contains optional output encoder capabilities
 	Capabilities vt.Capabilities
+	// CapabilityDetection controls environment inspection and active input query
+	CapabilityDetection TerminalCapabilityDetection
+	// CapabilityQueryTimeout is the maximum wait for active capability queries
+	// Zero performs an immediate query check.
+	CapabilityQueryTimeout time.Duration
 	// MouseTracking enables SGR mouse reports when non-nil
 	//
 	// It is disabled by default so terminal text selection remains available.
@@ -98,15 +103,16 @@ type TerminalOptions struct {
 // non-urgent rendering limited to 120 FPS
 func DefaultTerminalOptions() TerminalOptions {
 	return TerminalOptions{
-		Capabilities:          vt.BaselineCapabilities(),
-		CursorQueryTimeout:    100 * time.Millisecond,
-		EscapeTimeout:         25 * time.Millisecond,
-		QueueCapacity:         DefaultQueueCapacity,
-		TaskLimit:             DefaultTaskLimit,
-		SubscriptionCapacity:  DefaultSubscriptionCapacity,
-		RuntimeNoticeCapacity: DefaultRuntimeNoticeCapacity,
-		MinimumFrameInterval:  defaultMinimumFrameInterval,
-		WidthProfile:          celltext.ModernWidth(),
+		Capabilities:           vt.BaselineCapabilities(),
+		CapabilityQueryTimeout: 100 * time.Millisecond,
+		CursorQueryTimeout:     100 * time.Millisecond,
+		EscapeTimeout:          25 * time.Millisecond,
+		QueueCapacity:          DefaultQueueCapacity,
+		TaskLimit:              DefaultTaskLimit,
+		SubscriptionCapacity:   DefaultSubscriptionCapacity,
+		RuntimeNoticeCapacity:  DefaultRuntimeNoticeCapacity,
+		MinimumFrameInterval:   defaultMinimumFrameInterval,
+		WidthProfile:           celltext.ModernWidth(),
 	}
 }
 
@@ -185,12 +191,23 @@ func runTerminalContext[Message any](
 	if options.Clipboard > TerminalClipboardOSC52 {
 		return fmt.Errorf("nagi-tui: invalid terminal clipboard mode %d", options.Clipboard)
 	}
+	if options.CapabilityDetection > TerminalCapabilityDetectionEnabled {
+		return fmt.Errorf("nagi-tui: invalid terminal capability detection mode %d", options.CapabilityDetection)
+	}
+	if options.CapabilityQueryTimeout < 0 {
+		return errors.New("nagi-tui: terminal capability query timeout must not be negative")
+	}
 	inlineHeight, _ := options.Viewport.InlineHeight()
 	return ttyunix.Run(ttyunix.Options{
 		MouseTracking:      options.MouseTracking,
 		InlineHeight:       inlineHeight,
 		CursorQueryTimeout: options.CursorQueryTimeout,
 	}, func(session *ttyunix.Session) error {
+		terminalCapabilities, err := detectTerminalCapabilities(session, options)
+		if err != nil {
+			return err
+		}
+		outputCapabilities := resolvedOutputCapabilities(options, terminalCapabilities)
 		columns, rows, err := session.ViewportSize()
 		if err != nil {
 			return err
@@ -203,6 +220,7 @@ func runTerminalContext[Message any](
 		config.RuntimeNoticeCapacity = options.RuntimeNoticeCapacity
 		config.MinimumFrameInterval = options.MinimumFrameInterval
 		config.WidthProfile = options.WidthProfile
+		config.TerminalCapabilities = terminalCapabilities
 		runtime, err := newRuntimeWithClockAndWakeContext(ctx, app, config, clock, session.Notify)
 		if err != nil {
 			return err
@@ -212,6 +230,7 @@ func runTerminalContext[Message any](
 		defer stopContextWake()
 		focusFirst := options.FocusFirst
 		decoder := NewTimedInputDecoder(clock, options.EscapeTimeout)
+		decoder.SetKittyKeyboardMode(terminalCapabilities.KeyboardProtocol() == TerminalKeyboardKitty)
 		input := make([]byte, 8_192)
 
 		if session.TakeResize() {
@@ -240,7 +259,7 @@ func runTerminalContext[Message any](
 				return err
 			}
 		}
-		if err := writeTerminalOutput(session, runtime, options.Capabilities, options.Clipboard); err != nil {
+		if err := writeTerminalOutput(session, runtime, outputCapabilities, options.Clipboard); err != nil {
 			return err
 		}
 		if runtime.ExitRequested() {
@@ -329,7 +348,7 @@ func runTerminalContext[Message any](
 					decoder.Reset()
 				}
 			}
-			if err := writeTerminalOutput(session, runtime, options.Capabilities, options.Clipboard); err != nil {
+			if err := writeTerminalOutput(session, runtime, outputCapabilities, options.Clipboard); err != nil {
 				return err
 			}
 			if exit || runtime.ExitRequested() {
@@ -338,6 +357,69 @@ func runTerminalContext[Message any](
 		}
 		return nil
 	})
+}
+
+func detectTerminalCapabilities(
+	session *ttyunix.Session,
+	options TerminalOptions,
+) (TerminalCapabilityProfile, error) {
+	if options.CapabilityDetection == TerminalCapabilityDetectionDisabled {
+		return TerminalCapabilityProfile{}, nil
+	}
+	profile := processEnvironmentProfile()
+	support, err := session.EnableExtendedKeyboard(options.CapabilityQueryTimeout)
+	if err != nil {
+		return TerminalCapabilityProfile{}, err
+	}
+	switch support {
+	case ttyunix.KeyboardSupportUnsupported:
+		return profile.WithExtendedKeyboard(TerminalFeatureUnsupported, TerminalKeyboardLegacy), nil
+	case ttyunix.KeyboardSupportSupported:
+		return profile.WithExtendedKeyboard(TerminalFeatureSupported, TerminalKeyboardKitty), nil
+	default:
+		return profile.WithExtendedKeyboard(TerminalFeatureUnknown, TerminalKeyboardLegacy), nil
+	}
+}
+
+func resolvedOutputCapabilities(
+	options TerminalOptions,
+	profile TerminalCapabilityProfile,
+) vt.Capabilities {
+	capabilities := options.Capabilities
+	if options.CapabilityDetection == TerminalCapabilityDetectionEnabled {
+		detected := vt.ColorIndexed256
+		switch profile.ColorLevel() {
+		case TerminalColorMonochrome:
+			detected = vt.ColorMonochrome
+		case TerminalColorANSI16:
+			detected = vt.ColorANSI16
+		case TerminalColorIndexed256:
+			detected = vt.ColorIndexed256
+		case TerminalColorTrueColor:
+			detected = vt.ColorTrueColor
+		}
+		capabilities.ColorLevel = boundedVTColorLevel(capabilities.ColorLevel, detected)
+	}
+	return capabilities
+}
+
+func boundedVTColorLevel(configured, detected vt.ColorLevel) vt.ColorLevel {
+	rank := func(level vt.ColorLevel) int {
+		switch level {
+		case vt.ColorMonochrome:
+			return 0
+		case vt.ColorANSI16:
+			return 1
+		case vt.ColorTrueColor:
+			return 3
+		default:
+			return 2
+		}
+	}
+	if rank(detected) < rank(configured) {
+		return detected
+	}
+	return configured
 }
 
 func runPendingTerminalTasks[Message any](

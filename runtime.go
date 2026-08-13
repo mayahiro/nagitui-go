@@ -58,6 +58,8 @@ type RuntimeConfig struct {
 	//
 	// A custom override must return stable widths for this Runtime's lifetime.
 	WidthProfile celltext.WidthProfile
+	// TerminalCapabilities contains features available to application views
+	TerminalCapabilities TerminalCapabilityProfile
 }
 
 // NewRuntimeConfig returns settings with the default bounded queue capacity
@@ -106,6 +108,7 @@ type Runtime[Message any] struct {
 	urgentFrame             bool
 	minimumFrameInterval    time.Duration
 	widthProfile            celltext.WidthProfile
+	terminalCapabilities    TerminalCapabilityProfile
 	lastFrame               Timestamp
 	hasLastFrame            bool
 	previousSurface         *surface.Surface
@@ -235,6 +238,7 @@ func newRuntimeWithClockAndWakeContext[Message any](
 		urgentFrame:          true,
 		minimumFrameInterval: config.MinimumFrameInterval,
 		widthProfile:         config.WidthProfile,
+		terminalCapabilities: config.TerminalCapabilities,
 		interaction:          NewInteractionState(),
 		treeIndex:            newTreeIndex(),
 		nextTreeIndex:        newTreeIndex(),
@@ -944,8 +948,9 @@ func (r *Runtime[Message]) handleTextInput(id NodeID, event vt.Event) (EventResu
 			kind = textEditBackspace
 		case vt.KeyDelete:
 			kind = textEditDelete
-		case vt.KeyCharacter:
-			if event.Key.Modifiers.Control || event.Key.Modifiers.Meta || !event.Key.HasText {
+		case vt.KeyCharacter, vt.KeyUnknown:
+			if event.Key.Modifiers.Control || event.Key.Modifiers.Meta ||
+				event.Key.Modifiers.Super || event.Key.Modifiers.Hyper || !event.Key.HasText {
 				return EventResult[Message]{}, false
 			}
 			inserted = event.Key.Text
@@ -1286,7 +1291,9 @@ func (r *Runtime[Message]) ensureTree() error {
 	if r.viewTree != nil {
 		return nil
 	}
-	view := r.app.View(ViewContext{Size: r.size, WidthProfile: r.widthProfile})
+	view := r.app.View(ViewContext{
+		Size: r.size, WidthProfile: r.widthProfile, TerminalCapabilities: r.terminalCapabilities,
+	})
 	view.prepareVirtualFlows(r.size, r.interaction, r.widthProfile)
 	index := &r.nextTreeIndex
 	actions := &r.nextActionIndex
@@ -1350,7 +1357,9 @@ func (r *Runtime[Message]) renderIfDirty(recycleSurface bool) (*Frame, error) {
 	if !r.urgentFrame && r.minimumFrameInterval > 0 && r.hasLastFrame && now < r.lastFrame.Add(r.minimumFrameInterval) {
 		return nil, nil
 	}
-	view := r.app.View(ViewContext{Size: r.size, WidthProfile: r.widthProfile})
+	view := r.app.View(ViewContext{
+		Size: r.size, WidthProfile: r.widthProfile, TerminalCapabilities: r.terminalCapabilities,
+	})
 	view.prepareVirtualFlows(r.size, r.interaction, r.widthProfile)
 	index := &r.nextTreeIndex
 	actions := &r.nextActionIndex

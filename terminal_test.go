@@ -18,6 +18,12 @@ func TestDefaultTerminalOptionsPreserveUnfocusedNonMouseBehavior(t *testing.T) {
 	if options.Clipboard != TerminalClipboardDisabled {
 		t.Fatalf("Clipboard = %d, want disabled", options.Clipboard)
 	}
+	if options.CapabilityDetection != TerminalCapabilityDetectionDisabled {
+		t.Fatalf("CapabilityDetection = %d, want disabled", options.CapabilityDetection)
+	}
+	if options.CapabilityQueryTimeout != 100*time.Millisecond {
+		t.Fatalf("CapabilityQueryTimeout = %s, want 100ms", options.CapabilityQueryTimeout)
+	}
 	if _, inline := options.Viewport.InlineHeight(); inline {
 		t.Fatal("Viewport is inline, want fullscreen")
 	}
@@ -29,6 +35,33 @@ func TestDefaultTerminalOptionsPreserveUnfocusedNonMouseBehavior(t *testing.T) {
 	}
 	if options.MinimumFrameInterval != (time.Second+119)/120 {
 		t.Fatalf("MinimumFrameInterval = %s, want 120 FPS cap", options.MinimumFrameInterval)
+	}
+}
+
+func TestDetectedColorLevelBoundsExplicitEncoderLevel(t *testing.T) {
+	options := DefaultTerminalOptions()
+	options.Capabilities = vt.ModernCapabilities()
+	options.CapabilityDetection = TerminalCapabilityDetectionEnabled
+
+	indexed := (TerminalCapabilityProfile{}).WithColorLevel(TerminalColorIndexed256)
+	if got := resolvedOutputCapabilities(options, indexed).ColorLevel; got != vt.ColorIndexed256 {
+		t.Fatalf("indexed ColorLevel = %d", got)
+	}
+	ansi := (TerminalCapabilityProfile{}).WithColorLevel(TerminalColorANSI16)
+	if got := resolvedOutputCapabilities(options, ansi).ColorLevel; got != vt.ColorANSI16 {
+		t.Fatalf("ANSI ColorLevel = %d", got)
+	}
+	monochrome := (TerminalCapabilityProfile{}).WithColorLevel(TerminalColorMonochrome)
+	if got := resolvedOutputCapabilities(options, monochrome).ColorLevel; got != vt.ColorMonochrome {
+		t.Fatalf("monochrome ColorLevel = %d", got)
+	}
+	trueColor := (TerminalCapabilityProfile{}).WithColorLevel(TerminalColorTrueColor)
+	if got := resolvedOutputCapabilities(options, trueColor).ColorLevel; got != vt.ColorTrueColor {
+		t.Fatalf("true ColorLevel = %d", got)
+	}
+	options.Capabilities = vt.BaselineCapabilities()
+	if got := resolvedOutputCapabilities(options, trueColor).ColorLevel; got != vt.ColorIndexed256 {
+		t.Fatalf("baseline ColorLevel = %d", got)
 	}
 }
 
@@ -160,6 +193,32 @@ func TestRunTerminalRejectsInvalidClipboardModeBeforeOpeningTerminal(t *testing.
 	)
 	if err == nil || err.Error() != "nagi-tui: invalid terminal clipboard mode 255" {
 		t.Fatalf("error = %v, want invalid clipboard mode", err)
+	}
+}
+
+func TestRunTerminalRejectsInvalidCapabilityOptionsBeforeOpeningTerminal(t *testing.T) {
+	options := DefaultTerminalOptions()
+	options.CapabilityDetection = TerminalCapabilityDetection(255)
+	err := RunTerminalContext[string](
+		context.Background(),
+		&clipboardTerminalApp{},
+		options,
+		func(vt.Event) EventAction[string] { return IgnoreAction[string]() },
+	)
+	if err == nil || err.Error() != "nagi-tui: invalid terminal capability detection mode 255" {
+		t.Fatalf("invalid mode error = %v", err)
+	}
+
+	options = DefaultTerminalOptions()
+	options.CapabilityQueryTimeout = -time.Nanosecond
+	err = RunTerminalContext[string](
+		context.Background(),
+		&clipboardTerminalApp{},
+		options,
+		func(vt.Event) EventAction[string] { return IgnoreAction[string]() },
+	)
+	if err == nil || err.Error() != "nagi-tui: terminal capability query timeout must not be negative" {
+		t.Fatalf("negative timeout error = %v", err)
 	}
 }
 

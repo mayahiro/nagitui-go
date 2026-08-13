@@ -57,6 +57,7 @@ type TimedInputDecoder struct {
 	escapeTimeout  time.Duration
 	escapeDeadline Timestamp
 	hasDeadline    bool
+	kittyKeyboard  bool
 }
 
 // NewTimedInputDecoder returns a timed decoder
@@ -74,6 +75,13 @@ func NewTimedInputDecoder(clock Clock, escapeTimeout time.Duration) *TimedInputD
 		clock:         clock,
 		escapeTimeout: escapeTimeout,
 	}
+}
+
+// SetKittyKeyboardMode selects Kitty semantics for otherwise ambiguous
+// function-key sequences
+func (d *TimedInputDecoder) SetKittyKeyboardMode(enabled bool) {
+	d.kittyKeyboard = enabled
+	d.decoder.SetKittyKeyboardMode(enabled)
 }
 
 // Feed consumes one arbitrary input byte chunk
@@ -101,6 +109,7 @@ func (d *TimedInputDecoder) Flush() []vt.Event {
 // Reset discards incomplete terminal input without emitting an Event
 func (d *TimedInputDecoder) Reset() {
 	d.decoder = vt.NewDecoder()
+	d.decoder.SetKittyKeyboardMode(d.kittyKeyboard)
 	d.hasDeadline = false
 }
 

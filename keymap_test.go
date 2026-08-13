@@ -88,6 +88,27 @@ func TestKeyStrokeFromEventRejectsInvalidUTF8(t *testing.T) {
 	}
 }
 
+func TestKeyStrokeIdentityIgnoresLocksAndDistinguishesExtendedModifiers(t *testing.T) {
+	withLocks := NewKeyStroke(vt.KeyEnter, vt.Modifiers{Super: true, CapsLock: true, NumLock: true})
+	withoutLocks := NewKeyStroke(vt.KeyEnter, vt.Modifiers{Super: true})
+	hyper := NewKeyStroke(vt.KeyEnter, vt.Modifiers{Hyper: true})
+	if withLocks != withoutLocks {
+		t.Fatalf("lock-bearing stroke = %#v, want %#v", withLocks, withoutLocks)
+	}
+	if withoutLocks == hyper {
+		t.Fatal("Super and Hyper strokes compare equal")
+	}
+	if got := withoutLocks.Notation(); got != "Super+Enter" {
+		t.Fatalf("Super notation = %q", got)
+	}
+	if got := hyper.Notation(); got != "Hyper+Enter" {
+		t.Fatalf("Hyper notation = %q", got)
+	}
+	if got := NewFunctionalKeyStroke(57_428, vt.Modifiers{}).Notation(); got != "Functional(57428)" {
+		t.Fatalf("Functional notation = %q", got)
+	}
+}
+
 func TestNodeKeyModifiersDoNotMutateEarlierNodeValues(t *testing.T) {
 	descriptor := NewActionDescriptor(
 		"app.action",
