@@ -15,7 +15,7 @@ subscriptions, and deterministic test support
 ## Installation
 
 ```sh
-go get github.com/mayahiro/nagitui-go@v0.1.0
+go get github.com/mayahiro/nagitui-go@latest
 ```
 
 ## Quick start

@@ -12,7 +12,7 @@ Nagi TUI Go実装はimmutableなTerminal Presentation Rules、上限付きConten
 ## 導入
 
 ```sh
-go get github.com/mayahiro/nagitui-go@v0.1.0
+go get github.com/mayahiro/nagitui-go@latest
 ```
 
 ## Quick start
