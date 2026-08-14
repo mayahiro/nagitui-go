@@ -2,8 +2,9 @@
 
 [日本語](README_ja.md)
 
-Nagi TUI for Go provides a native cell-based TUI runtime, Unicode-aware
-semantic nodes, 21 standard widgets, supervised asynchronous work,
+Nagi TUI for Go provides immutable Terminal Presentation Rules, bounded
+Content-to-Node projection, a native cell-based TUI runtime, Unicode-aware
+semantic nodes, 31 standard widgets, supervised asynchronous work,
 subscriptions, and deterministic test support
 
 ## Requirements
@@ -14,7 +15,7 @@ subscriptions, and deterministic test support
 ## Installation
 
 ```sh
-go get github.com/mayahiro/nagitui-go@v0.1.0
+go get github.com/mayahiro/nagitui-go@latest
 ```
 
 ## Quick start
@@ -29,10 +30,11 @@ go run ./examples/counter
 
 | Package | Responsibility |
 | --- | --- |
-| Module root `tui` | App lifecycle, semantic nodes, layout, events, Effects, Subscriptions, and terminal loop |
+| Module root `tui` | Terminal Presentation Rules, bounded Content-to-Node projection, App lifecycle, semantic nodes, scoped key maps, layout, events, Effects, Subscriptions, and terminal loop |
 | `surface` | Geometry, Cells, Surface drawing, composition, diffing, and snapshots |
-| `widget` | 21 standard widgets built from the public TUI API |
+| `widget` | 31 standard widgets built from the public TUI API |
 | `tuitest` | Virtual input, resize, time, effects, subscriptions, and frame inspection |
+| `github.com/mayahiro/nagi-go/content` | Shared source-neutral Content used by Presentation Rules and projection |
 | `github.com/mayahiro/nagi-go/text` | Shared Unicode 17 text primitives |
 | `github.com/mayahiro/nagi-go/vt` | Shared typed terminal input/output, Color, Attributes, and Style |
 
@@ -45,10 +47,41 @@ define behavior shared with the Rust implementation
 ## Testing applications
 
 Package `tuitest` drives messages, terminal input, resize, virtual time,
-Effects, Subscriptions, and frame inspection without a real terminal
+Effects, Subscriptions, pending terminal tasks and clipboard requests, Runtime
+notices, frame inspection, and active resolved action queries without a real
+terminal
 
 The shared [event-driven application architecture](https://github.com/mayahiro/nagi/blob/main/docs/EVENT_DRIVEN_APPLICATIONS.md)
 explains how process output and timers enter Nagi without a second UI loop
+
+`RuntimeConfig.WidthProfile` and `TerminalOptions.WidthProfile` select one cell
+width policy for Core measurement, rendering, hit geometry, and cursor
+placement. Pass `ViewContext.WidthProfile` to width-sensitive widget builders.
+Unexpected asynchronous lifecycle transitions are available through the
+bounded Runtime notice queue, the terminal notice handlers, or the direct
+optional-Message notice mappers. Runtime close remains request-only; custom
+owners can optionally wait for Nagi-started producers to return
+
+`RuntimeConfig.MaxUpdatesPerCycle` and `TerminalOptions.MaxUpdatesPerCycle`
+default to 64 and bound consecutive asynchronous updates before the terminal
+runner checks input and resize again
+
+`TerminalOptions.CapabilityDetection` explicitly enables conservative
+environment hints and an active Kitty keyboard query. The immutable result is
+available as `ViewContext.TerminalCapabilities`. Detection is disabled by
+default, bounds configured color output without promoting it, and never
+grants OSC 52 or another output policy. VT `Capabilities.ColorLevel` selects
+Monochrome, ANSI 16, Indexed 256, or True Color output
+
+`SuspendTerminalEffect` runs an application-owned blocking task after the
+standard runner restores the ordinary terminal and leaves its configured
+viewport. Returning from the task resumes a full-screen viewport or reserves a
+fresh inline region, resets pending decoder state, and forces a full redraw
+
+`NewInlineTerminalViewport(height)` runs the same Runtime in a bounded region
+of the main screen and leaves its final frame in terminal history. The standard
+runner owns cursor discovery, resize placement, coordinate translation, and
+restoration
 
 ## Examples
 
@@ -56,11 +89,20 @@ Run commands from the Go repository root in a real terminal
 
 | Example | Command |
 | --- | --- |
+| [Presentation Rules and Content projection](examples/presentation/README.md) | `go run ./examples/presentation` |
 | [Counter](examples/counter/README.md) | `go run ./examples/counter` |
+| [Terminal capabilities](examples/terminal-capabilities/README.md) | `go run ./examples/terminal-capabilities` |
 | [Command palette](examples/command-palette/README.md) | `go run ./examples/command-palette` |
 | [Async search](examples/async-search/README.md) | `go run ./examples/async-search` |
+| [Suggestion popup](examples/suggestion-popup/README.md) | `go run ./examples/suggestion-popup` |
+| [JSON inspector](examples/json-inspector/README.md) | `go run ./examples/json-inspector` |
+| [Code view](examples/code-view/README.md) | `go run ./examples/code-view` |
+| [Diff view](examples/diff-view/README.md) | `go run ./examples/diff-view` |
 | [Event-driven log viewer](examples/log-viewer/README.md) | `go run ./examples/log-viewer` |
+| [Terminal suspend and resume](examples/terminal-suspend/README.md) | `go run ./examples/terminal-suspend` |
+| [Inline terminal viewport](examples/inline-terminal/README.md) | `go run ./examples/inline-terminal` |
 | [Virtual scroll](examples/virtual-scroll/README.md) | `go run ./examples/virtual-scroll` |
+| [Variable-height feed](examples/virtual-feed/README.md) | `go run ./examples/virtual-feed` |
 | [Widget gallery](examples/widget-gallery/README.md) | `go run ./examples/widget-gallery` |
 | [Extended widget gallery](examples/extended-widget-gallery/README.md) | `go run ./examples/extended-widget-gallery` |
 | [Dashboard](examples/dashboard/README.md) | `go run ./examples/dashboard` |
@@ -73,12 +115,94 @@ Run commands from the Go repository root in a real terminal
 
 Terminal input and output must be connected to a terminal. Mouse reporting is
 disabled by default. Raw mode and screen restoration are best effort on normal
-return, error, and panic paths. Process abort, nested terminal sessions,
-suspend and resume, and `/dev/tty` acquisition are not supported
+return, error, and panic paths. Application-requested temporary terminal
+suspension is supported. Process abort, nested terminal sessions, job-control
+suspension of the Nagi process, and `/dev/tty` acquisition are not supported
 
 `ScrollViewport` clips and scrolls an eager child tree. Large data sets can use
 `VirtualScrollViewport`, which declares the complete cell extent and constructs
-only the current visible or bounded-overscan `VirtualFragment`
+only the current visible or bounded-overscan `VirtualFragment`.
+`Node.RevealDescendant` keeps a stable descendant ID visible without moving
+focus; virtual targets must be present in the current fragment
+
+`VirtualFlow` retains variable item heights and stable anchors across append,
+prepend, removal, streaming updates, and width changes while constructing only
+the visible fragment and Cell-bounded overscan. It has zero intrinsic height,
+so assign a layout `Length`. `widget.VirtualFeed` adds end following and
+application-controlled empty, loading, and unread slots without owning domain
+state
+
+`TextArea` keeps no-wrap behavior by default. `SoftWrap` adds visual-line
+navigation, `BoundaryNavigation` can pass Up and Down through at visual
+boundaries, and `Viewport` follows an application-identified zero-width typed
+cursor anchor without an extra Tab stop. The cursor does not draw a caret
+grapheme or shift following text
+
+`Composer` adds controlled submit and history recall, automatic row bounds,
+optional validation content, and insertion limits over `TextArea`. Applications
+retain ownership of message meaning, history persistence, and sensitive-value
+policy
+
+`widget.SuggestionPopup` composes a generic `AnchoredOverlay` with controlled
+stable candidate IDs, a bounded selected row window, replaceable loading and
+empty content, semantic actions, and focus-preserving pointer activation. The
+application owns query parsing, ranking, asynchronous Effects, cancellation,
+and acceptance meaning
+
+`SelectableText` adds controlled grapheme-aligned keyboard and left-button
+drag selection over immutable styled content. Stable-ID pointer capture
+survives controlled view rebuilds, and a drag can request one-Cell edge
+scrolling from its nearest viewport. Copy actions emit application messages.
+Applications may return `SetClipboardEffect`, and `TerminalClipboardOSC52`
+provides an explicit write-only terminal backend. Redaction policy, terminal
+support detection, and OS-specific clipboard commands remain outside the
+widget
+
+`widget.JSONInspector` projects an immutable typed `JSONDocument` into a
+controlled tree with bounded row construction and grapheme-safe scalar
+previews. Copy requests retain the complete compact value. Parsing, schema
+validation, redaction, clipboard policy, and domain meaning remain
+application-owned
+
+`widget.CodeView` projects immutable application-styled logical lines through
+a memoized terminal-width layout. Tabs, wrapping, line numbers, line selection,
+horizontal scrolling, bounded Node construction, and complete-line copy stay
+independent from syntax parsing, files, diff meaning, and clipboard I/O
+
+`widget.DiffView` accepts immutable typed metadata, hunk, context, addition,
+and deletion lines. It reuses bounded code projection while adding old and new
+line numbers, unified markers, semantic styles, and on-demand unified copy.
+Diff parsing, repository access, patch application, approval policy, and
+clipboard I/O remain application-owned
+
+Core `SplitPane` allocates two horizontal or vertical panes with a one-Cell
+divider, per-pane minima, a basis-point ratio, and a deterministic collapse
+target. Omitted panes are absent from rendering, semantic routing, focus, and
+lazy virtual preparation. `widget.SplitPane` adds controlled F6 focus movement,
+axis-aware keyboard resizing, and divider dragging without assigning pane
+meaning
+
+`widget.Drawer` constructs its body only while its controlled open state is
+true, places it at a viewport edge, and reuses Core Modal focus and routing by
+default. Applications own open-state persistence, outside-click behavior, and
+the meaning of drawer content
+
+`widget.StatusBar` composes arbitrary one-row slots through Core
+`ResponsiveRow`, which retains higher-priority start, center, or end items
+before semantic indexing. `widget.ToastRegion` overlays only the newest
+configured number of lazy `Toast` bodies. Applications own notification
+records and may pair an After Effect with stable identity or a generation for
+stale-safe expiry
+
+`Disclosure` keeps expanded state in the application and constructs its body
+only while expanded. Core Modal scopes focus their first descendant on entry
+and return to previous focus on close by default; both targets are configurable.
+`Node.BlockUnhandledEvents` adds an opt-in hard input boundary when a modal must
+also stop unhandled raw Events and terminal fallback mapping
+
+`Dialog` composes application-defined action lists, lazy controlled details,
+explicit default and cancel targets, focus policies, and Cell-width action
+wrapping. `ConfirmDialog` is the explicit-default two-action convenience
 
 ## License
 

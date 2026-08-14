@@ -20,7 +20,10 @@ func DefaultSelectStyle() SelectStyle {
 	return SelectStyle{Focused: vt.Style{Reverse: true}, Disabled: vt.Style{Dim: true}}
 }
 
-// Select is a compact selector that exposes one application-owned option at a time
+// Select is a compact selector with semantic keyboard and raw pointer selection
+//
+// Keyboard handling declares standard activation and selection actions.
+// Left-button press remains raw so keyboard rebinding does not remove it.
 type Select[Message any] struct {
 	id          tui.NodeID
 	options     []string
@@ -59,6 +62,15 @@ func (s Select[Message]) Style(style SelectStyle) Select[Message] {
 	return s
 }
 
+// ActionDescriptors returns the ordered semantic actions declared by this selector
+//
+// The order is activate, previous, next, first, and last. Every descriptor is
+// disabled-pass-through when the selector is disabled or empty.
+func (s Select[Message]) ActionDescriptors() []tui.ActionDescriptor {
+	descriptors := selectActionDescriptors(s.enabled && len(s.options) > 0)
+	return append([]tui.ActionDescriptor(nil), descriptors[:]...)
+}
+
 // Node builds the public semantic node for this selector
 func (s Select[Message]) Node() tui.Node[Message] {
 	selected, hasSelection := navigateSelection(len(s.options), s.selected, navigationNormalize)
@@ -67,48 +79,123 @@ func (s Select[Message]) Node() tui.Node[Message] {
 		label = s.options[selected]
 	}
 	content := "< " + label + " >"
+	descriptors := selectActionDescriptors(s.enabled && hasSelection)
 	if !s.enabled || !hasSelection {
-		return tui.StyledText[Message](content, s.style.Disabled).WithID(s.id)
+		actions := make([]tui.Action[Message], len(descriptors))
+		for index, descriptor := range descriptors {
+			actions[index] = tui.NewAction[Message](descriptor, nil)
+		}
+		return tui.StyledText[Message](content, s.style.Disabled).
+			WithID(s.id).
+			OnActions(s.id, actions)
+	}
+	actions := make([]tui.Action[Message], len(descriptors))
+	for index, descriptor := range descriptors {
+		actions[index] = newSelectAction(
+			descriptor, selectAction(index), len(s.options), selected, s.id, s.onSelect,
+		)
 	}
 	return tui.StyledText[Message](content, s.style.Normal).
 		Focusable(s.id).
 		WithFocusedStyle(s.style.Focused).
+		OnActions(s.id, actions).
 		OnEvent(s.id, func(event vt.Event) tui.EventResult[Message] {
-			next, handled := selectEvent(event, len(s.options), selected)
-			if !handled {
+			if !isPointerActivationEvent(event) {
 				return tui.IgnoreResult[Message]()
 			}
-			result := tui.ConsumeResult[Message]().Focus(s.id)
-			if next != selected {
-				result = result.Emit(s.onSelect(next))
-			}
-			return result
+			return selectActionResult(selectActivate, len(s.options), selected, s.id, s.onSelect)
 		})
 }
 
-func selectEvent(event vt.Event, count, selected int) (int, bool) {
-	if isActivationEvent(event) {
-		return (selected + 1) % count, true
+type selectAction uint8
+
+const (
+	selectActivate selectAction = iota
+	selectPrevious
+	selectNext
+	selectFirst
+	selectLast
+)
+
+var selectNavigationActionDescriptors = [4]tui.ActionDescriptor{
+	tui.NewActionDescriptor(
+		SelectionPreviousActionID,
+		selectionPreviousActionLabel,
+		[]tui.KeyBinding{
+			repeatableActionBinding(vt.KeyLeft),
+			repeatableActionBinding(vt.KeyUp),
+		},
+	),
+	tui.NewActionDescriptor(
+		SelectionNextActionID,
+		selectionNextActionLabel,
+		[]tui.KeyBinding{
+			repeatableActionBinding(vt.KeyRight),
+			repeatableActionBinding(vt.KeyDown),
+		},
+	),
+	tui.NewActionDescriptor(
+		SelectionFirstActionID,
+		selectionFirstActionLabel,
+		[]tui.KeyBinding{repeatableActionBinding(vt.KeyHome)},
+	),
+	tui.NewActionDescriptor(
+		SelectionLastActionID,
+		selectionLastActionLabel,
+		[]tui.KeyBinding{repeatableActionBinding(vt.KeyEnd)},
+	),
+}
+
+func selectActionDescriptors(enabled bool) [5]tui.ActionDescriptor {
+	availability := tui.ActionEnabled
+	if !enabled {
+		availability = tui.ActionDisabledPassThrough
 	}
-	if event.Kind != vt.EventKey || event.Key.Action == vt.KeyRelease {
-		return 0, false
+	return [5]tui.ActionDescriptor{
+		ActivateActionDescriptor().WithAvailability(availability),
+		selectNavigationActionDescriptors[0].WithAvailability(availability),
+		selectNavigationActionDescriptors[1].WithAvailability(availability),
+		selectNavigationActionDescriptors[2].WithAvailability(availability),
+		selectNavigationActionDescriptors[3].WithAvailability(availability),
 	}
-	modifiers := event.Key.Modifiers
-	if modifiers.Alt || modifiers.Control || modifiers.Meta {
-		return 0, false
+}
+
+func newSelectAction[Message any](
+	descriptor tui.ActionDescriptor,
+	action selectAction,
+	count int,
+	selected int,
+	id tui.NodeID,
+	onSelect func(int) Message,
+) tui.Action[Message] {
+	return tui.NewAction(descriptor, func(tui.ActionEvent) tui.EventResult[Message] {
+		return selectActionResult(action, count, selected, id, onSelect)
+	})
+}
+
+func selectActionResult[Message any](
+	action selectAction,
+	count int,
+	selected int,
+	id tui.NodeID,
+	onSelect func(int) Message,
+) tui.EventResult[Message] {
+	next := selected
+	switch action {
+	case selectActivate:
+		next = (selected + 1) % count
+	case selectPrevious:
+		next, _ = navigateSelection(count, selected, navigationUp)
+	case selectNext:
+		next, _ = navigateSelection(count, selected, navigationDown)
+	case selectFirst:
+		next, _ = navigateSelection(count, selected, navigationHome)
+	case selectLast:
+		next, _ = navigateSelection(count, selected, navigationEnd)
 	}
-	action := navigationNormalize
-	switch event.Key.Code {
-	case vt.KeyLeft, vt.KeyUp:
-		action = navigationUp
-	case vt.KeyRight, vt.KeyDown:
-		action = navigationDown
-	case vt.KeyHome:
-		action = navigationHome
-	case vt.KeyEnd:
-		action = navigationEnd
-	default:
-		return 0, false
+	result := tui.ConsumeResult[Message]().Focus(id)
+	if next != selected {
+		result = result.Emit(onSelect(next))
 	}
-	return navigateSelection(count, selected, action)
+	return result
 }

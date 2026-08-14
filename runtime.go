@@ -1,16 +1,22 @@
 package tui
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"time"
 
+	celltext "github.com/mayahiro/nagi-go/text"
 	"github.com/mayahiro/nagi-go/vt"
 	"github.com/mayahiro/nagitui-go/surface"
 )
 
 // DefaultQueueCapacity is the default maximum number of waiting messages
 const DefaultQueueCapacity = 4_096
+
+// DefaultMaxUpdatesPerCycle is the default maximum number of application
+// updates in one scheduling cycle
+const DefaultMaxUpdatesPerCycle = 64
 
 // DefaultTaskLimit is the default maximum number of concurrent effect tasks
 const DefaultTaskLimit = 64
@@ -19,15 +25,23 @@ const DefaultTaskLimit = 64
 // capacity
 const DefaultSubscriptionCapacity = 256
 
+// DefaultRuntimeNoticeCapacity is the default maximum number of retained
+// asynchronous lifecycle notices
+const DefaultRuntimeNoticeCapacity = 256
+
 var (
 	// ErrZeroQueueCapacity indicates that runtime queue capacity is zero
 	ErrZeroQueueCapacity = errors.New("runtime queue capacity must be positive")
+	// ErrZeroMaxUpdatesPerCycle indicates that the per-cycle update limit is zero
+	ErrZeroMaxUpdatesPerCycle = errors.New("runtime maximum updates per cycle must be positive")
 	// ErrQueueFull indicates that the bounded runtime message queue is full
 	ErrQueueFull = errors.New("runtime message queue is full")
 	// ErrZeroTaskLimit indicates that concurrent task limit is zero
 	ErrZeroTaskLimit = errors.New("runtime task limit must be positive")
 	// ErrZeroSubscriptionCapacity indicates that subscription capacity is zero
 	ErrZeroSubscriptionCapacity = errors.New("runtime subscription capacity must be positive")
+	// ErrZeroRuntimeNoticeCapacity indicates that runtime notice capacity is zero
+	ErrZeroRuntimeNoticeCapacity = errors.New("runtime notice capacity must be positive")
 	// ErrNegativeFrameInterval indicates that a frame interval is negative
 	ErrNegativeFrameInterval = errors.New("runtime minimum frame interval must not be negative")
 )
@@ -38,21 +52,34 @@ type RuntimeConfig struct {
 	Size Size
 	// QueueCapacity is the maximum number of waiting messages
 	QueueCapacity int
+	// MaxUpdatesPerCycle is the maximum application updates in one scheduling cycle
+	MaxUpdatesPerCycle int
 	// TaskLimit is the maximum number of effect tasks executing concurrently
 	TaskLimit int
 	// SubscriptionCapacity is the maximum pending values retained per source
 	SubscriptionCapacity int
+	// RuntimeNoticeCapacity is the maximum retained asynchronous lifecycle notices
+	RuntimeNoticeCapacity int
 	// MinimumFrameInterval limits non-urgent rendering; zero disables the limit
 	MinimumFrameInterval time.Duration
+	// WidthProfile is the terminal cell-width policy used by the complete view
+	//
+	// A custom override must return stable widths for this Runtime's lifetime.
+	WidthProfile celltext.WidthProfile
+	// TerminalCapabilities contains features available to application views
+	TerminalCapabilities TerminalCapabilityProfile
 }
 
 // NewRuntimeConfig returns settings with the default bounded queue capacity
 func NewRuntimeConfig(size Size) RuntimeConfig {
 	return RuntimeConfig{
-		Size:                 size,
-		QueueCapacity:        DefaultQueueCapacity,
-		TaskLimit:            DefaultTaskLimit,
-		SubscriptionCapacity: DefaultSubscriptionCapacity,
+		Size:                  size,
+		QueueCapacity:         DefaultQueueCapacity,
+		MaxUpdatesPerCycle:    DefaultMaxUpdatesPerCycle,
+		TaskLimit:             DefaultTaskLimit,
+		SubscriptionCapacity:  DefaultSubscriptionCapacity,
+		RuntimeNoticeCapacity: DefaultRuntimeNoticeCapacity,
+		WidthProfile:          celltext.ModernWidth(),
 	}
 }
 
@@ -81,30 +108,44 @@ func (f Frame) Operations() []vt.TerminalOp {
 
 // Runtime is a single-goroutine application runtime with a bounded FIFO queue
 type Runtime[Message any] struct {
-	app                  App[Message]
-	clock                Clock
-	size                 Size
-	queue                []queuedMessage[Message]
-	queueCapacity        int
-	dirty                bool
-	urgentFrame          bool
-	minimumFrameInterval time.Duration
-	lastFrame            Timestamp
-	hasLastFrame         bool
-	previousSurface      *surface.Surface
-	previousReusable     bool
-	spareSurface         *surface.Surface
-	interaction          *InteractionState
-	viewTree             *Node[Message]
-	treeIndex            treeIndex
-	nextTreeIndex        treeIndex
-	effects              *effectSupervisor[Message]
-	subscriptions        *subscriptionSupervisor[Message]
-	subscriptionsDirty   bool
-	exitRequested        bool
-	pendingFocus         NodeID
-	hasPendingFocus      bool
-	pendingScroll        []pendingScrollRequest
+	app                     App[Message]
+	clock                   Clock
+	size                    Size
+	queue                   []queuedMessage[Message]
+	queueCapacity           int
+	maxUpdatesPerCycle      int
+	dirty                   bool
+	urgentFrame             bool
+	minimumFrameInterval    time.Duration
+	widthProfile            celltext.WidthProfile
+	terminalCapabilities    TerminalCapabilityProfile
+	lastFrame               Timestamp
+	hasLastFrame            bool
+	previousSurface         *surface.Surface
+	previousReusable        bool
+	spareSurface            *surface.Surface
+	interaction             *InteractionState
+	viewTree                *Node[Message]
+	treeIndex               treeIndex
+	nextTreeIndex           treeIndex
+	actionIndex             actionIndex[Message]
+	nextActionIndex         actionIndex[Message]
+	resolvedActionRoute     resolvedActionRoute[Message]
+	nextResolvedActionRoute resolvedActionRoute[Message]
+	hasResolvedActionRoute  bool
+	eventRoute              []NodeID
+	effects                 *effectSupervisor[Message]
+	subscriptions           *subscriptionSupervisor[Message]
+	notices                 *runtimeNoticeQueue
+	workers                 *workerTracker
+	closed                  bool
+	subscriptionsDirty      bool
+	exitRequested           bool
+	pendingFocus            NodeID
+	hasPendingFocus         bool
+	pendingScroll           []pendingScrollRequest
+	pendingClipboard        ClipboardRequest
+	hasPendingClipboard     bool
 }
 
 type pendingScrollRequest struct {
@@ -122,9 +163,27 @@ func NewRuntime[Message any](app App[Message], size Size) (*Runtime[Message], er
 	return NewRuntimeWithClock(app, NewRuntimeConfig(size), NewSystemClock())
 }
 
+// NewRuntimeContext returns a runtime whose Effect tasks and Subscription
+// streams inherit values, deadlines, cancellation, and cancellation causes
+// from parent
+func NewRuntimeContext[Message any](parent context.Context, app App[Message], size Size) (*Runtime[Message], error) {
+	return NewRuntimeWithClockContext(parent, app, NewRuntimeConfig(size), NewSystemClock())
+}
+
 // NewRuntimeWithClock returns a runtime using explicit settings and clock
 func NewRuntimeWithClock[Message any](app App[Message], config RuntimeConfig, clock Clock) (*Runtime[Message], error) {
 	return newRuntimeWithClockAndWake(app, config, clock, nil)
+}
+
+// NewRuntimeWithClockContext returns a context-aware runtime using explicit
+// settings and clock
+func NewRuntimeWithClockContext[Message any](
+	parent context.Context,
+	app App[Message],
+	config RuntimeConfig,
+	clock Clock,
+) (*Runtime[Message], error) {
+	return newRuntimeWithClockAndWakeContext(parent, app, config, clock, nil)
 }
 
 func newRuntimeWithClockAndWake[Message any](
@@ -133,14 +192,33 @@ func newRuntimeWithClockAndWake[Message any](
 	clock Clock,
 	wake runtimeWake,
 ) (*Runtime[Message], error) {
+	return newRuntimeWithClockAndWakeContext(context.Background(), app, config, clock, wake)
+}
+
+func newRuntimeWithClockAndWakeContext[Message any](
+	parent context.Context,
+	app App[Message],
+	config RuntimeConfig,
+	clock Clock,
+	wake runtimeWake,
+) (*Runtime[Message], error) {
+	if parent == nil {
+		return nil, errors.New("nagi-tui: nil runtime context")
+	}
 	if config.QueueCapacity <= 0 {
 		return nil, ErrZeroQueueCapacity
+	}
+	if config.MaxUpdatesPerCycle <= 0 {
+		return nil, ErrZeroMaxUpdatesPerCycle
 	}
 	if config.TaskLimit <= 0 {
 		return nil, ErrZeroTaskLimit
 	}
 	if config.SubscriptionCapacity <= 0 {
 		return nil, ErrZeroSubscriptionCapacity
+	}
+	if config.RuntimeNoticeCapacity <= 0 {
+		return nil, ErrZeroRuntimeNoticeCapacity
 	}
 	if config.MinimumFrameInterval < 0 {
 		return nil, ErrNegativeFrameInterval
@@ -153,10 +231,16 @@ func newRuntimeWithClockAndWake[Message any](
 	}
 	startup := app.Init()
 	declaredSubscriptions := app.Subscriptions()
-	effects := newEffectSupervisor[Message](config.TaskLimit)
+	notices := newRuntimeNoticeQueue(config.RuntimeNoticeCapacity)
+	workers := &workerTracker{}
+	effects := newEffectSupervisorContext[Message](parent, config.TaskLimit)
+	effects.notices = notices
+	effects.workers = workers
 	effects.wake = wake
 	effects.schedule(startup, clock.Now())
-	subscriptions := newSubscriptionSupervisor[Message](config.SubscriptionCapacity)
+	subscriptions := newSubscriptionSupervisorContext[Message](parent, config.SubscriptionCapacity)
+	subscriptions.notices = notices
+	subscriptions.workers = workers
 	subscriptions.wake = wake
 	if _, err := subscriptions.reconcile(declaredSubscriptions, clock.Now()); err != nil {
 		effects.close()
@@ -168,23 +252,47 @@ func newRuntimeWithClockAndWake[Message any](
 		size:                 config.Size,
 		queue:                make([]queuedMessage[Message], 0, min(config.QueueCapacity, 64)),
 		queueCapacity:        config.QueueCapacity,
+		maxUpdatesPerCycle:   config.MaxUpdatesPerCycle,
 		dirty:                true,
 		urgentFrame:          true,
 		minimumFrameInterval: config.MinimumFrameInterval,
+		widthProfile:         config.WidthProfile,
+		terminalCapabilities: config.TerminalCapabilities,
 		interaction:          NewInteractionState(),
 		treeIndex:            newTreeIndex(),
 		nextTreeIndex:        newTreeIndex(),
 		effects:              effects,
 		subscriptions:        subscriptions,
+		notices:              notices,
+		workers:              workers,
 	}
 	runtime.applyEffectCommands()
 	return runtime, nil
 }
 
-// Close cooperatively cancels active effect tasks and timers
+// Close cooperatively cancels active Effects and Subscriptions without waiting
+// for their producer functions to return
 func (r *Runtime[Message]) Close() {
+	if r.closed {
+		return
+	}
+	r.closed = true
 	r.effects.close()
 	r.subscriptions.close()
+	r.subscriptionsDirty = false
+}
+
+// CloseAndWait requests cooperative cancellation and waits until every
+// Nagi-started Effect and Stream producer function has returned or ctx ends
+//
+// Application-owned processes or goroutines started inside a producer are
+// outside this wait boundary. A nil context returns an error.
+func (r *Runtime[Message]) CloseAndWait(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("nagi-tui: nil close wait context")
+	}
+	r.Close()
+	return r.workers.wait(ctx)
 }
 
 // App returns the application instance owned by the runtime
@@ -195,6 +303,19 @@ func (r *Runtime[Message]) App() App[Message] {
 // Size returns the current terminal cell size
 func (r *Runtime[Message]) Size() Size {
 	return r.size
+}
+
+// PendingClipboardRequest returns the latest request without clearing it
+func (r *Runtime[Message]) PendingClipboardRequest() (ClipboardRequest, bool) {
+	return r.pendingClipboard, r.hasPendingClipboard
+}
+
+// TakeClipboardRequest returns and clears the latest pending request
+func (r *Runtime[Message]) TakeClipboardRequest() (ClipboardRequest, bool) {
+	request, ok := r.pendingClipboard, r.hasPendingClipboard
+	r.pendingClipboard = ClipboardRequest{}
+	r.hasPendingClipboard = false
+	return request, ok
 }
 
 // Interaction returns runtime-owned UI continuity
@@ -208,6 +329,7 @@ func (r *Runtime[Message]) Resize(size Size) {
 		r.size = size
 		r.dirty = true
 		r.urgentFrame = true
+		r.viewTree = nil
 	}
 }
 
@@ -225,16 +347,35 @@ func (r *Runtime[Message]) QueuedMessages() int {
 	return len(r.queue)
 }
 
+// HasPendingUpdates reports whether another scheduling cycle can apply an
+// update without waiting for input, a wake-up, or a future deadline
+func (r *Runtime[Message]) HasPendingUpdates() bool {
+	if len(r.queue) > 0 || len(r.effects.ready) > 0 {
+		return true
+	}
+	deadline, ok := r.subscriptions.timeUntilDeadline(r.clock.Now())
+	return ok && deadline == 0
+}
+
 // PollEffects moves due timers and completed tasks into the bounded queue
 func (r *Runtime[Message]) PollEffects() int {
+	return r.pollEffectsUpTo(r.queueCapacity)
+}
+
+func (r *Runtime[Message]) pollEffectsUpTo(maximum int) int {
 	r.effects.poll(r.clock.Now())
 	r.applyEffectCommands()
-	available := r.queueCapacity - len(r.queue)
-	messages := r.effects.takeReady(available)
-	for _, message := range messages {
+	available := min(r.queueCapacity-len(r.queue), maximum)
+	count := 0
+	for count < available {
+		message, ok := r.effects.popReady()
+		if !ok {
+			break
+		}
 		r.queue = append(r.queue, queuedMessage[Message]{message: message})
+		count++
 	}
-	return len(messages)
+	return count
 }
 
 // ExitRequested reports whether the application requested normal exit
@@ -244,8 +385,12 @@ func (r *Runtime[Message]) ExitRequested() bool {
 
 // PollSubscriptions moves ready subscription values into the bounded queue
 func (r *Runtime[Message]) PollSubscriptions() int {
+	return r.pollSubscriptionsUpTo(r.queueCapacity)
+}
+
+func (r *Runtime[Message]) pollSubscriptionsUpTo(maximum int) int {
 	r.subscriptions.poll(r.clock.Now())
-	available := r.queueCapacity - len(r.queue)
+	available := min(r.queueCapacity-len(r.queue), maximum)
 	messages := r.subscriptions.takeReady(available)
 	for _, delivery := range messages {
 		tag := delivery.tag
@@ -267,6 +412,27 @@ func (r *Runtime[Message]) RunningTasks() int {
 // PendingTasks returns supervised tasks waiting for a worker slot
 func (r *Runtime[Message]) PendingTasks() int {
 	return r.effects.pendingTasks()
+}
+
+// PendingTerminalTasks returns terminal-suspending tasks waiting for a Runtime
+// driver
+func (r *Runtime[Message]) PendingTerminalTasks() int {
+	return r.effects.pendingTerminalTasks()
+}
+
+// RunTerminalTask runs the oldest terminal-suspending task on the current
+// goroutine
+//
+// A full-screen terminal driver must suspend its terminal session before
+// calling this method and resume it afterwards. Task panics become Runtime
+// notices. The returned Message becomes available at the next pending-message
+// processing boundary.
+func (r *Runtime[Message]) RunTerminalTask() bool {
+	ran := r.effects.runTerminalTask(r.clock.Now())
+	if ran {
+		r.applyEffectCommands()
+	}
+	return ran
 }
 
 // PendingEffectMessages returns completed effect messages waiting for capacity
@@ -315,6 +481,21 @@ func (r *Runtime[Message]) SubscriptionDiagnostics() SubscriptionDiagnostics {
 	return r.subscriptions.diagnostics()
 }
 
+// PendingRuntimeNotices returns retained asynchronous lifecycle notices
+func (r *Runtime[Message]) PendingRuntimeNotices() int {
+	return r.notices.pending()
+}
+
+// DrainRuntimeNotices removes and returns retained notices in occurrence order
+func (r *Runtime[Message]) DrainRuntimeNotices() []RuntimeNotice {
+	return r.notices.drain()
+}
+
+// RuntimeNoticeDiagnostics returns bounded notice queue counters
+func (r *Runtime[Message]) RuntimeNoticeDiagnostics() RuntimeNoticeDiagnostics {
+	return r.notices.diagnostics()
+}
+
 // TimeUntilEffectDeadline returns time until the next clock-driven deadline
 func (r *Runtime[Message]) TimeUntilEffectDeadline() (time.Duration, bool) {
 	return r.effects.timeUntilDeadline(r.clock.Now())
@@ -338,26 +519,50 @@ func (r *Runtime[Message]) TimeUntilFrameDeadline() (time.Duration, bool) {
 	return time.Duration(deadline - r.clock.Now()), true
 }
 
-// ProcessPending applies every queued message in FIFO order without rendering
-// between messages
+// ProcessPending applies at most the configured per-cycle number of messages
+// in FIFO order without rendering between messages
 func (r *Runtime[Message]) ProcessPending() (int, error) {
 	return r.ProcessPendingWith(nil)
 }
 
-// ProcessPendingWith applies queued messages and observes each immediately
-// before Update
+// ProcessPendingWith applies one bounded scheduling cycle and observes each
+// message immediately before Update
 func (r *Runtime[Message]) ProcessPendingWith(observe func(Message)) (int, error) {
 	if err := r.reconcileSubscriptions(); err != nil {
 		return 0, err
 	}
-	r.PollEffects()
-	r.PollSubscriptions()
+	remaining := max(r.maxUpdatesPerCycle-len(r.queue), 0)
+	effects := r.pollEffectsUpTo(remaining)
+	r.pollSubscriptionsUpTo(remaining - effects)
+	return r.processQueuedWith(observe, r.maxUpdatesPerCycle)
+}
+
+// ProcessQueued applies messages already in the application queue without
+// polling asynchronous Effects or Subscriptions
+func (r *Runtime[Message]) ProcessQueued() (int, error) {
+	return r.ProcessQueuedWith(nil)
+}
+
+// ProcessQueuedWith applies messages already in the application queue and
+// observes each immediately before Update without polling asynchronous sources
+func (r *Runtime[Message]) ProcessQueuedWith(observe func(Message)) (int, error) {
+	if err := r.reconcileSubscriptions(); err != nil {
+		return 0, err
+	}
+	return r.processQueuedWith(observe, 0)
+}
+
+func (r *Runtime[Message]) processQueuedWith(observe func(Message), maximum int) (int, error) {
 	processed := 0
-	for len(r.queue) > 0 {
+	for len(r.queue) > 0 && (maximum <= 0 || processed < maximum) {
 		queued := r.queue[0]
 		var zero queuedMessage[Message]
 		r.queue[0] = zero
-		r.queue = r.queue[1:]
+		if len(r.queue) == 1 {
+			r.queue = r.queue[:0]
+		} else {
+			r.queue = r.queue[1:]
+		}
 		if observe != nil {
 			observe(queued.message)
 		}
@@ -367,6 +572,7 @@ func (r *Runtime[Message]) ProcessPendingWith(observe func(Message)) (int, error
 		r.applyEffectCommands()
 		if !withoutRedraw {
 			r.dirty = true
+			r.viewTree = nil
 		}
 		r.subscriptionsDirty = true
 		if err := r.reconcileSubscriptions(); err != nil {
@@ -390,11 +596,16 @@ func (r *Runtime[Message]) applyEffectCommands() {
 				id:     command.id,
 				offset: command.offset,
 			})
+		case runtimeCommandSetClipboard:
+			r.pendingClipboard = command.clipboard
+			r.hasPendingClipboard = true
+			continue
 		default:
 			panic("nagi-tui: invalid runtime command")
 		}
 		r.dirty = true
 		r.urgentFrame = true
+		r.viewTree = nil
 	}
 }
 
@@ -409,7 +620,7 @@ func (r *Runtime[Message]) applyPendingInteraction(index treeIndex) {
 	}
 	for _, request := range r.pendingScroll {
 		record, ok := index.record(request.id)
-		if ok && record.kind == interactiveScrollViewport {
+		if ok && record.kind.isScrollViewport() {
 			r.interaction.requestScroll(request.id, request.offset)
 		}
 	}
@@ -418,6 +629,16 @@ func (r *Runtime[Message]) applyPendingInteraction(index treeIndex) {
 
 // RequestFrame schedules a frame even when application state has not changed
 func (r *Runtime[Message]) RequestFrame() {
+	r.dirty = true
+	r.urgentFrame = true
+	r.subscriptionsDirty = true
+}
+
+// InvalidateTerminalSurface discards the terminal diff baseline and requests
+// one full redraw after an external process may have changed terminal contents
+func (r *Runtime[Message]) InvalidateTerminalSurface() {
+	r.previousSurface = nil
+	r.previousReusable = false
 	r.dirty = true
 	r.urgentFrame = true
 	r.subscriptionsDirty = true
@@ -486,8 +707,34 @@ func (r *Runtime[Message]) SetScrollOffset(id NodeID, offset ScrollOffset) bool 
 	if changed {
 		r.dirty = true
 		r.urgentFrame = true
+		r.viewTree = nil
 	}
 	return true
+}
+
+// ActiveActionGroups returns resolved semantic action groups on the active
+// target-to-root route
+//
+// Groups outside the nearest KeyScopeStopAtScope boundary are omitted. Each
+// projection contains the complete active root-to-target scope path. At one
+// Node, a Node-declared group precedes a Core semantic group, so the same owner
+// may occur twice.
+func (r *Runtime[Message]) ActiveActionGroups() ([]ResolvedActions, error) {
+	if err := r.ensureTree(); err != nil {
+		return nil, err
+	}
+	route := r.treeIndex.route(r.interaction.focused, r.interaction.hasFocus)
+	focusOwner, hasFocusOwner := r.treeIndex.focusActionOwner(
+		r.interaction.focused,
+		r.interaction.hasFocus,
+	)
+	if err := r.ensureActionRoute(route, focusOwner, hasFocusOwner); err != nil {
+		return nil, err
+	}
+	if !r.hasResolvedActionRoute {
+		return nil, nil
+	}
+	return r.resolvedActionRoute.actionGroups(), nil
 }
 
 // DispatchEvent routes one normalized event through focus, hit testing, and
@@ -496,18 +743,13 @@ func (r *Runtime[Message]) DispatchEvent(event vt.Event) (EventDispatch, error) 
 	if err := r.ensureTree(); err != nil {
 		return EventDispatch{}, err
 	}
-	if event.Kind == vt.EventKey && event.Key.Action != vt.KeyRelease &&
-		event.Key.Code == vt.KeyTab && !event.Key.Modifiers.Alt &&
-		!event.Key.Modifiers.Control && !event.Key.Modifiers.Meta {
-		focused := optionalNodeID(r.interaction.focused, r.interaction.hasFocus)
-		r.interaction.focused, r.interaction.hasFocus = traverseFocus(
-			r.treeIndex.focusScope(),
-			focused,
-			!event.Key.Modifiers.Shift,
-		)
-		r.dirty = true
-		r.urgentFrame = true
-		return EventDispatch{consumed: true, redraw: true}, nil
+	if _, hasFocusOwner := r.treeIndex.focusActionOwner(
+		r.interaction.focused,
+		r.interaction.hasFocus,
+	); !hasFocusOwner {
+		if action, ok := defaultFocusAction(event); ok {
+			return r.dispatchLegacyFocusAction(action), nil
+		}
 	}
 
 	var target NodeID
@@ -532,16 +774,54 @@ func (r *Runtime[Message]) DispatchEvent(event vt.Event) (EventDispatch, error) 
 		}
 	}
 
+	route := r.treeIndex.routeInto(target, hasTarget, r.eventRoute[:0])
+	defer func() {
+		r.eventRoute = route[:0]
+	}()
+	focusOwner, hasFocusOwner := r.treeIndex.focusActionOwner(
+		r.interaction.focused,
+		r.interaction.hasFocus,
+	)
+	if err := r.ensureActionRoute(route, focusOwner, hasFocusOwner); err != nil {
+		return EventDispatch{}, err
+	}
 	dispatch := EventDispatch{}
-	for index, id := range r.treeIndex.route(target, hasTarget) {
+	for index, id := range route {
+		if r.hasResolvedActionRoute {
+			if result, matched := r.resolvedActionRoute.matchDeclaredEvent(index, event); matched {
+				if err := r.applyEventResult(result, &dispatch); err != nil {
+					return dispatch, err
+				}
+				if dispatch.consumed {
+					break
+				}
+			}
+			action, matched := r.resolvedActionRoute.matchCoreEvent(index, event)
+			var result EventResult[Message]
+			var handled bool
+			switch matched {
+			case coreActionConsume:
+				result, handled = ConsumeResult[Message](), true
+			case coreActionInvoke:
+				result, handled = r.handleCoreAction(id, action)
+			}
+			if handled {
+				if err := r.applyEventResult(result, &dispatch); err != nil {
+					return dispatch, err
+				}
+				if dispatch.consumed {
+					break
+				}
+			}
+		}
 		record, _ := r.treeIndex.record(id)
 		var result EventResult[Message]
 		var handled bool
 		switch {
 		case record.kind == interactiveTextInput && index == 0:
 			result, handled = r.handleTextInput(id, event)
-		case record.kind == interactiveScrollViewport:
-			result, handled = r.handleScroll(id, event)
+		case record.kind.isScrollViewport():
+			result, handled = r.handleScrollMouse(id, event)
 		}
 		if handled {
 			if err := r.applyEventResult(result, &dispatch); err != nil {
@@ -549,6 +829,16 @@ func (r *Runtime[Message]) DispatchEvent(event vt.Event) (EventDispatch, error) 
 			}
 			if dispatch.consumed {
 				break
+			}
+		}
+		if context, ok := r.pointerEventContext(id, route, index, event); ok {
+			if result, handled := r.viewTree.handlePointerEvent(id, context); handled {
+				if err := r.applyEventResult(result, &dispatch); err != nil {
+					return dispatch, err
+				}
+				if dispatch.consumed {
+					break
+				}
 			}
 		}
 		if result, ok := r.viewTree.handleEvent(id, event); ok {
@@ -559,8 +849,135 @@ func (r *Runtime[Message]) DispatchEvent(event vt.Event) (EventDispatch, error) 
 				break
 			}
 		}
+		if record.blocksUnhandled {
+			dispatch.consumed = true
+			break
+		}
 	}
 	return dispatch, nil
+}
+
+func (r *Runtime[Message]) pointerEventContext(
+	id NodeID,
+	route []NodeID,
+	index int,
+	event vt.Event,
+) (PointerEventContext, bool) {
+	if event.Kind != vt.EventMouse {
+		return PointerEventContext{}, false
+	}
+	record, ok := r.treeIndex.record(id)
+	if !ok {
+		return PointerEventContext{}, false
+	}
+	visible := record.rect.Intersection(record.clip)
+	context := PointerEventContext{
+		event: event.Mouse,
+		localPosition: Point{
+			X: localPointerCoordinate(event.Mouse.X, record.rect.X),
+			Y: localPointerCoordinate(event.Mouse.Y, record.rect.Y),
+		},
+		bounds: record.rect.Size(),
+		visibleBounds: Rect{
+			X:     localGeometryCoordinate(visible.X, record.rect.X),
+			Y:     localGeometryCoordinate(visible.Y, record.rect.Y),
+			Width: visible.Width, Height: visible.Height,
+		},
+		widthProfile: r.widthProfile,
+		captured:     r.interaction.hasCapture && r.interaction.pointerCapture == id,
+	}
+	for _, viewportID := range route[index+1:] {
+		viewportRecord, ok := r.treeIndex.record(viewportID)
+		if !ok {
+			continue
+		}
+		axis, ok := viewportRecord.kind.scrollAxis()
+		if !ok {
+			continue
+		}
+		state, ok := r.interaction.ScrollState(viewportID)
+		if !ok {
+			continue
+		}
+		context.viewport = PointerViewport{
+			id: viewportID, axis: axis, state: state,
+			visible: viewportRecord.rect.Intersection(viewportRecord.clip),
+		}
+		context.hasViewport = true
+		break
+	}
+	return context, true
+}
+
+func (r *Runtime[Message]) ensureActionRoute(
+	route []NodeID,
+	focusOwner NodeID,
+	hasFocusOwner bool,
+) error {
+	if !routeNeedsActionResolution(
+		route,
+		&r.actionIndex,
+		&r.treeIndex,
+		focusOwner,
+		hasFocusOwner,
+	) {
+		r.publishResolvedActionRoute(false)
+		return nil
+	}
+	if r.hasResolvedActionRoute && r.resolvedActionRoute.matchesRoute(route, focusOwner, hasFocusOwner) {
+		return nil
+	}
+	err := r.nextResolvedActionRoute.resolveInto(
+		route,
+		&r.actionIndex,
+		&r.treeIndex,
+		focusOwner,
+		hasFocusOwner,
+	)
+	if err != nil {
+		return err
+	}
+	r.publishResolvedActionRoute(true)
+	return nil
+}
+
+func (r *Runtime[Message]) publishResolvedActionRoute(active bool) {
+	r.resolvedActionRoute, r.nextResolvedActionRoute =
+		r.nextResolvedActionRoute, r.resolvedActionRoute
+	r.hasResolvedActionRoute = active
+}
+
+func (r *Runtime[Message]) dispatchLegacyFocusAction(action coreAction) EventDispatch {
+	forward := action == coreFocusNext
+	focused := optionalNodeID(r.interaction.focused, r.interaction.hasFocus)
+	r.interaction.focused, r.interaction.hasFocus = traverseFocus(
+		r.treeIndex.focusScope(),
+		focused,
+		forward,
+	)
+	r.dirty = true
+	r.urgentFrame = true
+	return EventDispatch{consumed: true, redraw: true}
+}
+
+func (r *Runtime[Message]) handleCoreAction(
+	id NodeID,
+	action coreAction,
+) (EventResult[Message], bool) {
+	switch action {
+	case coreFocusNext, coreFocusPrevious:
+		focused := optionalNodeID(r.interaction.focused, r.interaction.hasFocus)
+		r.interaction.focused, r.interaction.hasFocus = traverseFocus(
+			r.treeIndex.focusScope(),
+			focused,
+			action == coreFocusNext,
+		)
+		r.dirty = true
+		r.urgentFrame = true
+		return ConsumeResult[Message]().Redraw(), true
+	default:
+		return r.handleScrollAction(id, action)
+	}
 }
 
 func (r *Runtime[Message]) handleTextInput(id NodeID, event vt.Event) (EventResult[Message], bool) {
@@ -589,8 +1006,9 @@ func (r *Runtime[Message]) handleTextInput(id NodeID, event vt.Event) (EventResu
 			kind = textEditBackspace
 		case vt.KeyDelete:
 			kind = textEditDelete
-		case vt.KeyCharacter:
-			if event.Key.Modifiers.Control || event.Key.Modifiers.Meta || !event.Key.HasText {
+		case vt.KeyCharacter, vt.KeyUnknown:
+			if event.Key.Modifiers.Control || event.Key.Modifiers.Meta ||
+				event.Key.Modifiers.Super || event.Key.Modifiers.Hyper || !event.Key.HasText {
 				return EventResult[Message]{}, false
 			}
 			inserted = event.Key.Text
@@ -621,16 +1039,12 @@ func (r *Runtime[Message]) handleTextInput(id NodeID, event vt.Event) (EventResu
 	return result, true
 }
 
-func (r *Runtime[Message]) handleScroll(id NodeID, event vt.Event) (EventResult[Message], bool) {
+func (r *Runtime[Message]) handleScrollMouse(id NodeID, event vt.Event) (EventResult[Message], bool) {
 	state, ok := r.interaction.ScrollState(id)
 	if !ok {
 		return EventResult[Message]{}, false
 	}
 	options, ok := r.viewTree.scrollOptions(id)
-	if !ok {
-		return EventResult[Message]{}, false
-	}
-	viewport, ok := r.treeIndex.record(id)
 	if !ok {
 		return EventResult[Message]{}, false
 	}
@@ -662,41 +1076,69 @@ func (r *Runtime[Message]) handleScroll(id NodeID, event vt.Event) (EventResult[
 		default:
 			handled = false
 		}
-	case event.Kind == vt.EventKey && event.Key.Action != vt.KeyRelease:
-		switch event.Key.Code {
-		case vt.KeyPageUp:
-			handled = options.Axis.allowsVertical()
-			if handled {
-				next.Y -= min(next.Y, max(viewport.rect.Height, uint32(1)))
-			}
-		case vt.KeyPageDown:
-			handled = options.Axis.allowsVertical()
-			if handled {
-				next.Y = saturatingAdd32(next.Y, max(viewport.rect.Height, uint32(1)))
-			}
-		case vt.KeyHome:
-			if options.Axis.allowsVertical() {
-				next.Y = 0
-			} else if options.Axis.allowsHorizontal() {
-				next.X = 0
-			} else {
-				handled = false
-			}
-		case vt.KeyEnd:
-			if options.Axis.allowsVertical() {
-				next.Y = state.Maximum.Y
-			} else if options.Axis.allowsHorizontal() {
-				next.X = state.Maximum.X
-			} else {
-				handled = false
-			}
-		default:
-			handled = false
-		}
 	default:
 		handled = false
 	}
 	if !handled {
+		return EventResult[Message]{}, false
+	}
+	state, changed, _ := r.interaction.requestScroll(id, next)
+	r.dirty = true
+	r.urgentFrame = true
+	result := ConsumeResult[Message]().Redraw()
+	if changed {
+		if message, ok := r.viewTree.scrollMessage(id, state); ok {
+			result = result.Emit(message)
+		}
+	}
+	return result, true
+}
+
+func (r *Runtime[Message]) handleScrollAction(
+	id NodeID,
+	action coreAction,
+) (EventResult[Message], bool) {
+	state, ok := r.interaction.ScrollState(id)
+	if !ok {
+		return EventResult[Message]{}, false
+	}
+	options, ok := r.viewTree.scrollOptions(id)
+	if !ok {
+		return EventResult[Message]{}, false
+	}
+	viewport, ok := r.treeIndex.record(id)
+	if !ok {
+		return EventResult[Message]{}, false
+	}
+	next := state.Offset
+	switch action {
+	case coreScrollPageUp:
+		if !options.Axis.allowsVertical() {
+			return EventResult[Message]{}, false
+		}
+		next.Y -= min(next.Y, max(viewport.rect.Height, uint32(1)))
+	case coreScrollPageDown:
+		if !options.Axis.allowsVertical() {
+			return EventResult[Message]{}, false
+		}
+		next.Y = saturatingAdd32(next.Y, max(viewport.rect.Height, uint32(1)))
+	case coreScrollStart:
+		if options.Axis.allowsVertical() {
+			next.Y = 0
+		} else if options.Axis.allowsHorizontal() {
+			next.X = 0
+		} else {
+			return EventResult[Message]{}, false
+		}
+	case coreScrollEnd:
+		if options.Axis.allowsVertical() {
+			next.Y = state.Maximum.Y
+		} else if options.Axis.allowsHorizontal() {
+			next.X = state.Maximum.X
+		} else {
+			return EventResult[Message]{}, false
+		}
+	default:
 		return EventResult[Message]{}, false
 	}
 	state, changed, _ := r.interaction.requestScroll(id, next)
@@ -742,6 +1184,28 @@ func (r *Runtime[Message]) applyEventResult(result EventResult[Message], dispatc
 		}
 		dispatch.messages++
 	}
+	if result.hasScroll {
+		record, exists := r.treeIndex.record(result.scrollID)
+		available := exists && record.kind.isScrollViewport() &&
+			r.treeIndex.allowsInteraction(result.scrollID)
+		if available {
+			state, changed, initialized := r.interaction.requestScroll(
+				result.scrollID,
+				result.scrollOffset,
+			)
+			if initialized && changed {
+				r.dirty = true
+				r.urgentFrame = true
+				dispatch.redraw = true
+				if message, ok := r.viewTree.scrollMessage(result.scrollID, state); ok {
+					if err := r.Enqueue(message); err != nil {
+						return err
+					}
+					dispatch.messages++
+				}
+			}
+		}
+	}
 	dispatch.consumed = dispatch.consumed || result.consumed
 	dispatch.redraw = dispatch.redraw || result.redraw
 	if result.redraw {
@@ -751,11 +1215,28 @@ func (r *Runtime[Message]) applyEventResult(result EventResult[Message], dispatc
 	return nil
 }
 
+func localPointerCoordinate(value uint32, origin int32) int32 {
+	return clampPointerCoordinate(int64(value) - int64(origin))
+}
+
+func localGeometryCoordinate(value, origin int32) int32 {
+	return clampPointerCoordinate(int64(value) - int64(origin))
+}
+
+func clampPointerCoordinate(value int64) int32 {
+	return int32(min(max(value, int64(-1<<31)), int64(1<<31-1)))
+}
+
 func (r *Runtime[Message]) reconcileSubscriptions() error {
 	if !r.subscriptionsDirty {
 		return nil
 	}
-	reconciliation, err := r.subscriptions.reconcile(r.app.Subscriptions(), r.clock.Now())
+	declared := r.app.Subscriptions()
+	if declared.IsNone() && r.subscriptions.activeSubscriptions() == 0 {
+		r.subscriptionsDirty = false
+		return nil
+	}
+	reconciliation, err := r.subscriptions.reconcile(declared, r.clock.Now())
 	if err != nil {
 		return err
 	}
@@ -787,80 +1268,134 @@ func (r *Runtime[Message]) reconcileSubscriptions() error {
 	return nil
 }
 
-func (r *Runtime[Message]) ensureFocusedVisible(view *Node[Message], index *treeIndex) error {
-	if !r.interaction.hasFocus {
-		return nil
-	}
-	focused := r.interaction.focused
-	route := index.route(focused, true)
-	var scrolls []NodeID
-	for _, id := range route {
-		options, ok := view.scrollOptions(id)
-		if ok && options.EnsureFocusedVisible {
-			scrolls = append(scrolls, id)
+func (r *Runtime[Message]) ensureRevealTargetsVisible(
+	view *Node[Message],
+	index *treeIndex,
+	actions *actionIndex[Message],
+) error {
+	if r.interaction.hasFocus {
+		focused := r.interaction.focused
+		route := index.route(focused, true)
+		for _, viewport := range route {
+			if index.hasExplicitReveal(viewport) {
+				continue
+			}
+			options, ok := view.scrollOptions(viewport)
+			if ok && options.EnsureFocusedVisible {
+				if err := r.ensureTargetVisible(view, index, actions, viewport, focused); err != nil {
+					return err
+				}
+			}
 		}
 	}
-	for _, id := range scrolls {
-		target, ok := index.record(focused)
-		if !ok {
+
+	remaining := len(index.revealTargets)
+	for remaining > 0 {
+		remaining = min(remaining, len(index.revealTargets))
+		if remaining == 0 {
 			break
 		}
-		viewport, ok := index.record(id)
-		if !ok {
-			continue
-		}
-		options, ok := view.scrollOptions(id)
-		if !ok {
-			continue
-		}
-		state, ok := r.interaction.ScrollState(id)
-		if !ok {
-			continue
-		}
-		next := state.Offset
-		if options.Axis.allowsHorizontal() {
-			next.X = visibleAxisOffset(next.X, viewport.rect.X, viewport.rect.Width, target.rect.X, target.rect.Width)
-		}
-		if options.Axis.allowsVertical() {
-			next.Y = visibleAxisOffset(next.Y, viewport.rect.Y, viewport.rect.Height, target.rect.Y, target.rect.Height)
-		}
-		if next == state.Offset {
-			continue
-		}
-		r.interaction.requestScroll(id, next)
-		view.prepareInteraction(r.size, r.interaction)
-		if err := view.buildTreeIndex(r.size, r.interaction, index); err != nil {
+		remaining--
+		target := index.revealTargets[remaining]
+		if err := r.ensureTargetVisible(view, index, actions, target.viewport, target.target); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
+func (r *Runtime[Message]) ensureTargetVisible(
+	view *Node[Message],
+	index *treeIndex,
+	actions *actionIndex[Message],
+	viewportID NodeID,
+	targetID NodeID,
+) error {
+	if !index.isWithin(targetID, viewportID) {
+		return nil
+	}
+	target, ok := index.record(targetID)
+	if !ok {
+		return nil
+	}
+	viewport, ok := index.record(viewportID)
+	if !ok {
+		return nil
+	}
+	options, ok := view.scrollOptions(viewportID)
+	if !ok {
+		return nil
+	}
+	state, ok := r.interaction.ScrollState(viewportID)
+	if !ok {
+		return nil
+	}
+	next := state.Offset
+	if options.Axis.allowsHorizontal() {
+		next.X = visibleAxisOffset(next.X, viewport.rect.X, viewport.rect.Width, target.rect.X, target.rect.Width)
+	}
+	if options.Axis.allowsVertical() {
+		next.Y = visibleAxisOffset(next.Y, viewport.rect.Y, viewport.rect.Height, target.rect.Y, target.rect.Height)
+	}
+	if next == state.Offset {
+		return nil
+	}
+	r.interaction.requestScroll(viewportID, next)
+	view.prepareInteraction(r.size, r.interaction, r.widthProfile)
+	return view.buildTreeIndex(r.size, r.interaction, index, actions, r.widthProfile)
+}
+
 func (r *Runtime[Message]) ensureTree() error {
 	if r.viewTree != nil {
 		return nil
 	}
-	view := r.app.View(ViewContext{Size: r.size})
+	view := r.app.View(ViewContext{
+		Size: r.size, WidthProfile: r.widthProfile, TerminalCapabilities: r.terminalCapabilities,
+	})
+	view.prepareVirtualFlows(r.size, r.interaction, r.widthProfile)
 	index := &r.nextTreeIndex
-	if err := view.buildTreeIndex(r.size, r.interaction, index); err != nil {
+	actions := &r.nextActionIndex
+	if err := view.buildTreeIndex(r.size, r.interaction, index, actions, r.widthProfile); err != nil {
 		return err
 	}
-	r.interaction.reconcile(index.active, nil, index.focusScope())
+	focusFallback, hasFocusFallback := r.treeIndex.focusFallback(r.interaction.focused)
+	r.interaction.reconcile(
+		index.active,
+		r.treeIndex.focusScope(),
+		index.focusScope(),
+		index.activeModal,
+		index.hasModal,
+		index.activeModalFocus,
+		focusFallback,
+		hasFocusFallback,
+	)
 	if r.interaction.hasCapture && !index.allowsInteraction(r.interaction.pointerCapture) {
 		r.interaction.pointerCapture = ""
 		r.interaction.hasCapture = false
 	}
 	r.applyPendingInteraction(*index)
-	if view.prepareInteraction(r.size, r.interaction) {
-		if err := view.buildTreeIndex(r.size, r.interaction, index); err != nil {
+	if view.prepareInteraction(r.size, r.interaction, r.widthProfile) {
+		if err := view.buildTreeIndex(r.size, r.interaction, index, actions, r.widthProfile); err != nil {
 			return err
 		}
 	}
-	if err := r.ensureFocusedVisible(&view, index); err != nil {
+	if err := r.ensureRevealTargetsVisible(&view, index, actions); err != nil {
+		return err
+	}
+	hasResolved, err := resolveFrameActionsInto(
+		index,
+		actions,
+		r.interaction.focused,
+		r.interaction.hasFocus,
+		&r.nextResolvedActionRoute,
+	)
+	if err != nil {
 		return err
 	}
 	r.viewTree = &view
 	r.treeIndex, r.nextTreeIndex = r.nextTreeIndex, r.treeIndex
+	r.actionIndex, r.nextActionIndex = r.nextActionIndex, r.actionIndex
+	r.publishResolvedActionRoute(hasResolved)
 	return nil
 }
 
@@ -880,23 +1415,50 @@ func (r *Runtime[Message]) renderIfDirty(recycleSurface bool) (*Frame, error) {
 	if !r.urgentFrame && r.minimumFrameInterval > 0 && r.hasLastFrame && now < r.lastFrame.Add(r.minimumFrameInterval) {
 		return nil, nil
 	}
-	view := r.app.View(ViewContext{Size: r.size})
+	view := r.app.View(ViewContext{
+		Size: r.size, WidthProfile: r.widthProfile, TerminalCapabilities: r.terminalCapabilities,
+	})
+	view.prepareVirtualFlows(r.size, r.interaction, r.widthProfile)
 	index := &r.nextTreeIndex
-	if err := view.buildTreeIndex(r.size, r.interaction, index); err != nil {
+	actions := &r.nextActionIndex
+	if err := view.buildTreeIndex(r.size, r.interaction, index, actions, r.widthProfile); err != nil {
 		return nil, err
 	}
-	r.interaction.reconcile(index.active, r.treeIndex.focusScope(), index.focusScope())
+	focusFallback, hasFocusFallback := NodeID(""), false
+	if r.interaction.hasFocus {
+		focusFallback, hasFocusFallback = r.treeIndex.focusFallback(r.interaction.focused)
+	}
+	r.interaction.reconcile(
+		index.active,
+		r.treeIndex.focusScope(),
+		index.focusScope(),
+		index.activeModal,
+		index.hasModal,
+		index.activeModalFocus,
+		focusFallback,
+		hasFocusFallback,
+	)
 	if r.interaction.hasCapture && !index.allowsInteraction(r.interaction.pointerCapture) {
 		r.interaction.pointerCapture = ""
 		r.interaction.hasCapture = false
 	}
 	r.applyPendingInteraction(*index)
-	if view.prepareInteraction(r.size, r.interaction) {
-		if err := view.buildTreeIndex(r.size, r.interaction, index); err != nil {
+	if view.prepareInteraction(r.size, r.interaction, r.widthProfile) {
+		if err := view.buildTreeIndex(r.size, r.interaction, index, actions, r.widthProfile); err != nil {
 			return nil, err
 		}
 	}
-	if err := r.ensureFocusedVisible(&view, index); err != nil {
+	if err := r.ensureRevealTargetsVisible(&view, index, actions); err != nil {
+		return nil, err
+	}
+	hasResolved, err := resolveFrameActionsInto(
+		index,
+		actions,
+		r.interaction.focused,
+		r.interaction.hasFocus,
+		&r.nextResolvedActionRoute,
+	)
+	if err != nil {
 		return nil, err
 	}
 	var current *surface.Surface
@@ -912,7 +1474,7 @@ func (r *Runtime[Message]) renderIfDirty(recycleSurface bool) (*Frame, error) {
 			return nil, fmt.Errorf("construct runtime surface: %w", err)
 		}
 	}
-	view.renderTo(current, r.interaction)
+	view.renderToProfile(current, r.interaction, r.widthProfile)
 	previous := r.previousSurface
 	operations := rendererOperations(previous, current)
 	// Frame only exposes independent clones, so the immutable rendered surface
@@ -924,6 +1486,8 @@ func (r *Runtime[Message]) renderIfDirty(recycleSurface bool) (*Frame, error) {
 	r.previousReusable = recycleSurface
 	r.viewTree = &view
 	r.treeIndex, r.nextTreeIndex = r.nextTreeIndex, r.treeIndex
+	r.actionIndex, r.nextActionIndex = r.nextActionIndex, r.actionIndex
+	r.publishResolvedActionRoute(hasResolved)
 	r.dirty = false
 	r.urgentFrame = false
 	r.lastFrame = now
@@ -933,6 +1497,27 @@ func (r *Runtime[Message]) renderIfDirty(recycleSurface bool) (*Frame, error) {
 		surface:    current,
 		operations: operations,
 	}, nil
+}
+
+func resolveFrameActionsInto[Message any](
+	tree *treeIndex,
+	actions *actionIndex[Message],
+	target NodeID,
+	hasTarget bool,
+	resolved *resolvedActionRoute[Message],
+) (bool, error) {
+	if err := validateActionOwners(tree, actions); err != nil {
+		return false, err
+	}
+	focusOwner, hasFocusOwner := tree.focusActionOwner(target, hasTarget)
+	return resolved.resolveTreeRouteInto(
+		target,
+		hasTarget,
+		actions,
+		tree,
+		focusOwner,
+		hasFocusOwner,
+	)
 }
 
 func (r *Runtime[Message]) terminalOperationsIfDirty() ([]vt.TerminalOp, error) {
@@ -963,7 +1548,7 @@ func visibleAxisOffset(current uint32, viewportStart int32, viewportSize uint32,
 	}
 }
 
-// Step processes all queued messages and produces at most one frame
+// Step processes one bounded scheduling cycle and produces at most one frame
 func (r *Runtime[Message]) Step() (*Frame, error) {
 	if _, err := r.ProcessPending(); err != nil {
 		return nil, err

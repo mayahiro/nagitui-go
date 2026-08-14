@@ -48,6 +48,53 @@ type Paginator[Message any] struct {
 	onChange func(int) Message
 }
 
+var defaultPaginatorActionDescriptors = [4]tui.ActionDescriptor{
+	tui.NewActionDescriptor(
+		SelectionPreviousActionID,
+		selectionPreviousActionLabel,
+		[]tui.KeyBinding{
+			repeatableActionBinding(vt.KeyLeft),
+			repeatableActionBinding(vt.KeyUp),
+			repeatableActionBinding(vt.KeyPageUp),
+		},
+	),
+	tui.NewActionDescriptor(
+		SelectionNextActionID,
+		selectionNextActionLabel,
+		[]tui.KeyBinding{
+			repeatableActionBinding(vt.KeyRight),
+			repeatableActionBinding(vt.KeyDown),
+			repeatableActionBinding(vt.KeyPageDown),
+		},
+	),
+	tui.NewActionDescriptor(
+		SelectionFirstActionID,
+		selectionFirstActionLabel,
+		[]tui.KeyBinding{repeatableActionBinding(vt.KeyHome)},
+	),
+	tui.NewActionDescriptor(
+		SelectionLastActionID,
+		selectionLastActionLabel,
+		[]tui.KeyBinding{repeatableActionBinding(vt.KeyEnd)},
+	),
+}
+
+type paginatorAction uint8
+
+const (
+	paginatorPrevious paginatorAction = iota
+	paginatorNext
+	paginatorFirst
+	paginatorLast
+)
+
+var paginatorActions = [4]paginatorAction{
+	paginatorPrevious,
+	paginatorNext,
+	paginatorFirst,
+	paginatorLast,
+}
+
 // NewPaginator returns a controlled page selector
 //
 // A nil onChange function creates a disabled paginator.
@@ -84,9 +131,16 @@ func (p Paginator[Message]) Style(style PaginatorStyle) Paginator[Message] {
 	return p
 }
 
+// ActionDescriptors returns the ordered semantic navigation actions declared by the root
+func (p Paginator[Message]) ActionDescriptors() []tui.ActionDescriptor {
+	descriptors := paginatorActionDescriptors(p.enabled && p.total > 0)
+	return append([]tui.ActionDescriptor(nil), descriptors[:]...)
+}
+
 // Node builds the public semantic node for this paginator
 func (p Paginator[Message]) Node() tui.Node[Message] {
 	page, hasPage := normalizedPage(p.page, p.total)
+	descriptors := paginatorActionDescriptors(p.enabled && hasPage)
 	style := p.style.Normal
 	if !p.enabled || !hasPage {
 		style = p.style.Disabled
@@ -98,9 +152,11 @@ func (p Paginator[Message]) Node() tui.Node[Message] {
 		}
 		node := tui.StyledText[Message](strconv.Itoa(current)+"/"+strconv.Itoa(p.total), style)
 		if !p.enabled || !hasPage {
-			return node.WithID(p.id)
+			return node.WithID(p.id).OnActions(p.id, disabledPaginatorActions[Message](descriptors))
 		}
-		return node.Focusable(p.id).WithFocusedStyle(p.style.Focused).OnEvent(p.id, p.navigationHandler(page))
+		return node.Focusable(p.id).
+			WithFocusedStyle(p.style.Focused).
+			OnActions(p.id, paginatorSemanticActions(descriptors, page, p.total, p.id, p.onChange))
 	}
 
 	start, end := paginatorWindow(p.total, page, p.limit)
@@ -123,7 +179,7 @@ func (p Paginator[Message]) Node() tui.Node[Message] {
 			children = append(children, tui.Column(selected).
 				Focusable(p.id).
 				WithFocusedStyle(p.style.Focused).
-				OnEvent(p.id, p.navigationHandler(page)))
+				OnActions(p.id, paginatorSemanticActions(descriptors, page, p.total, p.id, p.onChange)))
 			continue
 		}
 		candidatePage := candidate
@@ -134,7 +190,7 @@ func (p Paginator[Message]) Node() tui.Node[Message] {
 		node := tui.StyledText[Message]("○", candidateStyle).WithID(candidateID)
 		if p.enabled {
 			node = node.OnEvent(candidateID, func(event vt.Event) tui.EventResult[Message] {
-				if !isActivationEvent(event) {
+				if !isPointerActivationEvent(event) {
 					return tui.IgnoreResult[Message]()
 				}
 				return tui.ConsumeResult[Message]().Focus(p.id).Emit(p.onChange(candidatePage))
@@ -144,23 +200,50 @@ func (p Paginator[Message]) Node() tui.Node[Message] {
 	}
 	root := tui.Row(children...)
 	if !p.enabled {
-		return root.WithID(p.id)
+		return root.WithID(p.id).OnActions(p.id, disabledPaginatorActions[Message](descriptors))
 	}
 	return root
 }
 
-func (p Paginator[Message]) navigationHandler(page int) func(vt.Event) tui.EventResult[Message] {
-	return func(event vt.Event) tui.EventResult[Message] {
-		next, handled := paginatorPageForEvent(page, p.total, event)
-		if !handled {
-			return tui.IgnoreResult[Message]()
-		}
-		result := tui.ConsumeResult[Message]().Focus(p.id)
-		if next != page {
-			result = result.Emit(p.onChange(next))
-		}
-		return result
+func paginatorSemanticActions[Message any](
+	descriptors [4]tui.ActionDescriptor,
+	page, total int,
+	focusID tui.NodeID,
+	onChange func(int) Message,
+) []tui.Action[Message] {
+	actions := make([]tui.Action[Message], len(descriptors))
+	for index, descriptor := range descriptors {
+		action := paginatorActions[index]
+		actions[index] = tui.NewAction(descriptor, func(tui.ActionEvent) tui.EventResult[Message] {
+			return paginatorActionResult(action, page, total, focusID, onChange)
+		})
 	}
+	return actions
+}
+
+func disabledPaginatorActions[Message any](descriptors [4]tui.ActionDescriptor) []tui.Action[Message] {
+	actions := make([]tui.Action[Message], len(descriptors))
+	for index, descriptor := range descriptors {
+		actions[index] = tui.NewAction[Message](descriptor, nil)
+	}
+	return actions
+}
+
+func paginatorActionResult[Message any](
+	action paginatorAction,
+	page, total int,
+	focusID tui.NodeID,
+	onChange func(int) Message,
+) tui.EventResult[Message] {
+	next, ok := paginatorPageForAction(page, total, action)
+	if !ok {
+		next = page
+	}
+	result := tui.ConsumeResult[Message]().Focus(focusID)
+	if next != page {
+		result = result.Emit(onChange(next))
+	}
+	return result
 }
 
 func normalizedPage(page, total int) (int, bool) {
@@ -182,26 +265,35 @@ func paginatorWindow(total, page, limit int) (int, int) {
 	return start, start + limit
 }
 
-func paginatorPageForEvent(page, total int, event vt.Event) (int, bool) {
+func paginatorPageForAction(page, total int, action paginatorAction) (int, bool) {
 	page, ok := normalizedPage(page, total)
-	if !ok || event.Kind != vt.EventKey || event.Key.Action == vt.KeyRelease {
+	if !ok {
 		return 0, false
 	}
-	modifiers := event.Key.Modifiers
-	if modifiers.Alt || modifiers.Control || modifiers.Meta {
-		return 0, false
-	}
-	switch event.Key.Code {
-	case vt.KeyLeft, vt.KeyUp, vt.KeyPageUp:
+	switch action {
+	case paginatorPrevious:
 		return max(page-1, 0), true
-	case vt.KeyRight, vt.KeyDown, vt.KeyPageDown:
+	case paginatorNext:
 		return min(page+1, total-1), true
-	case vt.KeyHome:
+	case paginatorFirst:
 		return 0, true
-	case vt.KeyEnd:
+	case paginatorLast:
 		return total - 1, true
 	default:
 		return 0, false
+	}
+}
+
+func paginatorActionDescriptors(enabled bool) [4]tui.ActionDescriptor {
+	availability := tui.ActionEnabled
+	if !enabled {
+		availability = tui.ActionDisabledPassThrough
+	}
+	return [4]tui.ActionDescriptor{
+		defaultPaginatorActionDescriptors[0].WithAvailability(availability),
+		defaultPaginatorActionDescriptors[1].WithAvailability(availability),
+		defaultPaginatorActionDescriptors[2].WithAvailability(availability),
+		defaultPaginatorActionDescriptors[3].WithAvailability(availability),
 	}
 }
 

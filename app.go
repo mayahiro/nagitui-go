@@ -1,10 +1,16 @@
 package tui
 
+import celltext "github.com/mayahiro/nagi-go/text"
+
 // ViewContext contains environment information available while rebuilding a
 // semantic view
 type ViewContext struct {
 	// Size is the current terminal size in cells
 	Size Size
+	// WidthProfile is the runtime terminal cell-width policy
+	WidthProfile celltext.WidthProfile
+	// TerminalCapabilities contains detected features and active input mode
+	TerminalCapabilities TerminalCapabilityProfile
 }
 
 // App is one application whose state is updated by sequential messages

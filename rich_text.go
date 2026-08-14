@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"sort"
 	"unicode/utf8"
 
 	celltext "github.com/mayahiro/nagi-go/text"
@@ -33,6 +34,12 @@ func NewTextSpan(text string, style vt.Style) TextSpan {
 	return TextSpan{Text: text, Style: style}
 }
 
+// WithStyle returns this span with a replacement style
+func (s TextSpan) WithStyle(style vt.Style) TextSpan {
+	s.Style = style
+	return s
+}
+
 // ParagraphOptions controls paragraph wrapping and horizontal alignment
 //
 // The zero value uses word wrapping and start alignment.
@@ -49,8 +56,9 @@ func DefaultParagraphOptions() ParagraphOptions {
 }
 
 type paragraphUnit struct {
-	text      string
 	span      int
+	start     int
+	end       int
 	width     uint32
 	space     bool
 	breakLine bool
@@ -63,9 +71,15 @@ type paragraphLine struct {
 }
 
 type paragraphLayout struct {
-	units []paragraphUnit
-	lines []paragraphLine
-	size  Size
+	units   []paragraphUnit
+	lines   []paragraphLine
+	size    Size
+	pointer *paragraphPointerMetadata
+}
+
+type paragraphPointerMetadata struct {
+	spanOffsets []int
+	cellStarts  []uint32
 }
 
 type richTextLayoutKey struct {
@@ -84,6 +98,7 @@ type richTextLayoutEntry struct {
 type richTextLayoutCache struct {
 	unitsReady bool
 	units      []paragraphUnit
+	pointer    *paragraphPointerMetadata
 	entries    [2]richTextLayoutEntry
 	next       uint8
 }
@@ -97,16 +112,20 @@ func (c *richTextLayoutCache) resolve(
 	maxWidth uint32,
 	bounded bool,
 	mode WrapMode,
+	profile celltext.WidthProfile,
 ) paragraphLayout {
 	key := richTextLayoutKey{maxWidth: maxWidth, bounded: bounded, mode: mode}
 	for index := range c.entries {
 		entry := &c.entries[index]
 		if entry.valid && entry.key == key {
-			return paragraphLayout{units: c.units, lines: entry.lines, size: entry.size}
+			return paragraphLayout{
+				units: c.units, lines: entry.lines, size: entry.size,
+				pointer: c.pointer,
+			}
 		}
 	}
 	if !c.unitsReady {
-		c.units = textSpanUnits(spans)
+		c.units = textSpanUnits(spans, profile)
 		c.unitsReady = true
 	}
 	lines := layoutParagraphUnits(c.units, maxWidth, bounded, mode)
@@ -118,7 +137,26 @@ func (c *richTextLayoutCache) resolve(
 		lines: lines,
 		size:  paragraphLayoutSize(lines),
 	}
-	return paragraphLayout{units: c.units, lines: entry.lines, size: entry.size}
+	return paragraphLayout{
+		units: c.units, lines: entry.lines, size: entry.size,
+		pointer: c.pointer,
+	}
+}
+
+func (c *richTextLayoutCache) resolveTextHit(
+	spans []TextSpan,
+	maxWidth uint32,
+	mode WrapMode,
+	profile celltext.WidthProfile,
+) paragraphLayout {
+	if !c.unitsReady {
+		c.units = textSpanUnits(spans, profile)
+		c.unitsReady = true
+	}
+	if c.pointer == nil {
+		c.pointer = newParagraphPointerMetadata(spans, c.units)
+	}
+	return c.resolve(spans, maxWidth, true, mode, profile)
 }
 
 func resolveRichTextLayout(
@@ -127,14 +165,17 @@ func resolveRichTextLayout(
 	maxWidth uint32,
 	bounded bool,
 	mode WrapMode,
+	profile celltext.WidthProfile,
 ) paragraphLayout {
 	mode = normalizedWrapMode(mode)
 	if cache != nil {
-		return cache.resolve(spans, maxWidth, bounded, mode)
+		return cache.resolve(spans, maxWidth, bounded, mode, profile)
 	}
-	units := textSpanUnits(spans)
+	units := textSpanUnits(spans, profile)
 	lines := layoutParagraphUnits(units, maxWidth, bounded, mode)
-	return paragraphLayout{units: units, lines: lines, size: paragraphLayoutSize(lines)}
+	return paragraphLayout{
+		units: units, lines: lines, size: paragraphLayoutSize(lines),
+	}
 }
 
 func layoutParagraphUnits(units []paragraphUnit, maxWidth uint32, bounded bool, mode WrapMode) []paragraphLine {
@@ -181,7 +222,7 @@ func layoutParagraphUnits(units []paragraphUnit, maxWidth uint32, bounded bool, 
 	return lines
 }
 
-func textSpanUnits(spans []TextSpan) []paragraphUnit {
+func textSpanUnits(spans []TextSpan, profile celltext.WidthProfile) []paragraphUnit {
 	capacity := 0
 	for _, span := range spans {
 		count := utf8.RuneCountInString(span.Text)
@@ -196,19 +237,115 @@ func textSpanUnits(spans []TextSpan) []paragraphUnit {
 		graphemes := celltext.IterateGraphemes(span.Text)
 		for grapheme, ok := graphemes.Next(); ok; grapheme, ok = graphemes.Next() {
 			if grapheme.Text == "\r" || grapheme.Text == "\n" || grapheme.Text == "\r\n" {
-				units = append(units, paragraphUnit{breakLine: true})
+				units = append(units, paragraphUnit{
+					span: spanIndex, start: grapheme.Start, end: grapheme.End, breakLine: true,
+				})
 				continue
 			}
-			width := max(celltext.GraphemeWidth(grapheme.Text, celltext.ModernWidth()), 1)
+			width := max(celltext.GraphemeWidth(grapheme.Text, profile), 1)
 			units = append(units, paragraphUnit{
-				text:  grapheme.Text,
-				span:  spanIndex,
-				width: intToUint32(width),
-				space: grapheme.Text == " ",
+				span: spanIndex, start: grapheme.Start, end: grapheme.End,
+				width: intToUint32(width), space: grapheme.Text == " ",
 			})
 		}
 	}
 	return units
+}
+
+func newParagraphPointerMetadata(spans []TextSpan, units []paragraphUnit) *paragraphPointerMetadata {
+	cellStarts := make([]uint32, len(units))
+	var logicalCell uint32
+	for index, unit := range units {
+		cellStarts[index] = logicalCell
+		if unit.breakLine {
+			logicalCell = 0
+		} else {
+			logicalCell = saturatingAdd32(logicalCell, unit.width)
+		}
+	}
+	return &paragraphPointerMetadata{
+		spanOffsets: paragraphSpanOffsets(spans),
+		cellStarts:  cellStarts,
+	}
+}
+
+func paragraphSpanOffsets(spans []TextSpan) []int {
+	offsets := make([]int, len(spans)+1)
+	for index, span := range spans {
+		offsets[index+1] = saturatingAddInt(offsets[index], len(span.Text))
+	}
+	return offsets
+}
+
+func paragraphTextHit(layout paragraphLayout, width uint32, alignment HorizontalAlignment, position Point) TextHit {
+	pointer := layout.pointer
+	if pointer == nil {
+		panic("pointer metadata is not prepared for text hit")
+	}
+	documentLen := 0
+	if len(pointer.spanOffsets) > 0 {
+		documentLen = pointer.spanOffsets[len(pointer.spanOffsets)-1]
+	}
+	if position.Y < 0 {
+		return newTextHit(0, 0)
+	}
+	lineIndex := int(position.Y)
+	if lineIndex >= len(layout.lines) {
+		return newTextHit(documentLen, documentLen)
+	}
+	line := layout.lines[lineIndex]
+	lineStart := documentLen
+	if line.start < len(layout.units) {
+		lineStart = paragraphUnitTextHit(layout, layout.units[line.start]).Start()
+	}
+	lineEnd := lineStart
+	if line.end > line.start {
+		lineEnd = paragraphUnitTextHit(layout, layout.units[line.end-1]).End()
+	}
+	desired := min(line.width, width)
+	lineX := int64(horizontalAlignmentOffset(width, desired, normalizedParagraphAlignment(alignment)))
+	pointerX := int64(position.X)
+	if pointerX < lineX {
+		return newTextHit(lineStart, lineStart)
+	}
+	units := layout.units[line.start:line.end]
+	cellStarts := pointer.cellStarts[line.start:line.end]
+	relative := uint32(pointerX - lineX)
+	lineCellStart := uint32(0)
+	if len(cellStarts) > 0 {
+		lineCellStart = cellStarts[0]
+	}
+	target := saturatingAdd32(lineCellStart, relative)
+	index := sort.Search(len(units), func(index int) bool {
+		unit := units[index]
+		return saturatingAdd32(cellStarts[index], unit.width) > target
+	})
+	if index < len(units) {
+		return paragraphUnitTextHit(layout, units[index])
+	}
+	return newTextHit(lineEnd, lineEnd)
+}
+
+func paragraphUnitTextHit(layout paragraphLayout, unit paragraphUnit) TextHit {
+	pointer := layout.pointer
+	if pointer == nil {
+		panic("pointer metadata is not prepared for text hit")
+	}
+	base := 0
+	if unit.span >= 0 && unit.span < len(pointer.spanOffsets) {
+		base = pointer.spanOffsets[unit.span]
+	} else if len(pointer.spanOffsets) > 0 {
+		base = pointer.spanOffsets[len(pointer.spanOffsets)-1]
+	}
+	return newTextHit(saturatingAddInt(base, unit.start), saturatingAddInt(base, unit.end))
+}
+
+func saturatingAddInt(left, right int) int {
+	maximum := int(^uint(0) >> 1)
+	if right > maximum-left {
+		return maximum
+	}
+	return left + right
 }
 
 func lastParagraphSpace(units []paragraphUnit, start, end int) int {
@@ -254,6 +391,7 @@ func measureRichText(
 	options ParagraphOptions,
 	cache *richTextLayoutCache,
 	constraints layoutConstraints,
+	profile celltext.WidthProfile,
 ) Size {
 	return resolveRichTextLayout(
 		spans,
@@ -261,6 +399,7 @@ func measureRichText(
 		constraints.width.value,
 		constraints.width.bounded,
 		options.Wrap,
+		profile,
 	).size
 }
 
@@ -270,11 +409,12 @@ func renderRichText(
 	spans []TextSpan,
 	options ParagraphOptions,
 	cache *richTextLayoutCache,
+	profile celltext.WidthProfile,
 ) {
 	if rect.Empty() {
 		return
 	}
-	layout := resolveRichTextLayout(spans, cache, rect.Width, true, options.Wrap)
+	layout := resolveRichTextLayout(spans, cache, rect.Width, true, options.Wrap, profile)
 	for lineIndex, line := range layout.lines {
 		if uint32(lineIndex) >= rect.Height {
 			break
@@ -292,9 +432,9 @@ func renderRichText(
 				target.Write(
 					clampInt64ToInt32(x),
 					y,
-					unit.text,
+					spans[unit.span].Text[unit.start:unit.end],
 					spans[unit.span].Style,
-					celltext.ModernWidth(),
+					profile,
 				)
 			}
 			x = end

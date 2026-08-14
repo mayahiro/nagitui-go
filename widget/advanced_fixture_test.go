@@ -63,6 +63,8 @@ func TestTextAreaEditFixtures(t *testing.T) {
 			edit,
 			record.Text("text"),
 		)
+		actual.preferredColumn = 0
+		actual.hasPreferred = false
 		expected := NewTextAreaState(record.Text("expected"), fixtureInt(t, record.Field("expected-cursor")))
 		if actual != expected {
 			t.Errorf("case %s: state = %#v, want %#v", record.ID, actual, expected)
@@ -95,15 +97,20 @@ func TestTextAreaSelectionFixtures(t *testing.T) {
 			actual = applyTextAreaEdit(state, textAreaDelete, "")
 			handled = true
 		case "left":
-			actual, handled = textAreaEditForEvent(state, textAreaFixtureKey(vt.KeyLeft, false, false, 0))
+			actual = applyTextAreaMovement(state, textAreaLeft, false)
+			handled = true
 		case "right":
-			actual, handled = textAreaEditForEvent(state, textAreaFixtureKey(vt.KeyRight, false, false, 0))
+			actual = applyTextAreaMovement(state, textAreaRight, false)
+			handled = true
 		case "shift-left":
-			actual, handled = textAreaEditForEvent(state, textAreaFixtureKey(vt.KeyLeft, true, false, 0))
+			actual = applyTextAreaMovement(state, textAreaLeft, true)
+			handled = true
 		case "shift-right":
-			actual, handled = textAreaEditForEvent(state, textAreaFixtureKey(vt.KeyRight, true, false, 0))
+			actual = applyTextAreaMovement(state, textAreaRight, true)
+			handled = true
 		case "select-all":
-			actual, handled = textAreaEditForEvent(state, textAreaFixtureKey(vt.KeyCharacter, false, true, 'a'))
+			actual = selectAllTextAreaState(state)
+			handled = true
 		default:
 			t.Fatalf("case %s: invalid operation %q", record.ID, record.Field("operation"))
 		}
@@ -277,11 +284,11 @@ func TestPaginatorFixtures(t *testing.T) {
 		if !ok {
 			continue
 		}
-		previous, handled := paginatorPageForEvent(page, total, textAreaFixtureKey(vt.KeyLeft, false, false, 0))
+		previous, handled := paginatorPageForAction(page, total, paginatorPrevious)
 		if !handled || strconv.Itoa(previous) != record.Field("previous") {
 			t.Errorf("case %s: previous = %d, %t", record.ID, previous, handled)
 		}
-		next, handled := paginatorPageForEvent(page, total, textAreaFixtureKey(vt.KeyRight, false, false, 0))
+		next, handled := paginatorPageForAction(page, total, paginatorNext)
 		if !handled || strconv.Itoa(next) != record.Field("next") {
 			t.Errorf("case %s: next = %d, %t", record.ID, next, handled)
 		}
@@ -326,13 +333,13 @@ func TestFilePickerFixtures(t *testing.T) {
 		if !ok {
 			continue
 		}
-		up, handled := filePickerActionForEvent(selected, len(visible), viewport, textAreaFixtureKey(vt.KeyPageUp, false, false, 0))
-		if !handled || strconv.Itoa(up.position) != record.Field("page-up") {
-			t.Errorf("case %s: page-up = %d, %t", record.ID, up.position, handled)
+		up, handled := filePickerPositionForAction(selected, len(visible), viewport, filePickerPreviousPage)
+		if !handled || strconv.Itoa(up) != record.Field("page-up") {
+			t.Errorf("case %s: page-up = %d, %t", record.ID, up, handled)
 		}
-		down, handled := filePickerActionForEvent(selected, len(visible), viewport, textAreaFixtureKey(vt.KeyPageDown, false, false, 0))
-		if !handled || strconv.Itoa(down.position) != record.Field("page-down") {
-			t.Errorf("case %s: page-down = %d, %t", record.ID, down.position, handled)
+		down, handled := filePickerPositionForAction(selected, len(visible), viewport, filePickerNextPage)
+		if !handled || strconv.Itoa(down) != record.Field("page-down") {
+			t.Errorf("case %s: page-down = %d, %t", record.ID, down, handled)
 		}
 	}
 }

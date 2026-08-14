@@ -91,6 +91,7 @@ type activeSubscription[Message any] struct {
 }
 
 type subscriptionSupervisor[Message any] struct {
+	parent           context.Context
 	inboxCapacity    int
 	wake             runtimeWake
 	active           map[SubscriptionKey]*activeSubscription[Message]
@@ -101,13 +102,22 @@ type subscriptionSupervisor[Message any] struct {
 	starts           uint64
 	stops            uint64
 	batchFlushes     uint64
+	notices          *runtimeNoticeQueue
+	workers          *workerTracker
+	closed           bool
 }
 
 func newSubscriptionSupervisor[Message any](inboxCapacity int) *subscriptionSupervisor[Message] {
+	return newSubscriptionSupervisorContext[Message](context.Background(), inboxCapacity)
+}
+
+func newSubscriptionSupervisorContext[Message any](parent context.Context, inboxCapacity int) *subscriptionSupervisor[Message] {
 	return &subscriptionSupervisor[Message]{
+		parent:        parent,
 		inboxCapacity: inboxCapacity,
 		active:        make(map[SubscriptionKey]*activeSubscription[Message]),
 		generations:   make(map[SubscriptionKey]uint64),
+		workers:       &workerTracker{},
 	}
 }
 
@@ -115,6 +125,9 @@ func (s *subscriptionSupervisor[Message]) reconcile(
 	subscription Subscription[Message],
 	now Timestamp,
 ) (subscriptionReconciliation, error) {
+	if s.closed {
+		return subscriptionReconciliation{}, nil
+	}
 	var sources []*subscriptionSource[Message]
 	flattenSubscriptions(subscription, &sources)
 	keys := make(map[SubscriptionKey]struct{}, len(sources))
@@ -153,6 +166,9 @@ func (s *subscriptionSupervisor[Message]) reconcile(
 }
 
 func (s *subscriptionSupervisor[Message]) poll(now Timestamp) {
+	if s.closed {
+		return
+	}
 	for _, key := range s.order {
 		active, exists := s.active[key]
 		if !exists {
@@ -164,6 +180,9 @@ func (s *subscriptionSupervisor[Message]) poll(now Timestamp) {
 }
 
 func (s *subscriptionSupervisor[Message]) takeReady(maximum int) []subscriptionMessage[Message] {
+	if maximum <= 0 || len(s.order) == 0 {
+		return nil
+	}
 	ready := make([]subscriptionMessage[Message], 0, min(maximum, 64))
 	for len(ready) < maximum {
 		var selectedKey SubscriptionKey
@@ -269,6 +288,10 @@ func (s *subscriptionSupervisor[Message]) timeUntilDeadline(now Timestamp) (time
 }
 
 func (s *subscriptionSupervisor[Message]) close() {
+	if s.closed {
+		return
+	}
+	s.closed = true
 	for _, key := range s.order {
 		if active, exists := s.active[key]; exists {
 			s.stopActive(active)
@@ -309,19 +332,42 @@ func (s *subscriptionSupervisor[Message]) startSource(
 		active.factory = source.factory
 		active.nextDue, active.hasNextDue = subscriptionTimestampAfter(now, source.interval)
 	case subscriptionStream:
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, cancel := context.WithCancel(s.parent)
 		active.cancel = cancel
 		active.finished = &atomic.Bool{}
 		finished := active.finished
 		stream := source.stream
 		sink := SubscriptionSink[Message]{inbox: inbox}
 		diagnostics := &s.atomicDiagnostic
+		notices := s.notices
+		wake := s.wake
+		tag := active.tag
+		s.workers.start()
+		workers := s.workers
 		go func() {
+			defer workers.finish()
+			panicked := false
 			defer func() {
 				if recover() != nil {
+					panicked = true
 					diagnostics.producerPanics.Add(1)
 				}
 				finished.Store(true)
+				switch {
+				case panicked:
+					notices.push(subscriptionRuntimeNotice(
+						RuntimeNoticeSubscriptionStreamPanicked,
+						tag.key,
+						tag.generation,
+					))
+				case ctx.Err() == nil && !sink.Closed():
+					notices.push(subscriptionRuntimeNotice(
+						RuntimeNoticeSubscriptionStreamCompleted,
+						tag.key,
+						tag.generation,
+					))
+				}
+				wake.notify()
 			}()
 			stream(ctx, sink)
 		}()

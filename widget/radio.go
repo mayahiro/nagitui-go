@@ -24,6 +24,9 @@ func DefaultRadioStyle() RadioStyle {
 }
 
 // Radio is one controlled choice in an application-owned radio group
+//
+// Keyboard activation declares ActivateActionID. Left-button press remains a
+// raw pointer event so keyboard rebinding does not remove it.
 type Radio[Message any] struct {
 	id       tui.NodeID
 	label    string
@@ -55,6 +58,15 @@ func (r Radio[Message]) Style(style RadioStyle) Radio[Message] {
 	return r
 }
 
+// ActionDescriptor returns the semantic activation descriptor declared by this radio
+func (r Radio[Message]) ActionDescriptor() tui.ActionDescriptor {
+	availability := tui.ActionEnabled
+	if !r.enabled {
+		availability = tui.ActionDisabledPassThrough
+	}
+	return ActivateActionDescriptor().WithAvailability(availability)
+}
+
 // Node builds the public semantic node for this radio
 func (r Radio[Message]) Node() tui.Node[Message] {
 	marker := " "
@@ -62,20 +74,32 @@ func (r Radio[Message]) Node() tui.Node[Message] {
 		marker = "o"
 	}
 	content := "(" + marker + ") " + r.label
+	descriptor := r.ActionDescriptor()
 	if !r.enabled {
-		return tui.StyledText[Message](content, r.style.Disabled).WithID(r.id)
+		return tui.StyledText[Message](content, r.style.Disabled).
+			WithID(r.id).
+			OnActions(r.id, []tui.Action[Message]{tui.NewAction[Message](descriptor, nil)})
 	}
 	return tui.StyledText[Message](content, r.style.Normal).
 		Focusable(r.id).
 		WithFocusedStyle(r.style.Focused).
+		OnActions(r.id, []tui.Action[Message]{
+			tui.NewAction(descriptor, func(tui.ActionEvent) tui.EventResult[Message] {
+				return radioSelectionResult(r.selected, r.id, r.onSelect)
+			}),
+		}).
 		OnEvent(r.id, func(event vt.Event) tui.EventResult[Message] {
-			if !isActivationEvent(event) {
+			if !isPointerActivationEvent(event) {
 				return tui.IgnoreResult[Message]()
 			}
-			result := tui.ConsumeResult[Message]().Focus(r.id)
-			if !r.selected {
-				result = result.Emit(r.onSelect())
-			}
-			return result
+			return radioSelectionResult(r.selected, r.id, r.onSelect)
 		})
+}
+
+func radioSelectionResult[Message any](selected bool, id tui.NodeID, onSelect func() Message) tui.EventResult[Message] {
+	result := tui.ConsumeResult[Message]().Focus(id)
+	if !selected {
+		result = result.Emit(onSelect())
+	}
+	return result
 }

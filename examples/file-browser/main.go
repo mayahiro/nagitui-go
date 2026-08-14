@@ -75,7 +75,7 @@ func (*fileBrowser) Subscriptions() tui.Subscription[message] {
 	return tui.NoneSubscription[message]()
 }
 
-func (a *fileBrowser) View(_ tui.ViewContext) tui.Node[message] {
+func (a *fileBrowser) View(context tui.ViewContext) tui.Node[message] {
 	entries := entriesFor(a.cwd)
 	picker := widget.NewFilePicker(
 		tui.NewNodeID("files"),
@@ -128,7 +128,7 @@ func (a *fileBrowser) View(_ tui.ViewContext) tui.Node[message] {
 			widget.NewHelpBinding("Left/Backspace", "parent"),
 			widget.NewHelpBinding("Tab", "focus"),
 			widget.NewHelpBinding("Esc", "exit"),
-		}).Node().WithLength(tui.Fixed(1)),
+		}).WidthProfile(context.WidthProfile).Node().WithLength(tui.Fixed(1)),
 	)
 }
 

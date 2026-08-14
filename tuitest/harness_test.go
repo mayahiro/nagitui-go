@@ -1,6 +1,8 @@
 package tuitest
 
 import (
+	"context"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -71,6 +73,286 @@ func TestHarnessObservesBytesMessagesFramesAndEscapeTime(t *testing.T) {
 	}
 	if !harness.ExitRequested() {
 		t.Fatal("Escape did not request exit")
+	}
+}
+
+type clipboardApp struct{}
+
+func (*clipboardApp) Init() tui.Effect[string] {
+	return tui.NoneEffect[string]()
+}
+
+func (*clipboardApp) Update(message string) tui.Effect[string] {
+	return tui.SetClipboardEffect[string](message).WithoutRedraw()
+}
+
+func (*clipboardApp) Subscriptions() tui.Subscription[string] {
+	return tui.NoneSubscription[string]()
+}
+
+func (*clipboardApp) View(tui.ViewContext) tui.Node[string] {
+	return tui.Text[string]("clipboard")
+}
+
+func TestHarnessObservesAndTakesPendingClipboardRequest(t *testing.T) {
+	harness, err := New[string](
+		&clipboardApp{},
+		tui.Size{Width: 12, Height: 1},
+		func(vt.Event) tui.EventAction[string] { return tui.IgnoreAction[string]() },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer harness.Close()
+	if err := harness.Send("copy"); err != nil {
+		t.Fatal(err)
+	}
+
+	request, ok := harness.PendingClipboardRequest()
+	if !ok || request.Text() != "copy" {
+		t.Fatalf("pending request = %q, %t", request.Text(), ok)
+	}
+	request, ok = harness.TakeClipboardRequest()
+	if !ok || request.Text() != "copy" {
+		t.Fatalf("taken request = %q, %t", request.Text(), ok)
+	}
+	if _, ok := harness.TakeClipboardRequest(); ok {
+		t.Fatal("second take returned a request")
+	}
+}
+
+type terminalHarnessMessage uint8
+
+const (
+	terminalHarnessOpen terminalHarnessMessage = iota
+	terminalHarnessReturned
+)
+
+type terminalHarnessApp struct {
+	returned bool
+}
+
+func (*terminalHarnessApp) Init() tui.Effect[terminalHarnessMessage] {
+	return tui.NoneEffect[terminalHarnessMessage]()
+}
+
+func (a *terminalHarnessApp) Update(message terminalHarnessMessage) tui.Effect[terminalHarnessMessage] {
+	if message == terminalHarnessOpen {
+		return tui.SuspendTerminalEffect(func(context.Context) terminalHarnessMessage {
+			return terminalHarnessReturned
+		})
+	}
+	a.returned = true
+	return tui.NoneEffect[terminalHarnessMessage]()
+}
+
+func (*terminalHarnessApp) Subscriptions() tui.Subscription[terminalHarnessMessage] {
+	return tui.NoneSubscription[terminalHarnessMessage]()
+}
+
+func (a *terminalHarnessApp) View(tui.ViewContext) tui.Node[terminalHarnessMessage] {
+	if a.returned {
+		return tui.Text[terminalHarnessMessage]("returned")
+	}
+	return tui.Text[terminalHarnessMessage]("ready")
+}
+
+func TestHarnessRunsTerminalTaskAndDiscardsPendingInput(t *testing.T) {
+	app := &terminalHarnessApp{}
+	harness, err := New(
+		app,
+		tui.Size{Width: 8, Height: 1},
+		func(event vt.Event) tui.EventAction[terminalHarnessMessage] {
+			if event.Kind == vt.EventKey && event.Key.Code == vt.KeyEscape {
+				return tui.ExitAction[terminalHarnessMessage]()
+			}
+			return tui.IgnoreAction[terminalHarnessMessage]()
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(harness.Close)
+	if err := harness.Send(terminalHarnessOpen); err != nil {
+		t.Fatal(err)
+	}
+	if err := harness.Input([]byte{0x1B}); err != nil {
+		t.Fatal(err)
+	}
+
+	if harness.PendingTerminalTasks() != 1 {
+		t.Fatalf("pending terminal tasks = %d, want 1", harness.PendingTerminalTasks())
+	}
+	if ran, err := harness.RunTerminalTask(); err != nil || !ran {
+		t.Fatalf("RunTerminalTask = %t, %v", ran, err)
+	}
+	if !app.returned || harness.PendingTerminalTasks() != 0 {
+		t.Fatalf("returned = %t, pending = %d", app.returned, harness.PendingTerminalTasks())
+	}
+	if ran, err := harness.RunTerminalTask(); err != nil || ran {
+		t.Fatalf("second RunTerminalTask = %t, %v", ran, err)
+	}
+	if err := harness.Advance(25 * time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	if harness.ExitRequested() {
+		t.Fatal("discarded pending Escape requested exit")
+	}
+	if got := harness.MessageHistory(); !reflect.DeepEqual(got, []terminalHarnessMessage{terminalHarnessOpen, terminalHarnessReturned}) {
+		t.Fatalf("message history = %v", got)
+	}
+}
+
+type controlledInputMessage struct {
+	value     string
+	selection int
+}
+
+type controlledInputApp struct {
+	value     string
+	selection int
+}
+
+func (*controlledInputApp) Init() tui.Effect[controlledInputMessage] {
+	return tui.NoneEffect[controlledInputMessage]()
+}
+
+func (a *controlledInputApp) Update(message controlledInputMessage) tui.Effect[controlledInputMessage] {
+	a.value = message.value
+	a.selection = message.selection
+	return tui.NoneEffect[controlledInputMessage]()
+}
+
+func (*controlledInputApp) Subscriptions() tui.Subscription[controlledInputMessage] {
+	return tui.NoneSubscription[controlledInputMessage]()
+}
+
+func (a *controlledInputApp) View(tui.ViewContext) tui.Node[controlledInputMessage] {
+	value := a.value
+	selection := a.selection
+	return tui.Text[controlledInputMessage](value).Focusable("controlled").OnEvent(
+		"controlled",
+		func(event vt.Event) tui.EventResult[controlledInputMessage] {
+			switch {
+			case event.Kind == vt.EventText:
+				return tui.MessageResult(controlledInputMessage{
+					value: value + event.Text, selection: selection,
+				})
+			case event.Kind == vt.EventKey && event.Key.Code == vt.KeyBackspace:
+				next := value
+				if len(next) > 0 {
+					next = next[:len(next)-1]
+				}
+				return tui.MessageResult(controlledInputMessage{
+					value: next, selection: selection,
+				})
+			case event.Kind == vt.EventKey && event.Key.Code == vt.KeyDown:
+				return tui.MessageResult(controlledInputMessage{
+					value: value, selection: selection + 1,
+				})
+			default:
+				return tui.IgnoreResult[controlledInputMessage]()
+			}
+		},
+	)
+}
+
+func TestHarnessProcessesControlledInputEventsSequentially(t *testing.T) {
+	tests := []struct {
+		name              string
+		app               *controlledInputApp
+		input             []byte
+		expectedValue     string
+		expectedSelection int
+	}{
+		{name: "unicode text", app: &controlledInputApp{}, input: []byte("A日"), expectedValue: "A日"},
+		{name: "backspace", app: &controlledInputApp{value: "abc"}, input: []byte{0x7f, 0x7f}, expectedValue: "a"},
+		{name: "down", app: &controlledInputApp{}, input: []byte("\x1b[B\x1b[B"), expectedSelection: 2},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			harness, err := New[controlledInputMessage](
+				test.app,
+				tui.Size{Width: 8, Height: 1},
+				func(vt.Event) tui.EventAction[controlledInputMessage] {
+					return tui.IgnoreAction[controlledInputMessage]()
+				},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer harness.Close()
+			if focused, err := harness.RequestFocus("controlled"); err != nil || !focused {
+				t.Fatalf("RequestFocus = %t, %v", focused, err)
+			}
+			if err := harness.Input(test.input); err != nil {
+				t.Fatal(err)
+			}
+			if test.app.value != test.expectedValue || test.app.selection != test.expectedSelection {
+				t.Fatalf(
+					"state = %q, %d, want %q, %d",
+					test.app.value,
+					test.app.selection,
+					test.expectedValue,
+					test.expectedSelection,
+				)
+			}
+			if len(harness.Frames()) != 2 {
+				t.Fatalf("frame count = %d, want 2", len(harness.Frames()))
+			}
+		})
+	}
+}
+
+type actionProjectionApp struct{}
+
+func (*actionProjectionApp) Init() tui.Effect[struct{}] { return tui.NoneEffect[struct{}]() }
+func (*actionProjectionApp) Update(struct{}) tui.Effect[struct{}] {
+	return tui.NoneEffect[struct{}]()
+}
+func (*actionProjectionApp) Subscriptions() tui.Subscription[struct{}] {
+	return tui.NoneSubscription[struct{}]()
+}
+func (*actionProjectionApp) View(tui.ViewContext) tui.Node[struct{}] {
+	descriptor := tui.NewActionDescriptor(
+		"app.action",
+		"Action",
+		[]tui.KeyBinding{tui.NewKeyBinding(tui.NewCharacterKeyStroke('x', vt.Modifiers{}))},
+	)
+	return tui.Text[struct{}]("action").Focusable("owner").OnActions(
+		"owner",
+		[]tui.Action[struct{}]{tui.NewAction(descriptor, func(tui.ActionEvent) tui.EventResult[struct{}] {
+			return tui.ConsumeResult[struct{}]()
+		})},
+	)
+}
+
+func TestHarnessObservesActiveActionProjection(t *testing.T) {
+	harness, err := New[struct{}](
+		&actionProjectionApp{},
+		tui.Size{Width: 8, Height: 1},
+		func(vt.Event) tui.EventAction[struct{}] { return tui.IgnoreAction[struct{}]() },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer harness.Close()
+	if focused, err := harness.RequestFocus("owner"); err != nil || !focused {
+		t.Fatalf("RequestFocus = %t, %v", focused, err)
+	}
+
+	groups, err := harness.ActiveActionGroups()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups) != 2 || groups[0].Owner() != "owner" || groups[1].Owner() != "owner" {
+		t.Fatalf("groups = %v", groups)
+	}
+	if actions := groups[0].Actions(); len(actions) != 1 || actions[0].ID() != "app.action" {
+		t.Fatalf("actions = %v", actions)
+	}
+	if actions := groups[1].Actions(); len(actions) != 2 || actions[0].ID() != tui.FocusNextActionID {
+		t.Fatalf("core actions = %v", actions)
 	}
 }
 
@@ -203,5 +485,102 @@ func TestHarnessObservesManualSubscriptionLifecycleAndMessages(t *testing.T) {
 	}
 	if len(harness.MessageHistory()) != 2 {
 		t.Fatalf("message history = %d, want 2", len(harness.MessageHistory()))
+	}
+}
+
+func TestHarnessBoundedStreamCycleGivesNextInputEventPriority(t *testing.T) {
+	source := NewManualSubscription[subscriptionTestMessage]()
+	app := &manualSubscriptionApp{source: source, running: true}
+	config := tui.NewRuntimeConfig(tui.Size{Width: 16, Height: 1})
+	config.MaxUpdatesPerCycle = 2
+	harness, err := NewWithConfig[subscriptionTestMessage](
+		app,
+		config,
+		25*time.Millisecond,
+		func(event vt.Event) tui.EventAction[subscriptionTestMessage] {
+			if event.Kind == vt.EventText {
+				return tui.MessageAction(subscriptionTestMessage{value: event.Text})
+			}
+			return tui.IgnoreAction[subscriptionTestMessage]()
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer harness.Close()
+	source.WaitStarted()
+	for _, value := range []string{"s0", "s1", "s2", "s3", "s4", "s5"} {
+		if !source.Send(subscriptionTestMessage{value: value}) {
+			t.Fatalf("send %s failed", value)
+		}
+	}
+
+	if err := harness.Step(); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(app.values, []string{"s0", "s1"}) {
+		t.Fatalf("first cycle values = %v", app.values)
+	}
+
+	if err := harness.Input([]byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(app.values, []string{"s0", "s1", "x", "s2", "s3"}) {
+		t.Fatalf("input cycle values = %v", app.values)
+	}
+
+	if err := harness.Step(); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(app.values, []string{"s0", "s1", "x", "s2", "s3", "s4", "s5"}) {
+		t.Fatalf("final values = %v", app.values)
+	}
+}
+
+type completedStreamHarnessApp struct{}
+
+func (*completedStreamHarnessApp) Init() tui.Effect[struct{}] {
+	return tui.NoneEffect[struct{}]()
+}
+
+func (*completedStreamHarnessApp) Update(struct{}) tui.Effect[struct{}] {
+	return tui.NoneEffect[struct{}]()
+}
+
+func (*completedStreamHarnessApp) Subscriptions() tui.Subscription[struct{}] {
+	return tui.StreamSubscription(
+		"events",
+		tui.ReliableDelivery(),
+		func(context.Context, tui.SubscriptionSink[struct{}]) {},
+	)
+}
+
+func (*completedStreamHarnessApp) View(tui.ViewContext) tui.Node[struct{}] {
+	return tui.Text[struct{}]("")
+}
+
+func TestHarnessObservesRuntimeNotices(t *testing.T) {
+	harness, err := New[struct{}](
+		&completedStreamHarnessApp{},
+		tui.Size{Width: 1, Height: 1},
+		func(vt.Event) tui.EventAction[struct{}] { return tui.IgnoreAction[struct{}]() },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer harness.Close()
+
+	for range 10_000 {
+		if harness.PendingRuntimeNotices() > 0 {
+			break
+		}
+		runtime.Gosched()
+	}
+	notices := harness.DrainRuntimeNotices()
+	if len(notices) != 1 || notices[0].Kind() != tui.RuntimeNoticeSubscriptionStreamCompleted {
+		t.Fatalf("notices = %+v", notices)
+	}
+	if harness.RuntimeNoticeDiagnostics().Dropped() != 0 {
+		t.Fatalf("dropped notices = %d", harness.RuntimeNoticeDiagnostics().Dropped())
 	}
 }

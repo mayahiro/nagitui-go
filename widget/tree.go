@@ -52,6 +52,10 @@ func DefaultTreeStyle() TreeStyle {
 }
 
 // Tree is a preorder tree with application-owned selection and expansion state
+//
+// The root owns standard activation, vertical selection, collapse, and expand
+// actions. Left-button press stays raw on each row so keyboard rebinding does
+// not remove pointer selection or branch toggling.
 type Tree[Message any] struct {
 	id             tui.NodeID
 	items          []TreeItem
@@ -102,10 +106,21 @@ func (t Tree[Message]) Viewport(height int) Tree[Message] {
 	return t
 }
 
+// ActionDescriptors returns the ordered semantic actions declared by this tree
+//
+// The order is activate, previous, next, first, last, collapse, and expand.
+// Every descriptor is disabled-pass-through when the tree is disabled or
+// empty.
+func (t Tree[Message]) ActionDescriptors() []tui.ActionDescriptor {
+	descriptors := treeActionDescriptors(t.enabled && len(t.items) > 0)
+	return append([]tui.ActionDescriptor(nil), descriptors[:]...)
+}
+
 // Node builds the public semantic node for this tree
 func (t Tree[Message]) Node() tui.Node[Message] {
 	visible := treeVisibleIndices(t.items)
 	selectedPosition, hasSelection := normalizedTreeSelection(visible, t.selected)
+	descriptors := treeActionDescriptors(t.enabled && hasSelection)
 	viewport := t.viewportHeight > 0
 	start, end := 0, len(visible)
 	if viewport && hasSelection {
@@ -114,36 +129,6 @@ func (t Tree[Message]) Node() tui.Node[Message] {
 		start, end = treeViewportRange(len(visible), 0, t.viewportHeight)
 	}
 	children := make([]tui.Node[Message], 0, end-start)
-
-	navigate := func(event vt.Event) tui.EventResult[Message] {
-		if isActivationEvent(event) {
-			result := tui.ConsumeResult[Message]().Focus(t.id)
-			if hasSelection {
-				originalIndex := visible[selectedPosition]
-				item := t.items[originalIndex]
-				if item.HasChildren && t.onToggle != nil {
-					result = result.Emit(t.onToggle(originalIndex, !item.Expanded))
-				}
-			}
-			return result
-		}
-		action, handled := treeNavigationEvent(event, visible, t.items, selectedPosition)
-		if !handled {
-			return tui.IgnoreResult[Message]()
-		}
-		if action.toggle {
-			result := tui.ConsumeResult[Message]().Focus(t.id)
-			if t.onToggle != nil {
-				result = result.Emit(t.onToggle(visible[selectedPosition], action.expanded))
-			}
-			return result
-		}
-		result := tui.ConsumeResult[Message]().Focus(t.id)
-		if action.position != selectedPosition {
-			result = result.Emit(t.onSelect(visible[action.position]))
-		}
-		return result
-	}
 
 	for position := start; position < end; position++ {
 		originalIndex := visible[position]
@@ -172,7 +157,7 @@ func (t Tree[Message]) Node() tui.Node[Message] {
 		itemID := item.ID
 		row := node.WithID(itemID).
 			OnEvent(itemID, func(event vt.Event) tui.EventResult[Message] {
-				if !isActivationEvent(event) {
+				if !isPointerActivationEvent(event) {
 					return tui.IgnoreResult[Message]()
 				}
 				result := tui.ConsumeResult[Message]().Focus(t.id)
@@ -185,10 +170,10 @@ func (t Tree[Message]) Node() tui.Node[Message] {
 				return result
 			})
 		if isSelected {
-			children = append(children, tui.Column(row).
-				Focusable(t.id).
-				WithFocusedStyle(t.style.Focused).
-				OnEvent(t.id, navigate))
+			children = append(children, treeActionTarget(
+				tui.Column(row), t.id, visible, t.items, selectedPosition,
+				t.style.Focused, t.onSelect, t.onToggle, descriptors,
+			))
 			continue
 		}
 		children = append(children, row)
@@ -201,13 +186,165 @@ func (t Tree[Message]) Node() tui.Node[Message] {
 	if t.enabled && hasSelection {
 		return root
 	}
-	return root.WithID(t.id)
+	return root.WithID(t.id).OnActions(t.id, disabledTreeActions[Message](descriptors))
 }
 
-type treeAction struct {
+var defaultTreeDisclosureActionDescriptors = [2]tui.ActionDescriptor{
+	tui.NewActionDescriptor(
+		CollapseActionID,
+		"Collapse",
+		[]tui.KeyBinding{repeatableActionBinding(vt.KeyLeft)},
+	),
+	tui.NewActionDescriptor(
+		ExpandActionID,
+		"Expand",
+		[]tui.KeyBinding{repeatableActionBinding(vt.KeyRight)},
+	),
+}
+
+type treeSemanticAction uint8
+
+const (
+	treeActivate treeSemanticAction = iota
+	treePrevious
+	treeNext
+	treeFirst
+	treeLast
+	treeCollapse
+	treeExpand
+)
+
+type treeTransition struct {
 	position int
 	toggle   bool
 	expanded bool
+}
+
+func treeActionDescriptors(enabled bool) [7]tui.ActionDescriptor {
+	collection := verticalCollectionActionDescriptors(enabled)
+	availability := tui.ActionEnabled
+	if !enabled {
+		availability = tui.ActionDisabledPassThrough
+	}
+	return [7]tui.ActionDescriptor{
+		collection[0],
+		collection[1],
+		collection[2],
+		collection[3],
+		collection[4],
+		defaultTreeDisclosureActionDescriptors[0].WithAvailability(availability),
+		defaultTreeDisclosureActionDescriptors[1].WithAvailability(availability),
+	}
+}
+
+func treeActionTarget[Message any](
+	node tui.Node[Message],
+	rootID tui.NodeID,
+	visible []int,
+	items []TreeItem,
+	selected int,
+	focusedStyle vt.Style,
+	onSelect func(int) Message,
+	onToggle func(int, bool) Message,
+	descriptors [7]tui.ActionDescriptor,
+) tui.Node[Message] {
+	return node.Focusable(rootID).
+		WithFocusedStyle(focusedStyle).
+		OnActions(rootID, newTreeActions(
+			descriptors, rootID, visible, items, selected, onSelect, onToggle,
+		))
+}
+
+func newTreeActions[Message any](
+	descriptors [7]tui.ActionDescriptor,
+	rootID tui.NodeID,
+	visible []int,
+	items []TreeItem,
+	selected int,
+	onSelect func(int) Message,
+	onToggle func(int, bool) Message,
+) []tui.Action[Message] {
+	actions := make([]tui.Action[Message], len(descriptors))
+	for index, descriptor := range descriptors {
+		action := treeSemanticAction(index)
+		actions[index] = tui.NewAction(descriptor, func(tui.ActionEvent) tui.EventResult[Message] {
+			return treeActionResult(action, rootID, visible, items, selected, onSelect, onToggle)
+		})
+	}
+	return actions
+}
+
+func treeActionResult[Message any](
+	action treeSemanticAction,
+	rootID tui.NodeID,
+	visible []int,
+	items []TreeItem,
+	selected int,
+	onSelect func(int) Message,
+	onToggle func(int, bool) Message,
+) tui.EventResult[Message] {
+	result := tui.ConsumeResult[Message]().Focus(rootID)
+	transition, changes := treeTransitionForAction(action, visible, items, selected)
+	if !changes {
+		return result
+	}
+	if transition.toggle {
+		if onToggle != nil {
+			result = result.Emit(onToggle(visible[selected], transition.expanded))
+		}
+		return result
+	}
+	if transition.position != selected {
+		result = result.Emit(onSelect(visible[transition.position]))
+	}
+	return result
+}
+
+func treeTransitionForAction(
+	action treeSemanticAction,
+	visible []int,
+	items []TreeItem,
+	selected int,
+) (treeTransition, bool) {
+	current := items[visible[selected]]
+	if action <= treeLast {
+		navigation, navigates := collectionNavigation(collectionAction(action))
+		if !navigates {
+			if current.HasChildren {
+				return treeTransition{toggle: true, expanded: !current.Expanded}, true
+			}
+			return treeTransition{}, false
+		}
+		next, _ := navigateSelection(len(visible), selected, navigation)
+		return treeTransition{position: next}, true
+	}
+	if action == treeCollapse {
+		if current.HasChildren && current.Expanded {
+			return treeTransition{toggle: true, expanded: false}, true
+		}
+		for position := selected - 1; position >= 0; position-- {
+			if items[visible[position]].Depth < current.Depth {
+				return treeTransition{position: position}, true
+			}
+		}
+		return treeTransition{position: selected}, true
+	}
+	if current.HasChildren && !current.Expanded {
+		return treeTransition{toggle: true, expanded: true}, true
+	}
+	child := selected + 1
+	if current.HasChildren && child < len(visible) && items[visible[child]].Depth > current.Depth {
+		return treeTransition{position: child}, true
+	}
+	return treeTransition{position: selected}, true
+}
+
+func disabledTreeActions[Message any](descriptors [7]tui.ActionDescriptor) []tui.Action[Message] {
+	actions := make([]tui.Action[Message], len(descriptors))
+	for index, descriptor := range descriptors {
+		actions[index] = tui.NewAction[Message](descriptor, nil)
+	}
+	return actions
 }
 
 func treeVisibleIndices(items []TreeItem) []int {
@@ -254,51 +391,4 @@ func treeViewportRange(count, selected, height int) (start, end int) {
 	start = selected - height/2
 	start = min(max(start, 0), count-height)
 	return start, start + height
-}
-
-func treeNavigationEvent(event vt.Event, visible []int, items []TreeItem, selected int) (treeAction, bool) {
-	if event.Kind != vt.EventKey || event.Key.Action == vt.KeyRelease {
-		return treeAction{}, false
-	}
-	modifiers := event.Key.Modifiers
-	if modifiers.Alt || modifiers.Control || modifiers.Meta {
-		return treeAction{}, false
-	}
-	switch event.Key.Code {
-	case vt.KeyUp, vt.KeyDown, vt.KeyHome, vt.KeyEnd:
-		action := navigationUp
-		switch event.Key.Code {
-		case vt.KeyDown:
-			action = navigationDown
-		case vt.KeyHome:
-			action = navigationHome
-		case vt.KeyEnd:
-			action = navigationEnd
-		}
-		next, _ := navigateSelection(len(visible), selected, action)
-		return treeAction{position: next}, true
-	case vt.KeyLeft:
-		current := items[visible[selected]]
-		if current.HasChildren && current.Expanded {
-			return treeAction{toggle: true, expanded: false}, true
-		}
-		for position := selected - 1; position >= 0; position-- {
-			if items[visible[position]].Depth < current.Depth {
-				return treeAction{position: position}, true
-			}
-		}
-		return treeAction{position: selected}, true
-	case vt.KeyRight:
-		current := items[visible[selected]]
-		if current.HasChildren && !current.Expanded {
-			return treeAction{toggle: true, expanded: true}, true
-		}
-		child := selected + 1
-		if current.HasChildren && child < len(visible) && items[visible[child]].Depth > current.Depth {
-			return treeAction{position: child}, true
-		}
-		return treeAction{position: selected}, true
-	default:
-		return treeAction{}, false
-	}
 }

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	celltext "github.com/mayahiro/nagi-go/text"
 	"github.com/mayahiro/nagi-go/vt"
 	"github.com/mayahiro/nagitui-go/surface"
 )
@@ -24,6 +25,207 @@ type runtimeMessage struct {
 type counterApp struct {
 	value   uint32
 	updates []uint32
+}
+
+type runtimeWidthProfileApp struct {
+	observed int
+}
+
+func (*runtimeWidthProfileApp) Init() Effect[runtimeMessage] {
+	return NoneEffect[runtimeMessage]()
+}
+
+func (*runtimeWidthProfileApp) Update(runtimeMessage) Effect[runtimeMessage] {
+	return NoneEffect[runtimeMessage]()
+}
+
+func (a *runtimeWidthProfileApp) View(context ViewContext) Node[runtimeMessage] {
+	a.observed = celltext.Width("·", context.WidthProfile)
+	return Border(Text[runtimeMessage]("·X"), vt.Style{})
+}
+
+func (*runtimeWidthProfileApp) Subscriptions() Subscription[runtimeMessage] {
+	return NoneSubscription[runtimeMessage]()
+}
+
+func TestRuntimeWidthProfileControlsContextLayoutAndFallbackGlyphs(t *testing.T) {
+	app := &runtimeWidthProfileApp{}
+	config := NewRuntimeConfig(Size{Width: 4, Height: 3})
+	config.WidthProfile = celltext.CJKWidth()
+	runtimeUnderTest, err := NewRuntimeWithClock[runtimeMessage](app, config, NewVirtualClock())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtimeUnderTest.Close()
+	frame, err := runtimeUnderTest.RenderIfDirty()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if frame == nil {
+		t.Fatal("runtime did not render")
+	}
+	if app.observed != 2 {
+		t.Fatalf("ViewContext ambiguous width = %d, want 2", app.observed)
+	}
+	surface := frame.Surface()
+	assertNodeCell(t, surface, 0, 0, "+")
+	assertNodeCell(t, surface, 1, 1, "·")
+	continuation, _ := surface.Cell(2, 1)
+	if !continuation.Continuation() {
+		t.Fatal("ambiguous CJK grapheme did not occupy two cells")
+	}
+}
+
+type runtimeContextKey struct{}
+
+type runtimeContextObservation struct {
+	value       string
+	deadline    time.Time
+	hasDeadline bool
+}
+
+type runtimeContextApp struct {
+	effectStarted chan runtimeContextObservation
+	streamStarted chan runtimeContextObservation
+	effectCause   chan error
+	streamCause   chan error
+}
+
+func observeRuntimeContext(ctx context.Context) runtimeContextObservation {
+	value, _ := ctx.Value(runtimeContextKey{}).(string)
+	deadline, hasDeadline := ctx.Deadline()
+	return runtimeContextObservation{value: value, deadline: deadline, hasDeadline: hasDeadline}
+}
+
+func (a *runtimeContextApp) Init() Effect[runtimeMessage] {
+	return RunEffect(func(ctx context.Context) runtimeMessage {
+		a.effectStarted <- observeRuntimeContext(ctx)
+		<-ctx.Done()
+		a.effectCause <- context.Cause(ctx)
+		return runtimeMessage{}
+	})
+}
+
+func (a *runtimeContextApp) Update(runtimeMessage) Effect[runtimeMessage] {
+	return NoneEffect[runtimeMessage]()
+}
+
+func (a *runtimeContextApp) View(ViewContext) Node[runtimeMessage] {
+	return Text[runtimeMessage]("")
+}
+
+func (a *runtimeContextApp) Subscriptions() Subscription[runtimeMessage] {
+	return StreamSubscription("context", ReliableDelivery(), func(ctx context.Context, _ SubscriptionSink[runtimeMessage]) {
+		a.streamStarted <- observeRuntimeContext(ctx)
+		<-ctx.Done()
+		a.streamCause <- context.Cause(ctx)
+	})
+}
+
+func TestRuntimeContextPropagatesToEffectsAndSubscriptions(t *testing.T) {
+	deadline := time.Now().Add(time.Minute)
+	valueContext := context.WithValue(context.Background(), runtimeContextKey{}, "trace-value")
+	deadlineContext, stopDeadline := context.WithDeadline(valueContext, deadline)
+	defer stopDeadline()
+	parent, cancel := context.WithCancelCause(deadlineContext)
+
+	app := &runtimeContextApp{
+		effectStarted: make(chan runtimeContextObservation, 1),
+		streamStarted: make(chan runtimeContextObservation, 1),
+		effectCause:   make(chan error, 1),
+		streamCause:   make(chan error, 1),
+	}
+	runtime, err := NewRuntimeWithClockContext(parent, app, NewRuntimeConfig(Size{Width: 1, Height: 1}), NewVirtualClock())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+
+	for name, started := range map[string]<-chan runtimeContextObservation{
+		"effect":       app.effectStarted,
+		"subscription": app.streamStarted,
+	} {
+		select {
+		case observation := <-started:
+			if observation.value != "trace-value" || !observation.hasDeadline || !observation.deadline.Equal(deadline) {
+				t.Fatalf("%s context = %+v", name, observation)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for %s context", name)
+		}
+	}
+
+	cause := errors.New("runtime parent stopped")
+	cancel(cause)
+	for name, observed := range map[string]<-chan error{
+		"effect":       app.effectCause,
+		"subscription": app.streamCause,
+	} {
+		select {
+		case actual := <-observed:
+			if !errors.Is(actual, cause) {
+				t.Fatalf("%s cause = %v, want %v", name, actual, cause)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for %s cancellation", name)
+		}
+	}
+}
+
+type terminalContextApp struct {
+	observed runtimeContextObservation
+}
+
+func (a *terminalContextApp) Init() Effect[struct{}] {
+	return SuspendTerminalEffect(func(ctx context.Context) struct{} {
+		a.observed = observeRuntimeContext(ctx)
+		return struct{}{}
+	})
+}
+
+func (*terminalContextApp) Update(struct{}) Effect[struct{}] {
+	return NoneEffect[struct{}]()
+}
+
+func (*terminalContextApp) View(ViewContext) Node[struct{}] {
+	return Text[struct{}]("")
+}
+
+func (*terminalContextApp) Subscriptions() Subscription[struct{}] {
+	return NoneSubscription[struct{}]()
+}
+
+func TestRuntimeContextPropagatesToTerminalTask(t *testing.T) {
+	deadline := time.Now().Add(time.Minute)
+	parent := context.WithValue(context.Background(), runtimeContextKey{}, "terminal-trace")
+	parent, cancel := context.WithDeadline(parent, deadline)
+	defer cancel()
+	app := &terminalContextApp{}
+	runtime, err := NewRuntimeWithClockContext(
+		parent,
+		app,
+		NewRuntimeConfig(Size{Width: 1, Height: 1}),
+		NewVirtualClock(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(runtime.Close)
+
+	if !runtime.RunTerminalTask() {
+		t.Fatal("terminal task did not run")
+	}
+	if app.observed.value != "terminal-trace" ||
+		!app.observed.hasDeadline ||
+		!app.observed.deadline.Equal(deadline) {
+		t.Fatalf("terminal task context = %+v", app.observed)
+	}
+}
+
+func TestNewRuntimeContextRejectsNilParent(t *testing.T) {
+	if _, err := NewRuntimeContext[runtimeMessage](nil, &counterApp{}, Size{}); err == nil {
+		t.Fatal("NewRuntimeContext accepted nil parent")
+	}
 }
 
 func (a *counterApp) Init() Effect[runtimeMessage] {
@@ -107,6 +309,98 @@ func TestTerminalRenderingReusesReleasedSurfaceStorage(t *testing.T) {
 	}
 }
 
+type terminalTaskApp struct {
+	messages []string
+}
+
+func (*terminalTaskApp) Init() Effect[string] { return NoneEffect[string]() }
+
+func (a *terminalTaskApp) Update(message string) Effect[string] {
+	a.messages = append(a.messages, message)
+	if message == "start" {
+		return SequenceEffects(
+			SuspendTerminalEffect(func(context.Context) string { return "first" }),
+			SuspendTerminalEffect(func(context.Context) string { return "second" }),
+		)
+	}
+	return NoneEffect[string]()
+}
+
+func (*terminalTaskApp) Subscriptions() Subscription[string] {
+	return NoneSubscription[string]()
+}
+
+func (a *terminalTaskApp) View(ViewContext) Node[string] {
+	return Text[string](strings.Join(a.messages, ","))
+}
+
+func TestTerminalTasksRunOnDriverGoroutineAndPreserveSequenceOrder(t *testing.T) {
+	app := &terminalTaskApp{}
+	runtime, err := NewRuntime[string](app, Size{Width: 32, Height: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(runtime.Close)
+	if err := runtime.Enqueue("start"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.ProcessPending(); err != nil {
+		t.Fatal(err)
+	}
+
+	if runtime.PendingTerminalTasks() != 1 || !runtime.RunTerminalTask() {
+		t.Fatalf("first pending terminal tasks = %d", runtime.PendingTerminalTasks())
+	}
+	if _, err := runtime.ProcessPending(); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(app.messages, []string{"start", "first"}) || runtime.PendingTerminalTasks() != 1 {
+		t.Fatalf("after first task messages = %v, pending = %d", app.messages, runtime.PendingTerminalTasks())
+	}
+
+	if !runtime.RunTerminalTask() {
+		t.Fatal("second terminal task did not run")
+	}
+	if _, err := runtime.ProcessPending(); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(app.messages, []string{"start", "first", "second"}) || runtime.PendingTerminalTasks() != 0 {
+		t.Fatalf("after second task messages = %v, pending = %d", app.messages, runtime.PendingTerminalTasks())
+	}
+	if runtime.RunTerminalTask() {
+		t.Fatal("empty terminal task queue reported work")
+	}
+}
+
+func TestInvalidatedTerminalSurfaceProducesFullRedraw(t *testing.T) {
+	runtime, err := NewRuntime[runtimeMessage](&counterApp{}, Size{Width: 3, Height: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(runtime.Close)
+	first, err := runtime.RenderIfDirty()
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.RequestFrame()
+	unchanged, err := runtime.RenderIfDirty()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unchanged.Operations()) != 0 {
+		t.Fatalf("unchanged operations = %v, want none", unchanged.Operations())
+	}
+
+	runtime.InvalidateTerminalSurface()
+	redrawn, err := runtime.RenderIfDirty()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(redrawn.Operations(), first.Operations()) {
+		t.Fatalf("redraw operations = %v, want %v", redrawn.Operations(), first.Operations())
+	}
+}
+
 func (*counterApp) Subscriptions() Subscription[runtimeMessage] {
 	return NoneSubscription[runtimeMessage]()
 }
@@ -152,6 +446,219 @@ func TestRuntimeProcessesFIFOAndCoalescesRendering(t *testing.T) {
 	}
 	if again != nil {
 		t.Fatal("unchanged runtime rendered another frame")
+	}
+}
+
+func TestRuntimeSchedulingCycleBoundsUpdatesWithoutReorderingQueue(t *testing.T) {
+	app := &counterApp{}
+	config := NewRuntimeConfig(Size{Width: 3, Height: 1})
+	config.MaxUpdatesPerCycle = 2
+	runtime, err := NewRuntimeWithClock[runtimeMessage](app, config, NewVirtualClock())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	for value := uint32(1); value <= 5; value++ {
+		if err := runtime.Enqueue(runtimeMessage{add: value}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if processed, err := runtime.ProcessPending(); err != nil || processed != 2 {
+		t.Fatalf("ProcessPending = %d, %v, want 2, nil", processed, err)
+	}
+	if !reflect.DeepEqual(app.updates, []uint32{1, 2}) {
+		t.Fatalf("updates = %v, want [1 2]", app.updates)
+	}
+	if runtime.QueuedMessages() != 3 || !runtime.HasPendingUpdates() {
+		t.Fatalf("queued = %d, pending = %t, want 3, true", runtime.QueuedMessages(), runtime.HasPendingUpdates())
+	}
+
+	if processed, err := runtime.ProcessQueued(); err != nil || processed != 3 {
+		t.Fatalf("ProcessQueued = %d, %v, want 3, nil", processed, err)
+	}
+	if !reflect.DeepEqual(app.updates, []uint32{1, 2, 3, 4, 5}) {
+		t.Fatalf("updates = %v, want [1 2 3 4 5]", app.updates)
+	}
+	if runtime.HasPendingUpdates() {
+		t.Fatal("drained runtime still reports pending updates")
+	}
+}
+
+func TestRuntimeRejectsZeroSchedulingCycleLimit(t *testing.T) {
+	config := NewRuntimeConfig(Size{Width: 1, Height: 1})
+	config.MaxUpdatesPerCycle = 0
+	if _, err := NewRuntimeWithClock[runtimeMessage](&counterApp{}, config, NewVirtualClock()); !errors.Is(err, ErrZeroMaxUpdatesPerCycle) {
+		t.Fatalf("error = %v, want ErrZeroMaxUpdatesPerCycle", err)
+	}
+}
+
+type shutdownWaitApp struct {
+	effectReturned chan struct{}
+	streamReturned chan struct{}
+}
+
+func (a *shutdownWaitApp) Init() Effect[struct{}] {
+	return RunEffect(func(ctx context.Context) struct{} {
+		<-ctx.Done()
+		close(a.effectReturned)
+		return struct{}{}
+	})
+}
+
+func (*shutdownWaitApp) Update(struct{}) Effect[struct{}] {
+	return NoneEffect[struct{}]()
+}
+
+func (a *shutdownWaitApp) Subscriptions() Subscription[struct{}] {
+	return StreamSubscription("shutdown", ReliableDelivery(), func(ctx context.Context, _ SubscriptionSink[struct{}]) {
+		<-ctx.Done()
+		close(a.streamReturned)
+	})
+}
+
+func (*shutdownWaitApp) View(ViewContext) Node[struct{}] {
+	return Text[struct{}]("")
+}
+
+func TestRuntimeCloseAndWaitObservesEffectAndStreamReturn(t *testing.T) {
+	app := &shutdownWaitApp{
+		effectReturned: make(chan struct{}),
+		streamReturned: make(chan struct{}),
+	}
+	runtime, err := NewRuntime[struct{}](app, Size{Width: 1, Height: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.CloseAndWait(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-app.effectReturned:
+	default:
+		t.Fatal("CloseAndWait returned before Effect producer")
+	}
+	select {
+	case <-app.streamReturned:
+	default:
+		t.Fatal("CloseAndWait returned before Stream producer")
+	}
+}
+
+type ignoredCancellationApp struct {
+	release <-chan struct{}
+}
+
+func (a *ignoredCancellationApp) Init() Effect[struct{}] {
+	return RunEffect(func(context.Context) struct{} {
+		<-a.release
+		return struct{}{}
+	})
+}
+
+func (*ignoredCancellationApp) Update(struct{}) Effect[struct{}] {
+	return NoneEffect[struct{}]()
+}
+
+func (*ignoredCancellationApp) Subscriptions() Subscription[struct{}] {
+	return NoneSubscription[struct{}]()
+}
+
+func (*ignoredCancellationApp) View(ViewContext) Node[struct{}] {
+	return Text[struct{}]("")
+}
+
+func TestRuntimeCloseAndWaitCanBeRetriedAfterContextCancellation(t *testing.T) {
+	release := make(chan struct{})
+	runtime, err := NewRuntime[struct{}](&ignoredCancellationApp{release: release}, Size{Width: 1, Height: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := runtime.CloseAndWait(cancelled); !errors.Is(err, context.Canceled) {
+		t.Fatalf("CloseAndWait error = %v, want context.Canceled", err)
+	}
+	close(release)
+	if err := runtime.CloseAndWait(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRuntimeCloseAndWaitRejectsNilContext(t *testing.T) {
+	runtime, err := NewRuntime[runtimeMessage](&counterApp{}, Size{Width: 1, Height: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	if err := runtime.CloseAndWait(nil); err == nil {
+		t.Fatal("CloseAndWait accepted nil context")
+	}
+}
+
+type dispatchAllocationApp struct {
+	withAction bool
+}
+
+func (*dispatchAllocationApp) Init() Effect[struct{}] { return NoneEffect[struct{}]() }
+func (*dispatchAllocationApp) Update(struct{}) Effect[struct{}] {
+	return NoneEffect[struct{}]()
+}
+func (*dispatchAllocationApp) Subscriptions() Subscription[struct{}] {
+	return NoneSubscription[struct{}]()
+}
+func (a *dispatchAllocationApp) View(ViewContext) Node[struct{}] {
+	node := Text[struct{}]("target").Focusable("target")
+	if !a.withAction {
+		return node
+	}
+	descriptor := NewActionDescriptor(
+		"app.action",
+		"Action",
+		[]KeyBinding{NewKeyBinding(NewCharacterKeyStroke('x', vt.Modifiers{}))},
+	)
+	return node.OnActions("target", []Action[struct{}]{
+		NewAction(descriptor, func(ActionEvent) EventResult[struct{}] {
+			return IgnoreResult[struct{}]()
+		}),
+	})
+}
+
+func TestDispatchRouteCacheHasNoPerEventActionResolutionAllocation(t *testing.T) {
+	event := vt.Event{Kind: vt.EventKey, Key: vt.KeyEvent{
+		Code: vt.KeyCharacter, Character: 'x', Action: vt.KeyPress,
+	}}
+	for _, withAction := range []bool{false, true} {
+		name := "cached-core-action"
+		if withAction {
+			name = "cached-action"
+		}
+		t.Run(name, func(t *testing.T) {
+			runtime, err := NewRuntime[struct{}](&dispatchAllocationApp{withAction: withAction}, Size{Width: 8, Height: 1})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(runtime.Close)
+			if _, err := runtime.RenderIfDirty(); err != nil {
+				t.Fatal(err)
+			}
+			if focused, err := runtime.RequestFocus("target"); err != nil || !focused {
+				t.Fatalf("RequestFocus = %t, %v", focused, err)
+			}
+			if _, err := runtime.ActiveActionGroups(); err != nil {
+				t.Fatal(err)
+			}
+			var dispatchErr error
+			allocations := testing.AllocsPerRun(1_000, func() {
+				_, dispatchErr = runtime.DispatchEvent(event)
+			})
+			if dispatchErr != nil {
+				t.Fatal(dispatchErr)
+			}
+			if allocations > 1 {
+				t.Fatalf("DispatchEvent allocations = %f, want at most route storage", allocations)
+			}
+		})
 	}
 }
 
@@ -647,8 +1154,107 @@ func TestRuntimeFocusFallbackAndAncestorRouting(t *testing.T) {
 	}
 }
 
+type pointerHandlerOrderApp struct {
+	visits []string
+}
+
+func (*pointerHandlerOrderApp) Init() Effect[focusMessage] {
+	return NoneEffect[focusMessage]()
+}
+
+func (*pointerHandlerOrderApp) Subscriptions() Subscription[focusMessage] {
+	return NoneSubscription[focusMessage]()
+}
+
+func (a *pointerHandlerOrderApp) Update(message focusMessage) Effect[focusMessage] {
+	a.visits = append(a.visits, message.visit)
+	return NoneEffect[focusMessage]()
+}
+
+func (*pointerHandlerOrderApp) View(ViewContext) Node[focusMessage] {
+	return RichText[focusMessage](NewTextSpan("ab", vt.Style{})).
+		OnPointerEvent("target", func(context PointerEventContext) EventResult[focusMessage] {
+			hit, ok := context.TextHit()
+			if !ok || hit.Start() != 0 || hit.End() != 1 {
+				panic("unexpected paragraph text hit")
+			}
+			if context.LocalPosition() != (Point{}) {
+				panic("unexpected pointer local position")
+			}
+			if context.Bounds() != (Size{Width: 2, Height: 1}) ||
+				context.VisibleBounds() != (Rect{Width: 2, Height: 1}) || context.IsCaptured() {
+				panic("unexpected pointer geometry")
+			}
+			if _, ok := context.Viewport(); ok {
+				panic("unexpected pointer viewport")
+			}
+			return IgnoreResult[focusMessage]().Emit(focusMessage{visit: "pointer"})
+		}).
+		OnEvent("target", func(vt.Event) EventResult[focusMessage] {
+			return MessageResult(focusMessage{visit: "raw"})
+		})
+}
+
+func TestRuntimeGeometryPointerHandlerPrecedesRawHandler(t *testing.T) {
+	app := &pointerHandlerOrderApp{}
+	runtime, err := NewRuntimeWithClock[focusMessage](
+		app,
+		NewRuntimeConfig(Size{Width: 2, Height: 1}),
+		NewVirtualClock(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(runtime.Close)
+	if _, err := runtime.RenderIfDirty(); err != nil {
+		t.Fatal(err)
+	}
+
+	dispatch, err := runtime.DispatchEvent(vt.Event{Kind: vt.EventMouse, Mouse: vt.MouseEvent{
+		Kind: vt.MousePress, Button: vt.MouseLeft,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !dispatch.Consumed() || dispatch.Messages() != 2 {
+		t.Fatalf("dispatch = %+v", dispatch)
+	}
+	if _, err := runtime.ProcessPending(); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(app.visits, []string{"pointer", "raw"}) {
+		t.Fatalf("visits = %v", app.visits)
+	}
+}
+
+func TestPointerEdgeScrollIsDerivedOnlyForMoveEvents(t *testing.T) {
+	context := PointerEventContext{
+		viewport: PointerViewport{
+			id:   "scroll",
+			axis: ScrollAxisVertical,
+			state: ScrollState{
+				Offset: ScrollOffset{Y: 1}, Maximum: ScrollOffset{Y: 3},
+			},
+			visible: Rect{Width: 4, Height: 2},
+		},
+		hasViewport: true,
+	}
+	for _, kind := range []vt.MouseKind{vt.MousePress, vt.MouseRelease} {
+		context.event = vt.MouseEvent{Kind: kind, Button: vt.MouseLeft, X: 1, Y: 1}
+		if _, _, ok := context.EdgeScroll(); ok {
+			t.Fatalf("EdgeScroll returned a request for kind %v", kind)
+		}
+	}
+	context.event = vt.MouseEvent{Kind: vt.MouseMove, Button: vt.MouseLeft, X: 1, Y: 1}
+	id, offset, ok := context.EdgeScroll()
+	if !ok || id != "scroll" || offset != (ScrollOffset{Y: 2}) {
+		t.Fatalf("EdgeScroll = %q, %+v, %t", id, offset, ok)
+	}
+}
+
 type modalApp struct {
 	visits []string
+	hard   bool
 }
 
 func (*modalApp) Init() Effect[focusMessage] { return NoneEffect[focusMessage]() }
@@ -659,7 +1265,7 @@ func (a *modalApp) Update(message focusMessage) Effect[focusMessage] {
 	a.visits = append(a.visits, message.visit)
 	return NoneEffect[focusMessage]()
 }
-func (*modalApp) View(_ ViewContext) Node[focusMessage] {
+func (a *modalApp) View(_ ViewContext) Node[focusMessage] {
 	background := Text[focusMessage]("background").Focusable("background").OnEvent("background", func(vt.Event) EventResult[focusMessage] {
 		return IgnoreResult[focusMessage]().Emit(focusMessage{visit: "background"})
 	})
@@ -669,9 +1275,40 @@ func (*modalApp) View(_ ViewContext) Node[focusMessage] {
 	modal := Modal("modal", input).OnEvent("modal", func(vt.Event) EventResult[focusMessage] {
 		return IgnoreResult[focusMessage]().Emit(focusMessage{visit: "modal"})
 	})
+	if a.hard {
+		modal = modal.BlockUnhandledEvents()
+	}
 	return Stack(background, modal).OnEvent("root", func(vt.Event) EventResult[focusMessage] {
 		return MessageResult(focusMessage{visit: "root"})
 	})
+}
+
+func TestRuntimeEventBoundaryStopsUnhandledEventAtModal(t *testing.T) {
+	app := &modalApp{hard: true}
+	runtime, err := NewRuntimeWithClock[focusMessage](app, NewRuntimeConfig(Size{Width: 12, Height: 1}), NewVirtualClock())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.RenderIfDirty(); err != nil {
+		t.Fatal(err)
+	}
+	if focused, err := runtime.RequestFocus("input"); err != nil || !focused {
+		t.Fatalf("RequestFocus(input) = %t, %v", focused, err)
+	}
+
+	routed, err := runtime.DispatchEvent(vt.Event{Kind: vt.EventKey, Key: vt.KeyEvent{Code: vt.KeyRight}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !routed.Consumed() || routed.Messages() != 2 {
+		t.Fatalf("dispatch = %+v", routed)
+	}
+	if _, err := runtime.Step(); err != nil {
+		t.Fatal(err)
+	}
+	if len(app.visits) != 2 || app.visits[0] != "input" || app.visits[1] != "modal" {
+		t.Fatalf("visits = %v", app.visits)
+	}
 }
 
 func TestRuntimeModalRestrictsFocusAndRoutesThroughModalAncestors(t *testing.T) {
@@ -1312,4 +1949,60 @@ func TestFocusedDescendantIsRevealedWhenRequested(t *testing.T) {
 		t.Fatalf("offset = %+v", offset)
 	}
 	assertNodeCell(t, frame.Surface(), 0, 1, "4")
+}
+
+type nestedRevealApp struct{}
+
+func (*nestedRevealApp) Init() Effect[struct{}] { return NoneEffect[struct{}]() }
+func (*nestedRevealApp) Update(struct{}) Effect[struct{}] {
+	return NoneEffect[struct{}]()
+}
+func (*nestedRevealApp) Subscriptions() Subscription[struct{}] {
+	return NoneSubscription[struct{}]()
+}
+func (*nestedRevealApp) View(ViewContext) Node[struct{}] {
+	rows := make([]Node[struct{}], 5)
+	for index := range rows {
+		row := Text[struct{}](strconv.Itoa(index))
+		if index == 4 {
+			row = row.WithID("target")
+		}
+		rows[index] = row.WithLength(Fixed(1))
+	}
+	inner := ScrollViewportWithOptions(
+		"inner",
+		Column(rows...),
+		ScrollViewportOptions[struct{}]{Axis: ScrollAxisVertical},
+	).RevealDescendant("target").WithLength(Fixed(2))
+	return ScrollViewportWithOptions(
+		"outer",
+		Column(
+			Text[struct{}]("header").WithLength(Fixed(2)),
+			inner,
+		),
+		ScrollViewportOptions[struct{}]{Axis: ScrollAxisVertical},
+	).RevealDescendant("target")
+}
+
+func TestNestedExplicitRevealAdjustsInnerBeforeOuter(t *testing.T) {
+	runtime, err := NewRuntimeWithClock[struct{}](
+		&nestedRevealApp{},
+		NewRuntimeConfig(Size{Width: 8, Height: 3}),
+		NewVirtualClock(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	frame, err := runtime.RenderIfDirty()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if offset := runtime.Interaction().ScrollOffset("inner"); offset != (ScrollOffset{Y: 3}) {
+		t.Fatalf("inner offset = %+v", offset)
+	}
+	if offset := runtime.Interaction().ScrollOffset("outer"); offset != (ScrollOffset{Y: 1}) {
+		t.Fatalf("outer offset = %+v", offset)
+	}
+	assertNodeCell(t, frame.Surface(), 0, 2, "4")
 }

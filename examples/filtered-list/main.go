@@ -68,7 +68,7 @@ func (*filteredList) Subscriptions() tui.Subscription[message] {
 	return tui.NoneSubscription[message]()
 }
 
-func (a *filteredList) View(_ tui.ViewContext) tui.Node[message] {
+func (a *filteredList) View(context tui.ViewContext) tui.Node[message] {
 	items := make([]widget.ListItem, 0, len(packages))
 	for index, name := range packages {
 		items = append(items, widget.NewListItem(
@@ -126,7 +126,7 @@ func (a *filteredList) View(_ tui.ViewContext) tui.Node[message] {
 				widget.NewHelpBinding("Up/Down", "select"),
 				widget.NewHelpBinding("Left/Right", "page"),
 				widget.NewHelpBinding("Esc", "exit"),
-			}).Node().WithLength(tui.Fixed(1)),
+			}).WidthProfile(context.WidthProfile).Node().WithLength(tui.Fixed(1)),
 		),
 		"Filtered widget catalog",
 	)

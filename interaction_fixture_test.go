@@ -84,6 +84,11 @@ func TestInteractionRetirementMatchesSharedFixtures(t *testing.T) {
 				active,
 				fixtureNodeIDs(record.Field("previous-focus")),
 				fixtureNodeIDs(record.Field("current-focus")),
+				"",
+				false,
+				DefaultModalFocusOptions(),
+				"",
+				false,
 			)
 
 			assertOptionalNodeID(t, "focus", state.focused, state.hasFocus, fixtureOptionalNodeID(record.Field("expected-focused")))

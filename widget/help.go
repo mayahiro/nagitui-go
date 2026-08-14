@@ -68,13 +68,43 @@ type Help[Message any] struct {
 	separator    string
 	showDisabled bool
 	style        HelpStyle
+	widthProfile celltext.WidthProfile
 }
 
 // NewHelp returns compact help for the supplied bindings
 func NewHelp[Message any](bindings []HelpBinding) Help[Message] {
+	return newHelp[Message](cloneHelpBindings(bindings))
+}
+
+func newHelp[Message any](bindings []HelpBinding) Help[Message] {
 	return Help[Message]{
-		bindings: cloneHelpBindings(bindings), separator: " • ", style: DefaultHelpStyle(),
+		bindings: bindings, separator: " • ", style: DefaultHelpStyle(),
+		widthProfile: celltext.ModernWidth(),
 	}
+}
+
+// NewHelpFromResolvedActions returns compact help for Help-visible resolved actions
+//
+// Each effective key becomes one binding in action and binding order without
+// duplicating key notation. Unavailable actions and bindings with unsupported
+// terminal metadata become disabled Help bindings.
+func NewHelpFromResolvedActions[Message any](actions []tui.ResolvedAction) Help[Message] {
+	bindings := make([]HelpBinding, 0, len(actions)*2)
+	for _, action := range actions {
+		if !action.HelpVisible() {
+			continue
+		}
+		actionEnabled := action.Availability() == tui.ActionEnabled
+		description := celltext.NormalizeUTF8(action.Label())
+		for _, binding := range action.Bindings() {
+			bindings = append(bindings, HelpBinding{
+				Key:         celltext.NormalizeUTF8(binding.Stroke().Notation()),
+				Description: description,
+				Enabled:     actionEnabled && binding.Support() != tui.BindingUnsupported,
+			})
+		}
+	}
+	return newHelp[Message](bindings)
 }
 
 // Mode replaces the binding arrangement
@@ -98,6 +128,14 @@ func (h Help[Message]) ShowDisabled(show bool) Help[Message] {
 // Style replaces the help styles
 func (h Help[Message]) Style(style HelpStyle) Help[Message] {
 	h.style = style
+	return h
+}
+
+// WidthProfile sets the terminal cell-width policy used by full-mode alignment
+//
+// Pass ViewContext.WidthProfile to keep the widget aligned with its Runtime.
+func (h Help[Message]) WidthProfile(profile celltext.WidthProfile) Help[Message] {
+	h.widthProfile = profile
 	return h
 }
 
@@ -134,7 +172,7 @@ func (h Help[Message]) Node() tui.Node[Message] {
 func (h Help[Message]) fullNode(bindings []HelpBinding) tui.Node[Message] {
 	keyWidth := 0
 	for _, binding := range bindings {
-		keyWidth = max(keyWidth, celltext.Width(binding.Key, celltext.ModernWidth()))
+		keyWidth = max(keyWidth, celltext.Width(binding.Key, h.widthProfile))
 	}
 	rows := make([]tui.Node[Message], 0, len(bindings))
 	for _, binding := range bindings {
@@ -143,7 +181,7 @@ func (h Help[Message]) fullNode(bindings []HelpBinding) tui.Node[Message] {
 			keyStyle = keyStyle.Merge(h.style.Disabled)
 			descriptionStyle = descriptionStyle.Merge(h.style.Disabled)
 		}
-		padding := strings.Repeat(" ", keyWidth-celltext.Width(binding.Key, celltext.ModernWidth()))
+		padding := strings.Repeat(" ", keyWidth-celltext.Width(binding.Key, h.widthProfile))
 		rows = append(rows, tui.Row(
 			tui.StyledText[Message](binding.Key+padding, keyStyle),
 			tui.StyledText[Message]("  ", vt.Style{}),

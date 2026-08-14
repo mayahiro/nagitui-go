@@ -3,6 +3,8 @@ package tui
 import (
 	"context"
 	"time"
+
+	celltext "github.com/mayahiro/nagi-go/text"
 )
 
 // TaskKey is a stable key for replacement and cancellation of one latest task
@@ -31,8 +33,28 @@ func (s ScopeID) String() string {
 	return string(s)
 }
 
-// Task is one goroutine task producing an application message
+// Task produces one application Message
+//
+// RunEffect executes it on a supervised goroutine. SuspendTerminalEffect
+// executes it on the terminal driver goroutine.
 type Task[Message any] func(context.Context) Message
+
+// ClipboardRequest is one application-requested semantic text write to a
+// clipboard backend
+type ClipboardRequest struct {
+	text string
+}
+
+// NewClipboardRequest returns an immutable request with invalid UTF-8 runs
+// normalized to U+FFFD
+func NewClipboardRequest(text string) ClipboardRequest {
+	return ClipboardRequest{text: celltext.NormalizeUTF8(text)}
+}
+
+// Text returns the semantic UTF-8 text to copy
+func (r ClipboardRequest) Text() string {
+	return r.text
+}
 
 type effectKind uint8
 
@@ -41,6 +63,8 @@ const (
 	effectExit
 	effectFocus
 	effectScrollTo
+	effectSetClipboard
+	effectSuspendTerminal
 	effectRun
 	effectLatest
 	effectCancel
@@ -61,6 +85,7 @@ type Effect[Message any] struct {
 	message       Message
 	id            NodeID
 	offset        ScrollOffset
+	clipboard     ClipboardRequest
 	effect        *Effect[Message]
 	effects       []Effect[Message]
 	withoutRedraw bool
@@ -84,6 +109,27 @@ func FocusEffect[Message any](id NodeID) Effect[Message] {
 // ScrollToEffect requests a ScrollViewport offset in the next application view
 func ScrollToEffect[Message any](id NodeID, offset ScrollOffset) Effect[Message] {
 	return Effect[Message]{kind: effectScrollTo, id: id, offset: offset}
+}
+
+// SetClipboardEffect requests that a Runtime driver copy semantic UTF-8 text
+//
+// The standard terminal driver drops this request unless OSC 52 output is
+// explicitly enabled. Multiple requests before a driver take are coalesced to
+// the latest value.
+func SetClipboardEffect[Message any](text string) Effect[Message] {
+	return Effect[Message]{kind: effectSetClipboard, clipboard: NewClipboardRequest(text)}
+}
+
+// SuspendTerminalEffect runs one blocking task on the terminal driver goroutine
+// while the standard full-screen terminal session is suspended
+//
+// Process selection, command execution, and domain error mapping remain
+// application responsibilities. It panics when task is nil.
+func SuspendTerminalEffect[Message any](task Task[Message]) Effect[Message] {
+	if task == nil {
+		panic("nagi-tui: nil terminal effect task")
+	}
+	return Effect[Message]{kind: effectSuspendTerminal, task: task}
 }
 
 // RunEffect runs one task on a supervised goroutine

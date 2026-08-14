@@ -1,6 +1,7 @@
 package tuitest
 
 import (
+	"context"
 	"time"
 
 	"github.com/mayahiro/nagi-go/vt"
@@ -53,9 +54,15 @@ func NewWithConfig[Message any](
 	return harness, nil
 }
 
-// Close cooperatively cancels active effect tasks and timers
+// Close cooperatively cancels active Effects and Subscriptions without waiting
 func (h *Harness[Message]) Close() {
 	h.runtime.Close()
+}
+
+// CloseAndWait requests cooperative cancellation and waits for Nagi-started
+// Effect and Stream producer functions to return or ctx to end
+func (h *Harness[Message]) CloseAndWait(ctx context.Context) error {
+	return h.runtime.CloseAndWait(ctx)
 }
 
 // App returns the application instance owned by the runtime
@@ -66,6 +73,16 @@ func (h *Harness[Message]) App() tui.App[Message] {
 // Interaction returns runtime-owned Interaction State for assertions
 func (h *Harness[Message]) Interaction() *tui.InteractionState {
 	return h.runtime.Interaction()
+}
+
+// PendingClipboardRequest returns the latest request without clearing it
+func (h *Harness[Message]) PendingClipboardRequest() (tui.ClipboardRequest, bool) {
+	return h.runtime.PendingClipboardRequest()
+}
+
+// TakeClipboardRequest returns and clears the latest pending request
+func (h *Harness[Message]) TakeClipboardRequest() (tui.ClipboardRequest, bool) {
+	return h.runtime.TakeClipboardRequest()
 }
 
 // RequestFocus requests focus for a focusable ID in the current semantic tree
@@ -93,6 +110,11 @@ func (h *Harness[Message]) ScrollState(id tui.NodeID) (tui.ScrollState, bool) {
 	return h.runtime.Interaction().ScrollState(id)
 }
 
+// ActiveActionGroups returns resolved action groups on the active target-to-root route
+func (h *Harness[Message]) ActiveActionGroups() ([]tui.ResolvedActions, error) {
+	return h.runtime.ActiveActionGroups()
+}
+
 // ActiveTasks returns supervised tasks that have not fully finished
 func (h *Harness[Message]) ActiveTasks() int {
 	return h.runtime.ActiveTasks()
@@ -106,6 +128,29 @@ func (h *Harness[Message]) RunningTasks() int {
 // PendingTasks returns tasks waiting for a worker slot
 func (h *Harness[Message]) PendingTasks() int {
 	return h.runtime.PendingTasks()
+}
+
+// PendingTerminalTasks returns terminal-suspending tasks waiting for the
+// virtual driver
+func (h *Harness[Message]) PendingTerminalTasks() int {
+	return h.runtime.PendingTerminalTasks()
+}
+
+// RunTerminalTask runs one terminal-suspending task and simulates a restored
+// terminal boundary
+//
+// Incomplete terminal input is discarded, the terminal diff baseline is
+// invalidated, the task result is processed, and at most one frame is captured.
+func (h *Harness[Message]) RunTerminalTask() (bool, error) {
+	if !h.runtime.RunTerminalTask() {
+		return false, nil
+	}
+	h.decoder.Reset()
+	h.runtime.InvalidateTerminalSurface()
+	if err := h.Step(); err != nil {
+		return true, err
+	}
+	return true, nil
 }
 
 // PendingEffectMessages returns completed messages waiting for queue capacity
@@ -153,6 +198,21 @@ func (h *Harness[Message]) SubscriptionDiagnostics() tui.SubscriptionDiagnostics
 	return h.runtime.SubscriptionDiagnostics()
 }
 
+// PendingRuntimeNotices returns retained asynchronous lifecycle notices
+func (h *Harness[Message]) PendingRuntimeNotices() int {
+	return h.runtime.PendingRuntimeNotices()
+}
+
+// DrainRuntimeNotices removes and returns retained notices in occurrence order
+func (h *Harness[Message]) DrainRuntimeNotices() []tui.RuntimeNotice {
+	return h.runtime.DrainRuntimeNotices()
+}
+
+// RuntimeNoticeDiagnostics returns bounded notice queue counters
+func (h *Harness[Message]) RuntimeNoticeDiagnostics() tui.RuntimeNoticeDiagnostics {
+	return h.runtime.RuntimeNoticeDiagnostics()
+}
+
 // Send injects one application message and completes one coalesced step
 func (h *Harness[Message]) Send(message Message) error {
 	if err := h.runtime.Enqueue(message); err != nil {
@@ -192,7 +252,7 @@ func (h *Harness[Message]) Resize(size tui.Size) error {
 	return h.Step()
 }
 
-// Step processes queued messages and captures at most one rendered frame
+// Step processes one bounded scheduling cycle and captures at most one frame
 func (h *Harness[Message]) Step() error {
 	if _, err := h.runtime.ProcessPendingWith(func(message Message) {
 		h.messages = append(h.messages, message)
@@ -233,19 +293,25 @@ func (h *Harness[Message]) dispatch(events []vt.Event) error {
 		if err != nil {
 			return err
 		}
-		if dispatch.Consumed() {
-			continue
-		}
-		action := h.mapEvent(event)
-		switch action.Kind() {
-		case tui.EventIgnore:
-		case tui.EventMessage:
-			message, _ := action.Message()
-			if err := h.runtime.Enqueue(message); err != nil {
-				return err
+		if !dispatch.Consumed() {
+			action := h.mapEvent(event)
+			switch action.Kind() {
+			case tui.EventIgnore:
+			case tui.EventMessage:
+				message, _ := action.Message()
+				if err := h.runtime.Enqueue(message); err != nil {
+					return err
+				}
+			case tui.EventExit:
+				h.exitRequested = true
 			}
-		case tui.EventExit:
-			h.exitRequested = true
+		}
+		if _, err := h.runtime.ProcessQueuedWith(func(message Message) {
+			h.messages = append(h.messages, message)
+		}); err != nil {
+			return err
+		}
+		if h.exitRequested || h.runtime.ExitRequested() {
 			return nil
 		}
 	}

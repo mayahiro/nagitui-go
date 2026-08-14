@@ -19,19 +19,23 @@ const (
 	advanceMessage
 	tickMessage
 	openModalMessage
+	confirmModalMessage
 	closeModalMessage
+	toggleModalDetailsMessage
 )
 
 type message struct {
 	kind     messageKind
 	selected int
+	value    bool
 }
 
 type gallery struct {
-	selected int
-	progress uint64
-	tick     uint64
-	modal    bool
+	selected     int
+	progress     uint64
+	tick         uint64
+	modal        bool
+	modalDetails bool
 }
 
 func (*gallery) Init() tui.Effect[message] {
@@ -48,8 +52,14 @@ func (a *gallery) Update(received message) tui.Effect[message] {
 		a.tick++
 	case openModalMessage:
 		a.modal = true
+		a.modalDetails = false
+	case confirmModalMessage:
+		a.progress = (a.progress + 1) % 11
+		a.modal = false
 	case closeModalMessage:
 		a.modal = false
+	case toggleModalDetailsMessage:
+		a.modalDetails = received.value
 	}
 	return tui.NoneEffect[message]()
 }
@@ -63,7 +73,7 @@ func (*gallery) Subscriptions() tui.Subscription[message] {
 	)
 }
 
-func (a *gallery) View(_ tui.ViewContext) tui.Node[message] {
+func (a *gallery) View(viewContext tui.ViewContext) tui.Node[message] {
 	content := tui.Border(
 		tui.Column(
 			tui.StyledText[message]("Standard Widget Gallery", vt.Style{Bold: true}).WithLength(tui.Fixed(1)),
@@ -84,7 +94,7 @@ func (a *gallery) View(_ tui.ViewContext) tui.Node[message] {
 					return message{kind: advanceMessage}
 				}).Node(),
 				tui.Text[message](" "),
-				widget.NewButton(tui.NewNodeID("open-modal"), "Open modal", func() message {
+				widget.NewButton(tui.NewNodeID("open-modal"), "Open confirm", func() message {
 					return message{kind: openModalMessage}
 				}).Node(),
 			).WithLength(tui.Fixed(1)),
@@ -95,20 +105,32 @@ func (a *gallery) View(_ tui.ViewContext) tui.Node[message] {
 	if !a.modal {
 		return content
 	}
-	return tui.Stack(
-		content,
-		widget.NewModal(
-			tui.NewNodeID("gallery-modal"),
-			tui.Column(
-				tui.Text[message]("This panel owns focus and routing"),
-				widget.NewButton(tui.NewNodeID("close-modal"), "Close", func() message {
-					return message{kind: closeModalMessage}
-				}).Node(),
-			),
-		).Title("Modal").OnEscape(func() message {
+	details := widget.NewDisclosure(
+		tui.NewNodeID("confirm-details"),
+		tui.Text[message]("What changes?"),
+		a.modalDetails,
+		func(expanded bool) message {
+			return message{kind: toggleModalDetailsMessage, value: expanded}
+		},
+	).Body(func() tui.Node[message] {
+		return tui.Text[message]("Confirming advances progress by one step")
+	})
+	dialog := widget.NewConfirmDialog(
+		tui.NewNodeID("gallery-dialog"),
+		tui.Text[message]("Advance the progress indicator?"),
+		widget.NewDialogAction(tui.NewNodeID("confirm-advance"), "Advance", func() message {
+			return message{kind: confirmModalMessage}
+		}),
+		widget.NewDialogAction(tui.NewNodeID("cancel-advance"), "Cancel", func() message {
 			return message{kind: closeModalMessage}
-		}).Node(),
-	)
+		}),
+		widget.ConfirmDialogDefaultCancel(),
+	).Title(tui.StyledText[message]("Confirm action", vt.Style{Bold: true})).
+		Details(details).
+		WidthProfile(viewContext.WidthProfile).
+		ActionWrapWidth(max(viewContext.Size.Width, 5) - 4).
+		Node()
+	return tui.Stack(content, dialog)
 }
 
 func mapEvent(event vt.Event) tui.EventAction[message] {

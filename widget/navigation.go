@@ -1,7 +1,5 @@
 package widget
 
-import "github.com/mayahiro/nagi-go/vt"
-
 type navigation uint8
 
 const (
@@ -38,28 +36,4 @@ func navigateSelection(count, selected int, action navigation) (int, bool) {
 		return 0, false
 	}
 	return selected, true
-}
-
-func navigationEvent(event vt.Event, count, selected int) (int, bool) {
-	if event.Kind != vt.EventKey || event.Key.Action == vt.KeyRelease {
-		return 0, false
-	}
-	modifiers := event.Key.Modifiers
-	if modifiers.Alt || modifiers.Control || modifiers.Meta {
-		return 0, false
-	}
-	action := navigationNormalize
-	switch event.Key.Code {
-	case vt.KeyUp:
-		action = navigationUp
-	case vt.KeyDown:
-		action = navigationDown
-	case vt.KeyHome:
-		action = navigationHome
-	case vt.KeyEnd:
-		action = navigationEnd
-	default:
-		return 0, false
-	}
-	return navigateSelection(count, selected, action)
 }

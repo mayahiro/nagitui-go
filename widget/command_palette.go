@@ -1,8 +1,6 @@
 package widget
 
 import (
-	"strings"
-
 	"github.com/mayahiro/nagi-go/vt"
 	"github.com/mayahiro/nagitui-go"
 )
@@ -125,10 +123,31 @@ func (p CommandPalette[Message]) Style(style CommandPaletteStyle) CommandPalette
 	return p
 }
 
+// CommandActionDescriptor returns the semantic activation action declared by each command row
+//
+// The descriptor is disabled-pass-through when the palette is disabled or its
+// current filter has no matching command.
+func (p CommandPalette[Message]) CommandActionDescriptor() tui.ActionDescriptor {
+	return commandPaletteCommandActionDescriptor(p.enabled && hasVisibleCommand(p.commands, p.query))
+}
+
+// ActionDescriptors returns the ordered semantic actions declared by the palette root
+//
+// The order is activate, previous, next, first, and last. Every descriptor is
+// disabled-pass-through when the palette is disabled or its current filter has
+// no matching command.
+func (p CommandPalette[Message]) ActionDescriptors() []tui.ActionDescriptor {
+	descriptors := commandPaletteActionDescriptors(p.enabled && hasVisibleCommand(p.commands, p.query))
+	return append([]tui.ActionDescriptor(nil), descriptors[:]...)
+}
+
 // Node builds the public semantic node for this command palette
 func (p CommandPalette[Message]) Node() tui.Node[Message] {
 	visible := filteredCommandIndices(p.commands, p.query)
 	selectedPosition, hasSelection := normalizedCommandSelection(visible, p.selected)
+	actionsEnabled := p.enabled && hasSelection
+	commandDescriptor := commandPaletteCommandActionDescriptor(actionsEnabled)
+	actionDescriptors := commandPaletteActionDescriptors(actionsEnabled)
 	visibleIDs := make([]tui.NodeID, len(visible))
 	children := make([]tui.Node[Message], 0, len(visible)+2)
 	if p.title != "" {
@@ -166,7 +185,10 @@ func (p CommandPalette[Message]) Node() tui.Node[Message] {
 			}
 			node := tui.StyledText[Message](marker+command.Label, style)
 			if !p.enabled {
-				children = append(children, node.WithID(command.ID))
+				children = append(children, node.WithID(command.ID).OnActions(
+					command.ID,
+					[]tui.Action[Message]{tui.NewAction[Message](commandDescriptor, nil)},
+				))
 				continue
 			}
 			selection := originalIndex
@@ -174,37 +196,85 @@ func (p CommandPalette[Message]) Node() tui.Node[Message] {
 			children = append(children, node.
 				Focusable(commandID).
 				WithFocusedStyle(p.style.Focused).
+				OnActions(commandID, []tui.Action[Message]{
+					tui.NewAction(commandDescriptor, func(tui.ActionEvent) tui.EventResult[Message] {
+						return commandActivationResult(
+							isSelected, selection, commandID, p.onSelect, p.onActivate,
+						)
+					}),
+				}).
 				OnEvent(commandID, func(event vt.Event) tui.EventResult[Message] {
-					if !isActivationEvent(event) {
+					if !isPointerActivationEvent(event) {
 						return tui.IgnoreResult[Message]()
 					}
-					result := tui.ConsumeResult[Message]().Focus(commandID)
-					if !isSelected {
-						result = result.Emit(p.onSelect(selection))
-					}
-					return result.Emit(p.onActivate(selection))
+					return commandActivationResult(
+						isSelected, selection, commandID, p.onSelect, p.onActivate,
+					)
 				}))
 		}
 	}
 
 	root := tui.Border(tui.Column(children...), p.style.Border).WithID(p.id)
 	if !p.enabled || !hasSelection {
-		return root
+		return root.OnActions(p.id, disabledCollectionActions[Message](actionDescriptors))
 	}
-	return root.OnEvent(p.id, func(event vt.Event) tui.EventResult[Message] {
-		if event.Kind == vt.EventKey && event.Key.Code == vt.KeyEnter && usableCommandKey(event.Key) {
-			return tui.MessageResult(p.onActivate(visible[selectedPosition]))
-		}
-		next, handled := commandNavigationEvent(event, len(visible), selectedPosition)
-		if !handled {
-			return tui.IgnoreResult[Message]()
-		}
-		result := tui.ConsumeResult[Message]().Focus(visibleIDs[next])
-		if next != selectedPosition {
-			result = result.Emit(p.onSelect(visible[next]))
-		}
-		return result
-	})
+	actions := make([]tui.Action[Message], len(actionDescriptors))
+	for index, descriptor := range actionDescriptors {
+		action := collectionAction(index)
+		actions[index] = tui.NewAction(descriptor, func(tui.ActionEvent) tui.EventResult[Message] {
+			return commandPaletteActionResult(
+				action, selectedPosition, visible, visibleIDs, p.onSelect, p.onActivate,
+			)
+		})
+	}
+	return root.OnActions(p.id, actions)
+}
+
+func commandPaletteCommandActionDescriptor(enabled bool) tui.ActionDescriptor {
+	return ActivateActionDescriptor().WithAvailability(commandPaletteActionAvailability(enabled))
+}
+
+func commandPaletteActionDescriptors(enabled bool) [5]tui.ActionDescriptor {
+	return verticalCollectionActionDescriptors(enabled)
+}
+
+func commandPaletteActionAvailability(enabled bool) tui.ActionAvailability {
+	if enabled {
+		return tui.ActionEnabled
+	}
+	return tui.ActionDisabledPassThrough
+}
+
+func commandActivationResult[Message any](
+	isSelected bool,
+	originalIndex int,
+	focusID tui.NodeID,
+	onSelect, onActivate func(int) Message,
+) tui.EventResult[Message] {
+	result := tui.ConsumeResult[Message]().Focus(focusID)
+	if !isSelected {
+		result = result.Emit(onSelect(originalIndex))
+	}
+	return result.Emit(onActivate(originalIndex))
+}
+
+func commandPaletteActionResult[Message any](
+	action collectionAction,
+	selectedPosition int,
+	visible []int,
+	visibleIDs []tui.NodeID,
+	onSelect, onActivate func(int) Message,
+) tui.EventResult[Message] {
+	navigation, navigates := collectionNavigation(action)
+	if !navigates {
+		return tui.MessageResult(onActivate(visible[selectedPosition]))
+	}
+	next, _ := navigateSelection(len(visible), selectedPosition, navigation)
+	result := tui.ConsumeResult[Message]().Focus(visibleIDs[next])
+	if next != selectedPosition {
+		result = result.Emit(onSelect(visible[next]))
+	}
+	return result
 }
 
 func cloneCommands(commands []Command) []Command {
@@ -225,27 +295,52 @@ func filteredCommandIndices(commands []Command, query string) []int {
 	return visible
 }
 
-func commandMatches(command Command, query string) bool {
-	query = asciiLower(query)
-	if query == "" || strings.Contains(asciiLower(command.Label), query) {
-		return true
-	}
-	for _, keyword := range command.Keywords {
-		if strings.Contains(asciiLower(keyword), query) {
+func hasVisibleCommand(commands []Command, query string) bool {
+	for _, command := range commands {
+		if commandMatches(command, query) {
 			return true
 		}
 	}
 	return false
 }
 
-func asciiLower(value string) string {
-	bytes := []byte(value)
-	for index, character := range bytes {
-		if character >= 'A' && character <= 'Z' {
-			bytes[index] = character + ('a' - 'A')
+func commandMatches(command Command, query string) bool {
+	if query == "" || containsASCIICaseInsensitive(command.Label, query) {
+		return true
+	}
+	for _, keyword := range command.Keywords {
+		if containsASCIICaseInsensitive(keyword, query) {
+			return true
 		}
 	}
-	return string(bytes)
+	return false
+}
+
+func containsASCIICaseInsensitive(value, query string) bool {
+	if len(query) > len(value) {
+		return false
+	}
+	for start := 0; start <= len(value)-len(query); start++ {
+		matches := true
+		for offset := range len(query) {
+			left := value[start+offset]
+			right := query[offset]
+			if left >= 'A' && left <= 'Z' {
+				left += 'a' - 'A'
+			}
+			if right >= 'A' && right <= 'Z' {
+				right += 'a' - 'A'
+			}
+			if left != right {
+				matches = false
+				break
+			}
+		}
+		if matches {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizedCommandSelection(visible []int, selected int) (int, bool) {
@@ -261,29 +356,4 @@ func normalizedCommandSelection(visible []int, selected int) (int, bool) {
 		position = index
 	}
 	return position, true
-}
-
-func commandNavigationEvent(event vt.Event, count, selected int) (int, bool) {
-	if event.Kind != vt.EventKey || !usableCommandKey(event.Key) {
-		return 0, false
-	}
-	action := navigationNormalize
-	switch event.Key.Code {
-	case vt.KeyUp:
-		action = navigationUp
-	case vt.KeyDown:
-		action = navigationDown
-	case vt.KeyHome:
-		action = navigationHome
-	case vt.KeyEnd:
-		action = navigationEnd
-	default:
-		return 0, false
-	}
-	return navigateSelection(count, selected, action)
-}
-
-func usableCommandKey(key vt.KeyEvent) bool {
-	modifiers := key.Modifiers
-	return key.Action != vt.KeyRelease && !modifiers.Alt && !modifiers.Control && !modifiers.Meta
 }
