@@ -84,6 +84,8 @@ type TerminalOptions struct {
 	EscapeTimeout time.Duration
 	// QueueCapacity is the maximum number of waiting application messages
 	QueueCapacity int
+	// MaxUpdatesPerCycle is the maximum application updates in one scheduling cycle
+	MaxUpdatesPerCycle int
 	// TaskLimit is the maximum number of effect tasks executing concurrently
 	TaskLimit int
 	// SubscriptionCapacity is the maximum pending values retained per source
@@ -108,6 +110,7 @@ func DefaultTerminalOptions() TerminalOptions {
 		CursorQueryTimeout:     100 * time.Millisecond,
 		EscapeTimeout:          25 * time.Millisecond,
 		QueueCapacity:          DefaultQueueCapacity,
+		MaxUpdatesPerCycle:     DefaultMaxUpdatesPerCycle,
 		TaskLimit:              DefaultTaskLimit,
 		SubscriptionCapacity:   DefaultSubscriptionCapacity,
 		RuntimeNoticeCapacity:  DefaultRuntimeNoticeCapacity,
@@ -140,7 +143,28 @@ func RunTerminalWithNoticeHandler[Message any](
 	if handleNotice == nil {
 		return errors.New("nagi-tui: nil runtime notice handler")
 	}
-	return runTerminalContext(context.Background(), app, options, mapEvent, handleNotice)
+	return runTerminalContext(context.Background(), app, options, mapEvent, func(notice RuntimeNotice) (Message, bool) {
+		handleNotice(notice)
+		var zero Message
+		return zero, false
+	})
+}
+
+// RunTerminalWithNoticeMapper runs an application and maps Runtime notices
+// directly to optional application Messages
+//
+// Each mapped Message is updated before the next notice is mapped, and
+// rendering remains coalesced.
+func RunTerminalWithNoticeMapper[Message any](
+	app App[Message],
+	options TerminalOptions,
+	mapEvent func(vt.Event) EventAction[Message],
+	mapNotice func(RuntimeNotice) (Message, bool),
+) error {
+	if mapNotice == nil {
+		return errors.New("nagi-tui: nil runtime notice mapper")
+	}
+	return runTerminalContext(context.Background(), app, options, mapEvent, mapNotice)
 }
 
 // RunTerminalContext runs an application until normal exit, terminal EOF, or
@@ -169,7 +193,26 @@ func RunTerminalContextWithNoticeHandler[Message any](
 	if handleNotice == nil {
 		return errors.New("nagi-tui: nil runtime notice handler")
 	}
-	return runTerminalContext(ctx, app, options, mapEvent, handleNotice)
+	return runTerminalContext(ctx, app, options, mapEvent, func(notice RuntimeNotice) (Message, bool) {
+		handleNotice(notice)
+		var zero Message
+		return zero, false
+	})
+}
+
+// RunTerminalContextWithNoticeMapper is the context-aware terminal loop that
+// maps Runtime notices directly to optional application Messages
+func RunTerminalContextWithNoticeMapper[Message any](
+	ctx context.Context,
+	app App[Message],
+	options TerminalOptions,
+	mapEvent func(vt.Event) EventAction[Message],
+	mapNotice func(RuntimeNotice) (Message, bool),
+) error {
+	if mapNotice == nil {
+		return errors.New("nagi-tui: nil runtime notice mapper")
+	}
+	return runTerminalContext(ctx, app, options, mapEvent, mapNotice)
 }
 
 func runTerminalContext[Message any](
@@ -177,7 +220,7 @@ func runTerminalContext[Message any](
 	app App[Message],
 	options TerminalOptions,
 	mapEvent func(vt.Event) EventAction[Message],
-	handleNotice func(RuntimeNotice),
+	mapNotice func(RuntimeNotice) (Message, bool),
 ) error {
 	if ctx == nil {
 		return errors.New("nagi-tui: nil terminal context")
@@ -215,6 +258,7 @@ func runTerminalContext[Message any](
 		clock := NewSystemClock()
 		config := NewRuntimeConfig(Size{Width: uint32(columns), Height: uint32(rows)})
 		config.QueueCapacity = options.QueueCapacity
+		config.MaxUpdatesPerCycle = options.MaxUpdatesPerCycle
 		config.TaskLimit = options.TaskLimit
 		config.SubscriptionCapacity = options.SubscriptionCapacity
 		config.RuntimeNoticeCapacity = options.RuntimeNoticeCapacity
@@ -243,9 +287,11 @@ func runTerminalContext[Message any](
 		if _, err := runtime.ProcessPending(); err != nil {
 			return err
 		}
-		handleRuntimeNotices(runtime, handleNotice)
+		if err := mapRuntimeNotices(runtime, mapNotice); err != nil {
+			return err
+		}
 		if !runtime.ExitRequested() {
-			ran, err := runPendingTerminalTasks(ctx, session, runtime, handleNotice)
+			ran, err := runPendingTerminalTasks(ctx, session, runtime, mapNotice)
 			if err != nil {
 				return err
 			}
@@ -326,7 +372,7 @@ func runTerminalContext[Message any](
 				if exit || runtime.ExitRequested() {
 					break
 				}
-				ran, err := runPendingTerminalTasks(ctx, session, runtime, handleNotice)
+				ran, err := runPendingTerminalTasks(ctx, session, runtime, mapNotice)
 				if err != nil {
 					return err
 				}
@@ -338,9 +384,11 @@ func runTerminalContext[Message any](
 			if _, err := runtime.ProcessPending(); err != nil {
 				return err
 			}
-			handleRuntimeNotices(runtime, handleNotice)
+			if err := mapRuntimeNotices(runtime, mapNotice); err != nil {
+				return err
+			}
 			if !exit && !runtime.ExitRequested() {
-				ran, err := runPendingTerminalTasks(ctx, session, runtime, handleNotice)
+				ran, err := runPendingTerminalTasks(ctx, session, runtime, mapNotice)
 				if err != nil {
 					return err
 				}
@@ -426,7 +474,7 @@ func runPendingTerminalTasks[Message any](
 	ctx context.Context,
 	session *ttyunix.Session,
 	runtime *Runtime[Message],
-	handleNotice func(RuntimeNotice),
+	mapNotice func(RuntimeNotice) (Message, bool),
 ) (bool, error) {
 	ran := false
 	for !runtime.ExitRequested() && runtime.PendingTerminalTasks() > 0 {
@@ -458,7 +506,9 @@ func runPendingTerminalTasks[Message any](
 		if _, err := runtime.ProcessPending(); err != nil {
 			return true, err
 		}
-		handleRuntimeNotices(runtime, handleNotice)
+		if err := mapRuntimeNotices(runtime, mapNotice); err != nil {
+			return true, err
+		}
 		ran = true
 	}
 	return ran, nil
@@ -468,9 +518,33 @@ func handleRuntimeNotices[Message any](runtime *Runtime[Message], handler func(R
 	if handler == nil {
 		return
 	}
-	for _, notice := range runtime.DrainRuntimeNotices() {
+	_ = mapRuntimeNotices(runtime, func(notice RuntimeNotice) (Message, bool) {
 		handler(notice)
+		var zero Message
+		return zero, false
+	})
+}
+
+func mapRuntimeNotices[Message any](
+	runtime *Runtime[Message],
+	mapper func(RuntimeNotice) (Message, bool),
+) error {
+	if mapper == nil {
+		return nil
 	}
+	for _, notice := range runtime.DrainRuntimeNotices() {
+		message, mapped := mapper(notice)
+		if !mapped {
+			continue
+		}
+		if err := runtime.Enqueue(message); err != nil {
+			return err
+		}
+		if _, err := runtime.ProcessQueued(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 type terminalDeadlineSource interface {
@@ -478,12 +552,16 @@ type terminalDeadlineSource interface {
 }
 
 type runtimeDeadlineSource interface {
+	HasPendingUpdates() bool
 	TimeUntilEffectDeadline() (time.Duration, bool)
 	TimeUntilSubscriptionDeadline() (time.Duration, bool)
 	TimeUntilFrameDeadline() (time.Duration, bool)
 }
 
 func terminalWaitDuration(decoder terminalDeadlineSource, runtime runtimeDeadlineSource) (time.Duration, bool) {
+	if runtime.HasPendingUpdates() {
+		return 0, true
+	}
 	timeout := time.Duration(0)
 	hasTimeout := false
 	include := func(deadline time.Duration, ok bool) {

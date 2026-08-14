@@ -464,9 +464,15 @@ type keyOverride struct {
 	bindings []KeyBinding
 }
 
-// KeyMap is one immutable Action-ID-to-binding override layer
+type keyLabelOverride struct {
+	action ActionID
+	label  string
+}
+
+// KeyMap is one immutable Action-ID override layer
 type KeyMap struct {
-	overrides []keyOverride
+	overrides      []keyOverride
+	labelOverrides []keyLabelOverride
 }
 
 // NewKeyMap returns an empty override layer
@@ -484,7 +490,7 @@ func (m KeyMap) Rebind(action ActionID, bindings []KeyBinding) (KeyMap, error) {
 	}
 	overrides := append([]keyOverride(nil), m.overrides...)
 	overrides = append(overrides, keyOverride{action: action, bindings: cloneKeyBindings(bindings)})
-	return KeyMap{overrides: overrides}, nil
+	return KeyMap{overrides: overrides, labelOverrides: m.labelOverrides}, nil
 }
 
 // Bindings returns a copy of the replacement when this layer names action
@@ -502,9 +508,37 @@ func (m KeyMap) bindingsView(action ActionID) ([]KeyBinding, bool) {
 	return nil, false
 }
 
+// Relabel returns a new layer with one user-facing label replacement
+//
+// A label replacement is independent from a binding replacement for the same
+// Action ID. Replacing a label already present in this layer returns
+// DuplicateActionLabelOverrideError.
+func (m KeyMap) Relabel(action ActionID, label string) (KeyMap, error) {
+	if _, ok := m.labelView(action); ok {
+		return m, &DuplicateActionLabelOverrideError{Action: action}
+	}
+	labelOverrides := append([]keyLabelOverride(nil), m.labelOverrides...)
+	labelOverrides = append(labelOverrides, keyLabelOverride{action: action, label: label})
+	return KeyMap{overrides: m.overrides, labelOverrides: labelOverrides}, nil
+}
+
+// Label returns the user-facing label replacement when this layer names action
+func (m KeyMap) Label(action ActionID) (string, bool) {
+	return m.labelView(action)
+}
+
+func (m KeyMap) labelView(action ActionID) (string, bool) {
+	for _, labelOverride := range m.labelOverrides {
+		if labelOverride.action == action {
+			return labelOverride.label, true
+		}
+	}
+	return "", false
+}
+
 // Empty reports whether the layer contains no overrides
 func (m KeyMap) Empty() bool {
-	return len(m.overrides) == 0
+	return len(m.overrides) == 0 && len(m.labelOverrides) == 0
 }
 
 // DuplicateActionOverrideError reports a repeated Action ID in one KeyMap
@@ -516,6 +550,17 @@ type DuplicateActionOverrideError struct {
 // Error returns the duplicate override diagnostic
 func (e *DuplicateActionOverrideError) Error() string {
 	return "duplicate key override for ActionID " + e.Action.String()
+}
+
+// DuplicateActionLabelOverrideError reports a repeated label replacement in one KeyMap
+type DuplicateActionLabelOverrideError struct {
+	// Action is the duplicated Action ID
+	Action ActionID
+}
+
+// Error returns the duplicate label replacement diagnostic
+func (e *DuplicateActionLabelOverrideError) Error() string {
+	return "duplicate label override for ActionID " + e.Action.String()
 }
 
 // KeyScopePropagation controls Runtime ancestor action propagation at one scope
@@ -721,10 +766,14 @@ func ResolveActions(owner NodeID, actions []ActionDescriptor, scopes []KeyScope)
 		}
 		seenActions[action.id] = struct{}{}
 
+		label := action.label
 		bindings := action.defaultBindings
 		for _, scope := range scopes {
 			if replacement, ok := scope.keyMap.bindingsView(action.id); ok {
 				bindings = replacement
+			}
+			if replacement, ok := scope.keyMap.labelView(action.id); ok {
+				label = replacement
 			}
 		}
 
@@ -755,7 +804,7 @@ func ResolveActions(owner NodeID, actions []ActionDescriptor, scopes []KeyScope)
 		}
 
 		resolved = append(resolved, ResolvedAction{
-			id: action.id, label: action.label, bindings: bindings,
+			id: action.id, label: label, bindings: bindings,
 			availability: action.availability, helpVisible: action.helpVisible,
 		})
 	}

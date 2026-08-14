@@ -33,6 +33,9 @@ func TestDefaultTerminalOptionsPreserveUnfocusedNonMouseBehavior(t *testing.T) {
 	if options.FocusFirst {
 		t.Fatal("FocusFirst = true, want false")
 	}
+	if options.MaxUpdatesPerCycle != DefaultMaxUpdatesPerCycle {
+		t.Fatalf("MaxUpdatesPerCycle = %d, want %d", options.MaxUpdatesPerCycle, DefaultMaxUpdatesPerCycle)
+	}
 	if options.MinimumFrameInterval != (time.Second+119)/120 {
 		t.Fatalf("MinimumFrameInterval = %s, want 120 FPS cap", options.MinimumFrameInterval)
 	}
@@ -232,9 +235,14 @@ func (deadline testTerminalDeadline) TimeUntilDeadline() (time.Duration, bool) {
 }
 
 type testRuntimeDeadlines struct {
+	pending      bool
 	effect       testTerminalDeadline
 	subscription testTerminalDeadline
 	frame        testTerminalDeadline
+}
+
+func (deadlines testRuntimeDeadlines) HasPendingUpdates() bool {
+	return deadlines.pending
 }
 
 func (deadlines testRuntimeDeadlines) TimeUntilEffectDeadline() (time.Duration, bool) {
@@ -263,5 +271,13 @@ func TestTerminalWaitUsesNoTimeoutWithoutDeadline(t *testing.T) {
 	)
 	if !ok || timeout != 8*time.Millisecond {
 		t.Fatalf("terminalWaitDuration = %s, %t, want 8ms deadline", timeout, ok)
+	}
+
+	timeout, ok = terminalWaitDuration(
+		testTerminalDeadline{duration: 25 * time.Millisecond, ok: true},
+		testRuntimeDeadlines{pending: true},
+	)
+	if !ok || timeout != 0 {
+		t.Fatalf("terminalWaitDuration = %s, %t, want immediate pending-update cycle", timeout, ok)
 	}
 }

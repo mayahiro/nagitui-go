@@ -488,6 +488,55 @@ func TestHarnessObservesManualSubscriptionLifecycleAndMessages(t *testing.T) {
 	}
 }
 
+func TestHarnessBoundedStreamCycleGivesNextInputEventPriority(t *testing.T) {
+	source := NewManualSubscription[subscriptionTestMessage]()
+	app := &manualSubscriptionApp{source: source, running: true}
+	config := tui.NewRuntimeConfig(tui.Size{Width: 16, Height: 1})
+	config.MaxUpdatesPerCycle = 2
+	harness, err := NewWithConfig[subscriptionTestMessage](
+		app,
+		config,
+		25*time.Millisecond,
+		func(event vt.Event) tui.EventAction[subscriptionTestMessage] {
+			if event.Kind == vt.EventText {
+				return tui.MessageAction(subscriptionTestMessage{value: event.Text})
+			}
+			return tui.IgnoreAction[subscriptionTestMessage]()
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer harness.Close()
+	source.WaitStarted()
+	for _, value := range []string{"s0", "s1", "s2", "s3", "s4", "s5"} {
+		if !source.Send(subscriptionTestMessage{value: value}) {
+			t.Fatalf("send %s failed", value)
+		}
+	}
+
+	if err := harness.Step(); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(app.values, []string{"s0", "s1"}) {
+		t.Fatalf("first cycle values = %v", app.values)
+	}
+
+	if err := harness.Input([]byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(app.values, []string{"s0", "s1", "x", "s2", "s3"}) {
+		t.Fatalf("input cycle values = %v", app.values)
+	}
+
+	if err := harness.Step(); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(app.values, []string{"s0", "s1", "x", "s2", "s3", "s4", "s5"}) {
+		t.Fatalf("final values = %v", app.values)
+	}
+}
+
 type completedStreamHarnessApp struct{}
 
 func (*completedStreamHarnessApp) Init() tui.Effect[struct{}] {

@@ -28,7 +28,8 @@ type gallery struct {
 	theme             int
 	notes             widget.TextAreaState
 	composer          widget.ComposerState
-	history           []string
+	history           widget.ComposerHistory
+	nextHistoryID     int
 	row               int
 	tree              int
 	treeExpanded      bool
@@ -42,11 +43,14 @@ type gallery struct {
 }
 
 func newGallery() *gallery {
+	history := mustComposerHistory(
+		widget.NewComposerHistoryEntry(widget.NewComposerHistoryEntryID("message-0"), "Earlier message"),
+	)
 	return &gallery{
 		feature: true, treeExpanded: true,
 		notes:    widget.NewTextAreaStateAtEnd("Multiline notes\nremain application state"),
 		composer: widget.NewComposerStateAtEnd("Draft message"),
-		history:  []string{"Earlier message"},
+		history:  history, nextHistoryID: 1,
 		selectableContent: widget.NewSelectableTextContent([]tui.TextSpan{
 			tui.NewTextSpan("Selectable", vt.Style{Bold: true}),
 			tui.NewTextSpan(" text keeps application-owned selection.", vt.Style{}),
@@ -77,11 +81,16 @@ func (a *gallery) Update(received message) tui.Effect[message] {
 	case "submit-composer":
 		value := a.composer.TextArea().Value()
 		if strings.TrimSpace(value) != "" {
-			if len(a.history) == 8 {
-				copy(a.history, a.history[1:])
-				a.history = a.history[:7]
+			entries := a.history.Entries()
+			if len(entries) == 8 {
+				entries = entries[1:]
 			}
-			a.history = append(a.history, value)
+			entries = append(entries, widget.NewComposerHistoryEntry(
+				widget.NewComposerHistoryEntryID(fmt.Sprintf("message-%d", a.nextHistoryID)),
+				value,
+			))
+			a.nextHistoryID++
+			a.history = mustComposerHistory(entries...)
 			a.composer = widget.NewComposerStateAtEnd("")
 			a.lastAction = "Submitted: " + strings.ReplaceAll(value, "\n", " / ")
 		}
@@ -129,6 +138,14 @@ func (a *gallery) Update(received message) tui.Effect[message] {
 		a.dialogOpen = false
 	}
 	return tui.NoneEffect[message]()
+}
+
+func mustComposerHistory(entries ...widget.ComposerHistoryEntry) widget.ComposerHistory {
+	history, err := widget.NewComposerHistory(entries)
+	if err != nil {
+		panic(err)
+	}
+	return history
 }
 
 func (*gallery) Subscriptions() tui.Subscription[message] {

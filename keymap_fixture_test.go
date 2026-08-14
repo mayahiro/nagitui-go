@@ -98,6 +98,48 @@ func TestKeyScopeResolutionMatchesSharedFixtures(t *testing.T) {
 	}
 }
 
+func TestKeyLabelResolutionMatchesSharedFixtures(t *testing.T) {
+	records, err := conformance.Load(
+		"interaction/keymap-label.txt", "keymap-label",
+		"action", "label", "layers", "expected", "expected-scopes",
+	)
+	if errors.Is(err, conformance.ErrNoFixtureRoot) {
+		t.Skip(err)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, record := range records {
+		t.Run(record.ID, func(t *testing.T) {
+			actionID := NewActionID(record.Field("action"))
+			descriptor := NewActionDescriptor(
+				actionID,
+				record.Text("label"),
+				[]KeyBinding{NewKeyBinding(NewKeyStroke(vt.KeyEnter, vt.Modifiers{}))},
+			)
+			resolved, err := ResolveActions(
+				NewNodeID("owner"),
+				[]ActionDescriptor{descriptor},
+				keymapFixtureLabelScopes(t, record.Field("layers"), actionID),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			actions := resolved.Actions()
+			if len(actions) != 1 || actions[0].Label() != record.Text("expected") {
+				t.Fatalf("actions = %#v, want label %q", actions, record.Text("expected"))
+			}
+			help := resolved.HelpActions()
+			if len(help) != 1 || help[0].Label() != record.Text("expected") {
+				t.Fatalf("HelpActions = %#v, want label %q", help, record.Text("expected"))
+			}
+			if actual, expected := resolved.ScopePath(), keymapFixtureNodeIDs(record.Field("expected-scopes")); !slices.Equal(actual, expected) {
+				t.Fatalf("scope path = %v, want %v", actual, expected)
+			}
+		})
+	}
+}
+
 func TestKeyConflictsMatchSharedFixtures(t *testing.T) {
 	records, err := conformance.Load(
 		"interaction/key-conflict.txt", "key-conflict",
@@ -382,6 +424,27 @@ func keymapFixtureScopes(t *testing.T, value string, action ActionID) []KeyScope
 			if err != nil {
 				t.Fatal(err)
 			}
+		}
+		scopes[index] = NewKeyScope(NewNodeID(id), keyMap)
+	}
+	return scopes
+}
+
+func keymapFixtureLabelScopes(t *testing.T, value string, action ActionID) []KeyScope {
+	t.Helper()
+	if value == "-" {
+		return nil
+	}
+	parts := strings.Split(value, ";")
+	scopes := make([]KeyScope, len(parts))
+	for index, part := range parts {
+		id, replacement, ok := strings.Cut(part, ":")
+		if !ok {
+			t.Fatalf("invalid label scope %q", part)
+		}
+		keyMap, err := NewKeyMap().Relabel(action, replacement)
+		if err != nil {
+			t.Fatal(err)
 		}
 		scopes[index] = NewKeyScope(NewNodeID(id), keyMap)
 	}

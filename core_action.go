@@ -62,7 +62,9 @@ func coreActionGroupFor(includesFocus bool, scrollAxis ScrollAxis, hasScroll boo
 func resolveCoreActionGroup(owner NodeID, group coreActionGroup, scopes []KeyScope) (ResolvedActions, error) {
 	for _, scope := range scopes {
 		for _, descriptor := range group.descriptors {
-			if _, ok := scope.keyMap.bindingsView(descriptor.id); ok {
+			_, hasBindings := scope.keyMap.bindingsView(descriptor.id)
+			_, hasLabel := scope.keyMap.labelView(descriptor.id)
+			if hasBindings || hasLabel {
 				return ResolveActions(owner, group.descriptors, scopes)
 			}
 		}

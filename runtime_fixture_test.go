@@ -19,6 +19,22 @@ type fixtureEcho struct {
 	text string
 }
 
+type fixtureSchedulingApp struct {
+	messages []string
+}
+
+func (*fixtureSchedulingApp) Init() Effect[string] { return NoneEffect[string]() }
+func (a *fixtureSchedulingApp) Update(message string) Effect[string] {
+	a.messages = append(a.messages, message)
+	return NoneEffect[string]()
+}
+func (*fixtureSchedulingApp) Subscriptions() Subscription[string] {
+	return NoneSubscription[string]()
+}
+func (a *fixtureSchedulingApp) View(ViewContext) Node[string] {
+	return Text[string](strings.Join(a.messages, ","))
+}
+
 func (*fixtureEcho) Init() Effect[string] {
 	return NoneEffect[string]()
 }
@@ -85,6 +101,54 @@ func TestRuntimeRoundtripFixtures(t *testing.T) {
 			output := vt.Encode(frame.Operations(), vt.BaselineCapabilities())
 			if !bytes.Contains(output, input) {
 				t.Fatalf("input %q did not reach VT output %q", input, output)
+			}
+		})
+	}
+}
+
+func TestRuntimeBoundedSchedulingFixtures(t *testing.T) {
+	records, err := conformance.Load(
+		"runtime/scheduling.txt",
+		"runtime-scheduling",
+		"maximum", "messages", "expected-cycle", "expected-remaining", "expected-final",
+	)
+	if errors.Is(err, conformance.ErrNoFixtureRoot) {
+		t.Skip(err)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, record := range records {
+		t.Run(record.ID, func(t *testing.T) {
+			config := NewRuntimeConfig(Size{Width: 8, Height: 1})
+			config.MaxUpdatesPerCycle = int(runtimeFixtureNumber(t, record.Field("maximum")))
+			app := &fixtureSchedulingApp{}
+			runtime, err := NewRuntimeWithClock[string](app, config, NewVirtualClock())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer runtime.Close()
+			for _, message := range runtimeFixtureList(record.Field("messages")) {
+				if err := runtime.Enqueue(message); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			if _, err := runtime.ProcessPending(); err != nil {
+				t.Fatal(err)
+			}
+			if expected := runtimeFixtureList(record.Field("expected-cycle")); !slices.Equal(app.messages, expected) {
+				t.Fatalf("cycle = %v, want %v", app.messages, expected)
+			}
+			if expected := int(runtimeFixtureNumber(t, record.Field("expected-remaining"))); runtime.QueuedMessages() != expected {
+				t.Fatalf("remaining = %d, want %d", runtime.QueuedMessages(), expected)
+			}
+
+			if _, err := runtime.ProcessQueued(); err != nil {
+				t.Fatal(err)
+			}
+			if expected := runtimeFixtureList(record.Field("expected-final")); !slices.Equal(app.messages, expected) {
+				t.Fatalf("final = %v, want %v", app.messages, expected)
 			}
 		})
 	}

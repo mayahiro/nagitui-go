@@ -147,6 +147,7 @@ type effectSupervisor[Message any] struct {
 	nextOrder        uint64
 	diagnostics      EffectDiagnostics
 	closed           bool
+	workers          *workerTracker
 }
 
 func newEffectSupervisor[Message any](taskLimit int) *effectSupervisor[Message] {
@@ -166,6 +167,7 @@ func newEffectSupervisorContext[Message any](parent context.Context, taskLimit i
 		sequences:        make(map[uint64]*effectSequenceState[Message]),
 		barriers:         make(map[uint64]*effectBarrier),
 		nextIdentifier:   1,
+		workers:          &workerTracker{},
 	}
 }
 
@@ -455,7 +457,10 @@ func (s *effectSupervisor[Message]) spawnAvailable(_ Timestamp) {
 		ctx := state.context
 		outcomes := s.outcomes
 		wake := s.wake
+		s.workers.start()
+		workers := s.workers
 		go func() {
+			defer workers.finish()
 			message, panicked := runEffectTask(task, ctx)
 			outcomes <- effectTaskOutcome[Message]{id: id, message: message, panicked: panicked}
 			wake.notify()

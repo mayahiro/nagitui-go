@@ -62,6 +62,84 @@ func TestKeyMapOwnsBindingSlices(t *testing.T) {
 	}
 }
 
+func TestKeyMapBindingAndLabelOverridesAreIndependent(t *testing.T) {
+	action := NewActionID("app.submit")
+	keyMap, err := NewKeyMap().Rebind(
+		action,
+		[]KeyBinding{NewKeyBinding(NewKeyStroke(vt.KeyEnter, vt.Modifiers{}))},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyMap, err = keyMap.Relabel(action, "Send")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	bindings, ok := keyMap.Bindings(action)
+	if !ok || len(bindings) != 1 {
+		t.Fatalf("bindings = %v, %t", bindings, ok)
+	}
+	if label, ok := keyMap.Label(action); !ok || label != "Send" {
+		t.Fatalf("label = %q, %t", label, ok)
+	}
+	if keyMap.Empty() {
+		t.Fatal("KeyMap with overrides reports empty")
+	}
+}
+
+func TestDuplicateLabelOverrideDoesNotMutateOriginalMap(t *testing.T) {
+	action := NewActionID("app.submit")
+	original, err := NewKeyMap().Relabel(action, "Send")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = original.Relabel(action, "Submit")
+	var duplicate *DuplicateActionLabelOverrideError
+	if !errors.As(err, &duplicate) {
+		t.Fatalf("error = %T %v", err, err)
+	}
+	if duplicate.Action != action {
+		t.Fatalf("duplicate Action = %q", duplicate.Action)
+	}
+	if label, ok := original.Label(action); !ok || label != "Send" {
+		t.Fatalf("original label = %q, %t", label, ok)
+	}
+}
+
+func TestNearestLabelOverrideWinsWithoutChangingBindings(t *testing.T) {
+	action := NewActionDescriptor(
+		"app.submit",
+		"Submit",
+		[]KeyBinding{NewKeyBinding(NewKeyStroke(vt.KeyEnter, vt.Modifiers{}))},
+	)
+	outer, err := NewKeyMap().Relabel("app.submit", "Send")
+	if err != nil {
+		t.Fatal(err)
+	}
+	inner, err := NewKeyMap().Relabel("app.submit", "送信")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resolved, err := ResolveActions(
+		"composer",
+		[]ActionDescriptor{action},
+		[]KeyScope{NewKeyScope("outer", outer), NewKeyScope("inner", inner)},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actions := resolved.Actions()
+	if len(actions) != 1 || actions[0].Label() != "送信" || len(actions[0].Bindings()) != 1 {
+		t.Fatalf("resolved actions = %#v", actions)
+	}
+	help := resolved.HelpActions()
+	if len(help) != 1 || help[0].Label() != "送信" {
+		t.Fatalf("HelpActions = %#v", help)
+	}
+}
+
 func TestKeyBindingMatchDoesNotAllocate(t *testing.T) {
 	stroke := NewCharacterKeyStroke('a', vt.Modifiers{Control: true})
 	binding := NewKeyBinding(stroke)

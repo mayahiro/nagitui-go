@@ -1,6 +1,8 @@
 package widget
 
 import (
+	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -22,7 +24,7 @@ type composerFixtureLimit struct {
 
 type composerFixtureApp struct {
 	state         ComposerState
-	history       []string
+	history       ComposerHistory
 	wrap          int
 	hasWrap       bool
 	minRows       int
@@ -108,7 +110,7 @@ func TestComposerMatchesSharedFixtures(t *testing.T) {
 				state: composerFixtureState(
 					t, record.Text("initial"), record.Field("cursor"), record.Field("selection"),
 				),
-				history:       composerFixtureHistory(record),
+				history:       composerFixtureHistory(t, record),
 				minRows:       fixtureInt(t, record.Field("min-rows")),
 				maxRows:       fixtureInt(t, record.Field("max-rows")),
 				limit:         composerFixtureLengthLimit(t, record.Field("limit")),
@@ -210,6 +212,212 @@ func TestComposerMatchesSharedFixtures(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestComposerHistoryReconciliationMatchesSharedFixtures(t *testing.T) {
+	records := loadWidgetFixtures(
+		t,
+		"widgets/composer-history.txt",
+		"widget-composer-history",
+		"draft", "draft-cursor", "initial-history", "previous-count", "replacement-history",
+		"expected", "expected-cursor", "expected-index", "expected-id", "expected-draft",
+		"expected-draft-cursor",
+	)
+	for _, record := range records {
+		record := record
+		t.Run(record.ID, func(t *testing.T) {
+			app := &composerFixtureApp{
+				state: NewComposerState(NewTextAreaState(
+					record.Text("draft"),
+					fixtureInt(t, record.Field("draft-cursor")),
+				)),
+				history:       composerIdentifiedFixtureHistory(t, record.Field("initial-history")),
+				minRows:       1,
+				maxRows:       6,
+				overflow:      ComposerOverflowReject,
+				enabled:       true,
+				submitEnabled: true,
+				keyMap:        tui.NewKeyMap(),
+			}
+			runtime, err := tui.NewRuntimeWithClock(
+				app,
+				tui.NewRuntimeConfig(tui.Size{Width: 16, Height: 4}),
+				tui.NewVirtualClock(),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer runtime.Close()
+			if _, err := runtime.RenderIfDirty(); err != nil {
+				t.Fatal(err)
+			}
+			if focused, err := runtime.RequestFocus(tui.NewNodeID("composer")); err != nil || !focused {
+				t.Fatalf("RequestFocus = %t, %v", focused, err)
+			}
+			if _, err := runtime.RenderIfDirty(); err != nil {
+				t.Fatal(err)
+			}
+			for index := 0; index < fixtureInt(t, record.Field("previous-count")); index++ {
+				if _, err := runtime.DispatchEvent(composerFixtureEvent(t, "up")); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := runtime.ProcessPending(); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := runtime.RenderIfDirty(); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			replacement := composerIdentifiedFixtureHistory(t, record.Field("replacement-history"))
+			state := app.state.ReconcileHistory(replacement)
+
+			if actual := state.TextArea().Value(); actual != record.Text("expected") {
+				t.Errorf("value = %q, want %q", actual, record.Text("expected"))
+			}
+			if actual := state.TextArea().Cursor(); actual != fixtureInt(t, record.Field("expected-cursor")) {
+				t.Errorf("cursor = %d, want %s", actual, record.Field("expected-cursor"))
+			}
+			index, hasIndex := state.HistoryIndex()
+			if expected := record.Field("expected-index"); expected == "-" {
+				if hasIndex {
+					t.Errorf("history index = %d, want none", index)
+				}
+			} else if !hasIndex || index != fixtureInt(t, expected) {
+				t.Errorf("history index = %d, %t, want %s", index, hasIndex, expected)
+			}
+			id, hasID := state.HistoryEntryID()
+			if expected := record.Field("expected-id"); expected == "-" {
+				if hasID {
+					t.Errorf("history ID = %q, want none", id.String())
+				}
+			} else if !hasID || id.String() != expected {
+				t.Errorf("history ID = %q, %t, want %q", id.String(), hasID, expected)
+			}
+			draft, hasDraft := state.Draft()
+			if expected := record.Field("expected-draft"); expected == "-" {
+				if hasDraft {
+					t.Errorf("draft = %#v, want none", draft)
+				}
+			} else if !hasDraft || draft.Value() != record.Text("expected-draft") ||
+				draft.Cursor() != fixtureInt(t, record.Field("expected-draft-cursor")) {
+				t.Errorf("draft = %#v, %t", draft, hasDraft)
+			}
+		})
+	}
+}
+
+func TestComposerHistoryRejectsDuplicateStableIDs(t *testing.T) {
+	_, err := NewComposerHistory([]ComposerHistoryEntry{
+		NewComposerHistoryEntry(NewComposerHistoryEntryID("same"), "first"),
+		NewComposerHistoryEntry(NewComposerHistoryEntryID("same"), "second"),
+	})
+	var duplicate *DuplicateComposerHistoryEntryIDError
+	if !errors.As(err, &duplicate) {
+		t.Fatalf("error = %T %v", err, err)
+	}
+	if duplicate.ID.String() != "same" {
+		t.Fatalf("duplicate ID = %q", duplicate.ID.String())
+	}
+}
+
+func TestComposerHistoryReconciliationFollowsIDAcrossFrontTruncation(t *testing.T) {
+	original := mustComposerHistory(t,
+		NewComposerHistoryEntry(NewComposerHistoryEntryID("old"), "old"),
+		NewComposerHistoryEntry(NewComposerHistoryEntryID("middle"), "middle"),
+		NewComposerHistoryEntry(NewComposerHistoryEntryID("new"), "new"),
+	)
+	draft := NewTextAreaState("draft", 2).Select(0)
+	state, ok := composerHistoryPrevious(NewComposerState(draft), original)
+	if !ok {
+		t.Fatal("newest history was unavailable")
+	}
+	state, ok = composerHistoryPrevious(state, original)
+	if !ok {
+		t.Fatal("middle history was unavailable")
+	}
+	state = composerChangedState(state, NewTextAreaState("middle", 1))
+	truncated := mustComposerHistory(t,
+		NewComposerHistoryEntry(NewComposerHistoryEntryID("middle"), "middle"),
+		NewComposerHistoryEntry(NewComposerHistoryEntryID("new"), "new"),
+	)
+
+	reconciled := state.ReconcileHistory(truncated)
+
+	if index, ok := reconciled.HistoryIndex(); !ok || index != 0 {
+		t.Fatalf("HistoryIndex = %d, %t", index, ok)
+	}
+	if id, ok := reconciled.HistoryEntryID(); !ok || id.String() != "middle" {
+		t.Fatalf("HistoryEntryID = %q, %t", id.String(), ok)
+	}
+	if reconciled.TextArea().Value() != "middle" || reconciled.TextArea().Cursor() != 1 {
+		t.Fatalf("TextArea = %#v", reconciled.TextArea())
+	}
+	if actualDraft, ok := reconciled.Draft(); !ok || actualDraft != draft {
+		t.Fatalf("Draft = %#v, %t", actualDraft, ok)
+	}
+}
+
+func TestComposerHistoryReconciliationUpdatesValueAndRestoresDraft(t *testing.T) {
+	original := mustComposerHistory(t,
+		NewComposerHistoryEntry(NewComposerHistoryEntryID("entry"), "old value"),
+	)
+	draft := NewTextAreaState("draft", 2).Select(0)
+	state, ok := composerHistoryPrevious(NewComposerState(draft), original)
+	if !ok {
+		t.Fatal("history was unavailable")
+	}
+	replaced := mustComposerHistory(t,
+		NewComposerHistoryEntry(NewComposerHistoryEntryID("entry"), "replacement"),
+	)
+
+	replacedState := state.ReconcileHistory(replaced)
+	if replacedState.TextArea().Value() != "replacement" || replacedState.TextArea().Cursor() != len("replacement") {
+		t.Fatalf("replacement TextArea = %#v", replacedState.TextArea())
+	}
+
+	restored := state.ReconcileHistory(ComposerHistory{})
+	if restored.TextArea() != draft {
+		t.Fatalf("restored TextArea = %#v, want %#v", restored.TextArea(), draft)
+	}
+	if _, ok := restored.HistoryIndex(); ok {
+		t.Fatal("restored state still has a history index")
+	}
+	if _, ok := restored.HistoryEntryID(); ok {
+		t.Fatal("restored state still has a history entry ID")
+	}
+	if _, ok := restored.Draft(); ok {
+		t.Fatal("restored state still has a draft")
+	}
+}
+
+func TestComposerHistoryUnchangedIDReconciliationDoesNotAllocate(t *testing.T) {
+	history := mustComposerHistory(t,
+		NewComposerHistoryEntry(NewComposerHistoryEntryID("current"), "current"),
+	)
+	state, ok := composerHistoryPrevious(NewComposerStateAtEnd("draft"), history)
+	if !ok {
+		t.Fatal("history was unavailable")
+	}
+	var reconciled ComposerState
+	allocations := testing.AllocsPerRun(1_000, func() {
+		reconciled = state.ReconcileHistory(history)
+	})
+	if reconciled.TextArea().Value() != "current" {
+		t.Fatalf("reconciled value = %q", reconciled.TextArea().Value())
+	}
+	if allocations != 0 {
+		t.Fatalf("ReconcileHistory allocations = %f, want 0", allocations)
+	}
+}
+
+func mustComposerHistory(t *testing.T, entries ...ComposerHistoryEntry) ComposerHistory {
+	t.Helper()
+	history, err := NewComposerHistory(entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return history
 }
 
 func TestComposerDescriptorDefaultsAreOrderedAndHaveLegacyNewlineFallback(t *testing.T) {
@@ -343,11 +551,41 @@ func assertComposerFixtureState(t *testing.T, state ComposerState, record confor
 	}
 }
 
-func composerFixtureHistory(record conformance.Record) []string {
+func composerFixtureHistory(t *testing.T, record conformance.Record) ComposerHistory {
+	t.Helper()
 	if record.Field("history") == "-" {
-		return nil
+		return ComposerHistory{}
 	}
-	return strings.Split(record.Text("history"), "/")
+	values := strings.Split(record.Text("history"), "/")
+	entries := make([]ComposerHistoryEntry, len(values))
+	for index, value := range values {
+		entries[index] = NewComposerHistoryEntry(
+			NewComposerHistoryEntryID(fmt.Sprintf("fixture-history-%d", index)),
+			value,
+		)
+	}
+	history, err := NewComposerHistory(entries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return history
+}
+
+func composerIdentifiedFixtureHistory(t *testing.T, value string) ComposerHistory {
+	t.Helper()
+	if value == "-" {
+		return ComposerHistory{}
+	}
+	encoded := strings.Split(value, "/")
+	entries := make([]ComposerHistoryEntry, len(encoded))
+	for index, item := range encoded {
+		id, entryValue, ok := strings.Cut(item, "=")
+		if !ok {
+			t.Fatalf("invalid identified Composer history entry %q", item)
+		}
+		entries[index] = NewComposerHistoryEntry(NewComposerHistoryEntryID(id), entryValue)
+	}
+	return mustComposerHistory(t, entries...)
 }
 
 func composerFixtureLengthLimit(t *testing.T, value string) composerFixtureLimit {

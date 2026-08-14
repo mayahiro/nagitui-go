@@ -1,6 +1,7 @@
 package tuitest
 
 import (
+	"context"
 	"time"
 
 	"github.com/mayahiro/nagi-go/vt"
@@ -53,9 +54,15 @@ func NewWithConfig[Message any](
 	return harness, nil
 }
 
-// Close cooperatively cancels active effect tasks and timers
+// Close cooperatively cancels active Effects and Subscriptions without waiting
 func (h *Harness[Message]) Close() {
 	h.runtime.Close()
+}
+
+// CloseAndWait requests cooperative cancellation and waits for Nagi-started
+// Effect and Stream producer functions to return or ctx to end
+func (h *Harness[Message]) CloseAndWait(ctx context.Context) error {
+	return h.runtime.CloseAndWait(ctx)
 }
 
 // App returns the application instance owned by the runtime
@@ -245,7 +252,7 @@ func (h *Harness[Message]) Resize(size tui.Size) error {
 	return h.Step()
 }
 
-// Step processes queued messages and captures at most one rendered frame
+// Step processes one bounded scheduling cycle and captures at most one frame
 func (h *Harness[Message]) Step() error {
 	if _, err := h.runtime.ProcessPendingWith(func(message Message) {
 		h.messages = append(h.messages, message)

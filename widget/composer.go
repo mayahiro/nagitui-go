@@ -1,6 +1,8 @@
 package widget
 
 import (
+	"fmt"
+
 	celltext "github.com/mayahiro/nagi-go/text"
 	"github.com/mayahiro/nagi-go/vt"
 	"github.com/mayahiro/nagitui-go"
@@ -12,11 +14,123 @@ const (
 	composerActionCount    = 3 + textAreaActionCount
 )
 
+// ComposerHistoryEntryID is one stable application-defined history entry identity
+type ComposerHistoryEntryID struct {
+	value string
+}
+
+// NewComposerHistoryEntryID returns an opaque stable identity with valid UTF-8
+func NewComposerHistoryEntryID(value string) ComposerHistoryEntryID {
+	return ComposerHistoryEntryID{value: celltext.NormalizeUTF8(value)}
+}
+
+// String returns the application-defined identity
+func (id ComposerHistoryEntryID) String() string {
+	return id.value
+}
+
+// ComposerHistoryEntry is one immutable Composer history entry
+type ComposerHistoryEntry struct {
+	id    ComposerHistoryEntryID
+	value string
+}
+
+// NewComposerHistoryEntry returns an entry from a stable identity and recalled text
+func NewComposerHistoryEntry(id ComposerHistoryEntryID, value string) ComposerHistoryEntry {
+	return ComposerHistoryEntry{id: id, value: celltext.NormalizeUTF8(value)}
+}
+
+// ID returns the stable application-defined identity
+func (e ComposerHistoryEntry) ID() ComposerHistoryEntryID {
+	return e.id
+}
+
+// Value returns the recalled text
+func (e ComposerHistoryEntry) Value() string {
+	return e.value
+}
+
+// DuplicateComposerHistoryEntryIDError reports a repeated stable history entry identity
+type DuplicateComposerHistoryEntryIDError struct {
+	// ID is the duplicated entry identity
+	ID ComposerHistoryEntryID
+}
+
+// Error returns the duplicate entry diagnostic
+func (e *DuplicateComposerHistoryEntryIDError) Error() string {
+	return fmt.Sprintf("duplicate Composer history entry ID %s", e.ID.String())
+}
+
+// ComposerHistory is immutable unique oldest-to-newest Composer history
+type ComposerHistory struct {
+	inner *composerHistoryData
+}
+
+type composerHistoryData struct {
+	entries   []ComposerHistoryEntry
+	positions map[ComposerHistoryEntryID]int
+}
+
+// NewComposerHistory returns validated history whose stable entry IDs are unique
+func NewComposerHistory(entries []ComposerHistoryEntry) (ComposerHistory, error) {
+	owned := append([]ComposerHistoryEntry(nil), entries...)
+	if len(owned) == 0 {
+		return ComposerHistory{}, nil
+	}
+	positions := make(map[ComposerHistoryEntryID]int, len(owned))
+	for index, entry := range owned {
+		if _, exists := positions[entry.id]; exists {
+			return ComposerHistory{}, &DuplicateComposerHistoryEntryIDError{ID: entry.id}
+		}
+		positions[entry.id] = index
+	}
+	return ComposerHistory{inner: &composerHistoryData{entries: owned, positions: positions}}, nil
+}
+
+// Len returns the number of history entries
+func (h ComposerHistory) Len() int {
+	if h.inner == nil {
+		return 0
+	}
+	return len(h.inner.entries)
+}
+
+// Empty reports whether history is empty
+func (h ComposerHistory) Empty() bool {
+	return h.Len() == 0
+}
+
+// Entry returns one entry by its current oldest-to-newest index
+func (h ComposerHistory) Entry(index int) (ComposerHistoryEntry, bool) {
+	if h.inner == nil || index < 0 || index >= len(h.inner.entries) {
+		return ComposerHistoryEntry{}, false
+	}
+	return h.inner.entries[index], true
+}
+
+// Entries returns a copy of the immutable oldest-to-newest entries
+func (h ComposerHistory) Entries() []ComposerHistoryEntry {
+	if h.inner == nil {
+		return nil
+	}
+	return append([]ComposerHistoryEntry(nil), h.inner.entries...)
+}
+
+func (h ComposerHistory) position(id ComposerHistoryEntryID) (int, bool) {
+	if h.inner == nil {
+		return 0, false
+	}
+	index, ok := h.inner.positions[id]
+	return index, ok
+}
+
 // ComposerState is application-owned editor, history position, and draft state
 type ComposerState struct {
 	textArea        TextAreaState
 	historyIndex    int
 	hasHistoryIndex bool
+	historyEntryID  ComposerHistoryEntryID
+	hasHistoryEntry bool
 	draft           TextAreaState
 	hasDraft        bool
 }
@@ -41,6 +155,11 @@ func (s ComposerState) HistoryIndex() (int, bool) {
 	return s.historyIndex, s.hasHistoryIndex
 }
 
+// HistoryEntryID returns the stable entry identity currently being browsed
+func (s ComposerState) HistoryEntryID() (ComposerHistoryEntryID, bool) {
+	return s.historyEntryID, s.hasHistoryEntry
+}
+
 // Draft returns the TextArea state restored after browsing past newest history
 func (s ComposerState) Draft() (TextAreaState, bool) {
 	return s.draft, s.hasDraft
@@ -51,8 +170,35 @@ func (s ComposerState) WithTextArea(textArea TextAreaState) ComposerState {
 	s.textArea = normalizeTextAreaState(textArea)
 	s.historyIndex = 0
 	s.hasHistoryIndex = false
+	s.historyEntryID = ComposerHistoryEntryID{}
+	s.hasHistoryEntry = false
 	s.draft = TextAreaState{}
 	s.hasDraft = false
+	return s
+}
+
+// ReconcileHistory reconciles a browsing position against replacement history
+//
+// The same stable entry ID follows reordering and front truncation. A changed
+// value for that ID replaces the editor value. A missing ID exits browsing and
+// restores the preserved draft.
+func (s ComposerState) ReconcileHistory(history ComposerHistory) ComposerState {
+	if !s.hasHistoryEntry {
+		if s.hasHistoryIndex {
+			return composerRestoreDraft(s)
+		}
+		return s
+	}
+	index, ok := history.position(s.historyEntryID)
+	if !ok {
+		return composerRestoreDraft(s)
+	}
+	s.historyIndex = index
+	s.hasHistoryIndex = true
+	entry, _ := history.Entry(index)
+	if s.textArea.value != entry.value {
+		s.textArea = NewTextAreaStateAtEnd(entry.value)
+	}
 	return s
 }
 
@@ -91,7 +237,7 @@ type Composer[Message any] struct {
 	viewportID     tui.NodeID
 	caretID        tui.NodeID
 	state          ComposerState
-	history        []string
+	history        ComposerHistory
 	enabled        bool
 	submitEnabled  bool
 	placeholder    string
@@ -218,12 +364,10 @@ func (c Composer[Message]) MaximumGraphemes(maximum int, overflow ComposerOverfl
 	return c
 }
 
-// History replaces oldest-to-newest recall entries without owning persistence
-func (c Composer[Message]) History(entries []string) Composer[Message] {
-	c.history = make([]string, len(entries))
-	for index, entry := range entries {
-		c.history[index] = celltext.NormalizeUTF8(entry)
-	}
+// History replaces immutable oldest-to-newest recall history
+func (c Composer[Message]) History(history ComposerHistory) Composer[Message] {
+	c.state = c.state.ReconcileHistory(history)
+	c.history = history
 	return c
 }
 
@@ -263,7 +407,7 @@ func (c Composer[Message]) ActionDescriptors() []tui.ActionDescriptor {
 	)
 	hasUp, hasDown := composerTextDirections(text)
 	leading := composerLeadingActionDescriptors(
-		c.enabled, c.submitEnabled, !hasUp && composerHasHistoryPrevious(c.state, len(c.history)),
+		c.enabled, c.submitEnabled, !hasUp && composerHasHistoryPrevious(c.state, c.history),
 		!hasDown && c.state.hasHistoryIndex,
 	)
 	descriptors := make([]tui.ActionDescriptor, 0, composerActionCount)
@@ -274,6 +418,7 @@ func (c Composer[Message]) ActionDescriptors() []tui.ActionDescriptor {
 
 // Node builds the public semantic Node for this Composer
 func (c Composer[Message]) Node() tui.Node[Message] {
+	c.state = c.state.ReconcileHistory(c.history)
 	rows := c.VisibleRows()
 	hasUndo, hasRedo := c.onUndo != nil, c.onRedo != nil
 	current := c.state
@@ -333,8 +478,12 @@ func normalizeComposerState(state ComposerState) ComposerState {
 	state.textArea = normalizeTextAreaState(state.textArea)
 	if !state.hasHistoryIndex {
 		state.historyIndex = 0
+		state.historyEntryID = ComposerHistoryEntryID{}
+		state.hasHistoryEntry = false
 		state.draft = TextAreaState{}
 		state.hasDraft = false
+	} else if !state.hasHistoryEntry {
+		return composerRestoreDraft(state)
 	} else if state.hasDraft {
 		state.draft = normalizeTextAreaState(state.draft)
 	}
@@ -434,20 +583,24 @@ func composerChangedState(current ComposerState, textArea TextAreaState) Compose
 	if valueChanged {
 		next.historyIndex = 0
 		next.hasHistoryIndex = false
+		next.historyEntryID = ComposerHistoryEntryID{}
+		next.hasHistoryEntry = false
 		next.draft = TextAreaState{}
 		next.hasDraft = false
 	}
 	return normalizeComposerState(next)
 }
 
-func composerHistoryPrevious(state ComposerState, history []string) (ComposerState, bool) {
-	if !composerHasHistoryPrevious(state, len(history)) {
+func composerHistoryPrevious(state ComposerState, history ComposerHistory) (ComposerState, bool) {
+	state = state.ReconcileHistory(history)
+	if !composerHasHistoryPrevious(state, history) {
 		return ComposerState{}, false
 	}
-	target := len(history) - 1
+	target := history.Len() - 1
 	if state.hasHistoryIndex {
-		target = min(state.historyIndex, len(history)) - 1
+		target = min(state.historyIndex, history.Len()) - 1
 	}
+	entry, _ := history.Entry(target)
 	next := state
 	if !next.hasDraft {
 		next.draft = next.textArea
@@ -455,36 +608,48 @@ func composerHistoryPrevious(state ComposerState, history []string) (ComposerSta
 	}
 	next.historyIndex = target
 	next.hasHistoryIndex = true
-	next.textArea = NewTextAreaStateAtEnd(history[target])
+	next.historyEntryID = entry.id
+	next.hasHistoryEntry = true
+	next.textArea = NewTextAreaStateAtEnd(entry.value)
 	return normalizeComposerState(next), true
 }
 
-func composerHasHistoryPrevious(state ComposerState, historyLength int) bool {
-	if historyLength == 0 {
+func composerHasHistoryPrevious(state ComposerState, history ComposerHistory) bool {
+	if history.Empty() {
 		return false
 	}
 	return !state.hasHistoryIndex || state.historyIndex != 0
 }
 
-func composerHistoryNext(state ComposerState, history []string) (ComposerState, bool) {
+func composerHistoryNext(state ComposerState, history ComposerHistory) (ComposerState, bool) {
+	state = state.ReconcileHistory(history)
 	if !state.hasHistoryIndex {
 		return ComposerState{}, false
 	}
 	next := state
-	if state.historyIndex+1 < len(history) {
+	if state.historyIndex+1 < history.Len() {
 		target := state.historyIndex + 1
+		entry, _ := history.Entry(target)
 		next.historyIndex = target
-		next.textArea = NewTextAreaStateAtEnd(history[target])
+		next.historyEntryID = entry.id
+		next.hasHistoryEntry = true
+		next.textArea = NewTextAreaStateAtEnd(entry.value)
 		return normalizeComposerState(next), true
 	}
-	if next.hasDraft {
-		next.textArea = next.draft
+	return composerRestoreDraft(next), true
+}
+
+func composerRestoreDraft(state ComposerState) ComposerState {
+	if state.hasDraft {
+		state.textArea = state.draft
 	}
-	next.historyIndex = 0
-	next.hasHistoryIndex = false
-	next.draft = TextAreaState{}
-	next.hasDraft = false
-	return normalizeComposerState(next), true
+	state.historyIndex = 0
+	state.hasHistoryIndex = false
+	state.historyEntryID = ComposerHistoryEntryID{}
+	state.hasHistoryEntry = false
+	state.draft = TextAreaState{}
+	state.hasDraft = false
+	return state
 }
 
 func composerVisibleRows(

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"reflect"
 	"runtime"
 	"testing"
 )
@@ -190,6 +191,33 @@ func TestRuntimeNoticeHandlerDrainsTerminalFacadeQueue(t *testing.T) {
 	}
 	if runtimeUnderTest.PendingRuntimeNotices() != 0 {
 		t.Fatal("handled notice remained queued")
+	}
+}
+
+func TestRuntimeNoticeMapperUpdatesApplicationWithoutSubscription(t *testing.T) {
+	app := &counterApp{}
+	runtimeUnderTest, err := NewRuntimeWithClock[runtimeMessage](
+		app,
+		NewRuntimeConfig(Size{Width: 1, Height: 1}),
+		NewVirtualClock(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtimeUnderTest.Close()
+	runtimeUnderTest.notices.push(RuntimeNotice{kind: RuntimeNoticeEffectPanicked})
+
+	err = mapRuntimeNotices(runtimeUnderTest, func(notice RuntimeNotice) (runtimeMessage, bool) {
+		return runtimeMessage{add: 2}, notice.Kind() == RuntimeNoticeEffectPanicked
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(app.updates, []uint32{2}) {
+		t.Fatalf("updates = %v, want [2]", app.updates)
+	}
+	if runtimeUnderTest.PendingRuntimeNotices() != 0 {
+		t.Fatal("mapped notice remained queued")
 	}
 }
 

@@ -103,6 +103,8 @@ type subscriptionSupervisor[Message any] struct {
 	stops            uint64
 	batchFlushes     uint64
 	notices          *runtimeNoticeQueue
+	workers          *workerTracker
+	closed           bool
 }
 
 func newSubscriptionSupervisor[Message any](inboxCapacity int) *subscriptionSupervisor[Message] {
@@ -115,6 +117,7 @@ func newSubscriptionSupervisorContext[Message any](parent context.Context, inbox
 		inboxCapacity: inboxCapacity,
 		active:        make(map[SubscriptionKey]*activeSubscription[Message]),
 		generations:   make(map[SubscriptionKey]uint64),
+		workers:       &workerTracker{},
 	}
 }
 
@@ -122,6 +125,9 @@ func (s *subscriptionSupervisor[Message]) reconcile(
 	subscription Subscription[Message],
 	now Timestamp,
 ) (subscriptionReconciliation, error) {
+	if s.closed {
+		return subscriptionReconciliation{}, nil
+	}
 	var sources []*subscriptionSource[Message]
 	flattenSubscriptions(subscription, &sources)
 	keys := make(map[SubscriptionKey]struct{}, len(sources))
@@ -160,6 +166,9 @@ func (s *subscriptionSupervisor[Message]) reconcile(
 }
 
 func (s *subscriptionSupervisor[Message]) poll(now Timestamp) {
+	if s.closed {
+		return
+	}
 	for _, key := range s.order {
 		active, exists := s.active[key]
 		if !exists {
@@ -279,6 +288,10 @@ func (s *subscriptionSupervisor[Message]) timeUntilDeadline(now Timestamp) (time
 }
 
 func (s *subscriptionSupervisor[Message]) close() {
+	if s.closed {
+		return
+	}
+	s.closed = true
 	for _, key := range s.order {
 		if active, exists := s.active[key]; exists {
 			s.stopActive(active)
@@ -329,7 +342,10 @@ func (s *subscriptionSupervisor[Message]) startSource(
 		notices := s.notices
 		wake := s.wake
 		tag := active.tag
+		s.workers.start()
+		workers := s.workers
 		go func() {
+			defer workers.finish()
 			panicked := false
 			defer func() {
 				if recover() != nil {

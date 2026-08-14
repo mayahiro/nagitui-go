@@ -449,6 +449,153 @@ func TestRuntimeProcessesFIFOAndCoalescesRendering(t *testing.T) {
 	}
 }
 
+func TestRuntimeSchedulingCycleBoundsUpdatesWithoutReorderingQueue(t *testing.T) {
+	app := &counterApp{}
+	config := NewRuntimeConfig(Size{Width: 3, Height: 1})
+	config.MaxUpdatesPerCycle = 2
+	runtime, err := NewRuntimeWithClock[runtimeMessage](app, config, NewVirtualClock())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	for value := uint32(1); value <= 5; value++ {
+		if err := runtime.Enqueue(runtimeMessage{add: value}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if processed, err := runtime.ProcessPending(); err != nil || processed != 2 {
+		t.Fatalf("ProcessPending = %d, %v, want 2, nil", processed, err)
+	}
+	if !reflect.DeepEqual(app.updates, []uint32{1, 2}) {
+		t.Fatalf("updates = %v, want [1 2]", app.updates)
+	}
+	if runtime.QueuedMessages() != 3 || !runtime.HasPendingUpdates() {
+		t.Fatalf("queued = %d, pending = %t, want 3, true", runtime.QueuedMessages(), runtime.HasPendingUpdates())
+	}
+
+	if processed, err := runtime.ProcessQueued(); err != nil || processed != 3 {
+		t.Fatalf("ProcessQueued = %d, %v, want 3, nil", processed, err)
+	}
+	if !reflect.DeepEqual(app.updates, []uint32{1, 2, 3, 4, 5}) {
+		t.Fatalf("updates = %v, want [1 2 3 4 5]", app.updates)
+	}
+	if runtime.HasPendingUpdates() {
+		t.Fatal("drained runtime still reports pending updates")
+	}
+}
+
+func TestRuntimeRejectsZeroSchedulingCycleLimit(t *testing.T) {
+	config := NewRuntimeConfig(Size{Width: 1, Height: 1})
+	config.MaxUpdatesPerCycle = 0
+	if _, err := NewRuntimeWithClock[runtimeMessage](&counterApp{}, config, NewVirtualClock()); !errors.Is(err, ErrZeroMaxUpdatesPerCycle) {
+		t.Fatalf("error = %v, want ErrZeroMaxUpdatesPerCycle", err)
+	}
+}
+
+type shutdownWaitApp struct {
+	effectReturned chan struct{}
+	streamReturned chan struct{}
+}
+
+func (a *shutdownWaitApp) Init() Effect[struct{}] {
+	return RunEffect(func(ctx context.Context) struct{} {
+		<-ctx.Done()
+		close(a.effectReturned)
+		return struct{}{}
+	})
+}
+
+func (*shutdownWaitApp) Update(struct{}) Effect[struct{}] {
+	return NoneEffect[struct{}]()
+}
+
+func (a *shutdownWaitApp) Subscriptions() Subscription[struct{}] {
+	return StreamSubscription("shutdown", ReliableDelivery(), func(ctx context.Context, _ SubscriptionSink[struct{}]) {
+		<-ctx.Done()
+		close(a.streamReturned)
+	})
+}
+
+func (*shutdownWaitApp) View(ViewContext) Node[struct{}] {
+	return Text[struct{}]("")
+}
+
+func TestRuntimeCloseAndWaitObservesEffectAndStreamReturn(t *testing.T) {
+	app := &shutdownWaitApp{
+		effectReturned: make(chan struct{}),
+		streamReturned: make(chan struct{}),
+	}
+	runtime, err := NewRuntime[struct{}](app, Size{Width: 1, Height: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.CloseAndWait(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-app.effectReturned:
+	default:
+		t.Fatal("CloseAndWait returned before Effect producer")
+	}
+	select {
+	case <-app.streamReturned:
+	default:
+		t.Fatal("CloseAndWait returned before Stream producer")
+	}
+}
+
+type ignoredCancellationApp struct {
+	release <-chan struct{}
+}
+
+func (a *ignoredCancellationApp) Init() Effect[struct{}] {
+	return RunEffect(func(context.Context) struct{} {
+		<-a.release
+		return struct{}{}
+	})
+}
+
+func (*ignoredCancellationApp) Update(struct{}) Effect[struct{}] {
+	return NoneEffect[struct{}]()
+}
+
+func (*ignoredCancellationApp) Subscriptions() Subscription[struct{}] {
+	return NoneSubscription[struct{}]()
+}
+
+func (*ignoredCancellationApp) View(ViewContext) Node[struct{}] {
+	return Text[struct{}]("")
+}
+
+func TestRuntimeCloseAndWaitCanBeRetriedAfterContextCancellation(t *testing.T) {
+	release := make(chan struct{})
+	runtime, err := NewRuntime[struct{}](&ignoredCancellationApp{release: release}, Size{Width: 1, Height: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := runtime.CloseAndWait(cancelled); !errors.Is(err, context.Canceled) {
+		t.Fatalf("CloseAndWait error = %v, want context.Canceled", err)
+	}
+	close(release)
+	if err := runtime.CloseAndWait(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRuntimeCloseAndWaitRejectsNilContext(t *testing.T) {
+	runtime, err := NewRuntime[runtimeMessage](&counterApp{}, Size{Width: 1, Height: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	if err := runtime.CloseAndWait(nil); err == nil {
+		t.Fatal("CloseAndWait accepted nil context")
+	}
+}
+
 type dispatchAllocationApp struct {
 	withAction bool
 }

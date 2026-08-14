@@ -45,3 +45,29 @@ func TestCoreActionDescriptorsAreStaticOrderedAndAxisAware(t *testing.T) {
 		t.Fatalf("resolveCoreActionGroup allocations = %f, want 0", resolvedAllocations)
 	}
 }
+
+func TestCoreActionResolutionHonorsLabelOnlyScope(t *testing.T) {
+	group, ok := coreActionGroupFor(true, ScrollAxisVertical, false)
+	if !ok {
+		t.Fatal("core action group is missing")
+	}
+	keyMap, err := NewKeyMap().Relabel(FocusNextActionID, "次へ移動")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := resolveCoreActionGroup(
+		"owner",
+		group,
+		[]KeyScope{NewKeyScope("localized", keyMap)},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actions := resolved.Actions()
+	if actions[0].Label() != "次へ移動" {
+		t.Fatalf("label = %q", actions[0].Label())
+	}
+	if len(actions[0].Bindings()) != len(group.descriptors[0].defaultBindings) {
+		t.Fatalf("bindings = %#v", actions[0].Bindings())
+	}
+}

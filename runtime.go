@@ -14,6 +14,10 @@ import (
 // DefaultQueueCapacity is the default maximum number of waiting messages
 const DefaultQueueCapacity = 4_096
 
+// DefaultMaxUpdatesPerCycle is the default maximum number of application
+// updates in one scheduling cycle
+const DefaultMaxUpdatesPerCycle = 64
+
 // DefaultTaskLimit is the default maximum number of concurrent effect tasks
 const DefaultTaskLimit = 64
 
@@ -28,6 +32,8 @@ const DefaultRuntimeNoticeCapacity = 256
 var (
 	// ErrZeroQueueCapacity indicates that runtime queue capacity is zero
 	ErrZeroQueueCapacity = errors.New("runtime queue capacity must be positive")
+	// ErrZeroMaxUpdatesPerCycle indicates that the per-cycle update limit is zero
+	ErrZeroMaxUpdatesPerCycle = errors.New("runtime maximum updates per cycle must be positive")
 	// ErrQueueFull indicates that the bounded runtime message queue is full
 	ErrQueueFull = errors.New("runtime message queue is full")
 	// ErrZeroTaskLimit indicates that concurrent task limit is zero
@@ -46,6 +52,8 @@ type RuntimeConfig struct {
 	Size Size
 	// QueueCapacity is the maximum number of waiting messages
 	QueueCapacity int
+	// MaxUpdatesPerCycle is the maximum application updates in one scheduling cycle
+	MaxUpdatesPerCycle int
 	// TaskLimit is the maximum number of effect tasks executing concurrently
 	TaskLimit int
 	// SubscriptionCapacity is the maximum pending values retained per source
@@ -67,6 +75,7 @@ func NewRuntimeConfig(size Size) RuntimeConfig {
 	return RuntimeConfig{
 		Size:                  size,
 		QueueCapacity:         DefaultQueueCapacity,
+		MaxUpdatesPerCycle:    DefaultMaxUpdatesPerCycle,
 		TaskLimit:             DefaultTaskLimit,
 		SubscriptionCapacity:  DefaultSubscriptionCapacity,
 		RuntimeNoticeCapacity: DefaultRuntimeNoticeCapacity,
@@ -104,6 +113,7 @@ type Runtime[Message any] struct {
 	size                    Size
 	queue                   []queuedMessage[Message]
 	queueCapacity           int
+	maxUpdatesPerCycle      int
 	dirty                   bool
 	urgentFrame             bool
 	minimumFrameInterval    time.Duration
@@ -127,6 +137,8 @@ type Runtime[Message any] struct {
 	effects                 *effectSupervisor[Message]
 	subscriptions           *subscriptionSupervisor[Message]
 	notices                 *runtimeNoticeQueue
+	workers                 *workerTracker
+	closed                  bool
 	subscriptionsDirty      bool
 	exitRequested           bool
 	pendingFocus            NodeID
@@ -196,6 +208,9 @@ func newRuntimeWithClockAndWakeContext[Message any](
 	if config.QueueCapacity <= 0 {
 		return nil, ErrZeroQueueCapacity
 	}
+	if config.MaxUpdatesPerCycle <= 0 {
+		return nil, ErrZeroMaxUpdatesPerCycle
+	}
 	if config.TaskLimit <= 0 {
 		return nil, ErrZeroTaskLimit
 	}
@@ -217,12 +232,15 @@ func newRuntimeWithClockAndWakeContext[Message any](
 	startup := app.Init()
 	declaredSubscriptions := app.Subscriptions()
 	notices := newRuntimeNoticeQueue(config.RuntimeNoticeCapacity)
+	workers := &workerTracker{}
 	effects := newEffectSupervisorContext[Message](parent, config.TaskLimit)
 	effects.notices = notices
+	effects.workers = workers
 	effects.wake = wake
 	effects.schedule(startup, clock.Now())
 	subscriptions := newSubscriptionSupervisorContext[Message](parent, config.SubscriptionCapacity)
 	subscriptions.notices = notices
+	subscriptions.workers = workers
 	subscriptions.wake = wake
 	if _, err := subscriptions.reconcile(declaredSubscriptions, clock.Now()); err != nil {
 		effects.close()
@@ -234,6 +252,7 @@ func newRuntimeWithClockAndWakeContext[Message any](
 		size:                 config.Size,
 		queue:                make([]queuedMessage[Message], 0, min(config.QueueCapacity, 64)),
 		queueCapacity:        config.QueueCapacity,
+		maxUpdatesPerCycle:   config.MaxUpdatesPerCycle,
 		dirty:                true,
 		urgentFrame:          true,
 		minimumFrameInterval: config.MinimumFrameInterval,
@@ -245,15 +264,35 @@ func newRuntimeWithClockAndWakeContext[Message any](
 		effects:              effects,
 		subscriptions:        subscriptions,
 		notices:              notices,
+		workers:              workers,
 	}
 	runtime.applyEffectCommands()
 	return runtime, nil
 }
 
-// Close cooperatively cancels active effect tasks and timers
+// Close cooperatively cancels active Effects and Subscriptions without waiting
+// for their producer functions to return
 func (r *Runtime[Message]) Close() {
+	if r.closed {
+		return
+	}
+	r.closed = true
 	r.effects.close()
 	r.subscriptions.close()
+	r.subscriptionsDirty = false
+}
+
+// CloseAndWait requests cooperative cancellation and waits until every
+// Nagi-started Effect and Stream producer function has returned or ctx ends
+//
+// Application-owned processes or goroutines started inside a producer are
+// outside this wait boundary. A nil context returns an error.
+func (r *Runtime[Message]) CloseAndWait(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("nagi-tui: nil close wait context")
+	}
+	r.Close()
+	return r.workers.wait(ctx)
 }
 
 // App returns the application instance owned by the runtime
@@ -308,11 +347,25 @@ func (r *Runtime[Message]) QueuedMessages() int {
 	return len(r.queue)
 }
 
+// HasPendingUpdates reports whether another scheduling cycle can apply an
+// update without waiting for input, a wake-up, or a future deadline
+func (r *Runtime[Message]) HasPendingUpdates() bool {
+	if len(r.queue) > 0 || len(r.effects.ready) > 0 {
+		return true
+	}
+	deadline, ok := r.subscriptions.timeUntilDeadline(r.clock.Now())
+	return ok && deadline == 0
+}
+
 // PollEffects moves due timers and completed tasks into the bounded queue
 func (r *Runtime[Message]) PollEffects() int {
+	return r.pollEffectsUpTo(r.queueCapacity)
+}
+
+func (r *Runtime[Message]) pollEffectsUpTo(maximum int) int {
 	r.effects.poll(r.clock.Now())
 	r.applyEffectCommands()
-	available := r.queueCapacity - len(r.queue)
+	available := min(r.queueCapacity-len(r.queue), maximum)
 	count := 0
 	for count < available {
 		message, ok := r.effects.popReady()
@@ -332,8 +385,12 @@ func (r *Runtime[Message]) ExitRequested() bool {
 
 // PollSubscriptions moves ready subscription values into the bounded queue
 func (r *Runtime[Message]) PollSubscriptions() int {
+	return r.pollSubscriptionsUpTo(r.queueCapacity)
+}
+
+func (r *Runtime[Message]) pollSubscriptionsUpTo(maximum int) int {
 	r.subscriptions.poll(r.clock.Now())
-	available := r.queueCapacity - len(r.queue)
+	available := min(r.queueCapacity-len(r.queue), maximum)
 	messages := r.subscriptions.takeReady(available)
 	for _, delivery := range messages {
 		tag := delivery.tag
@@ -462,21 +519,22 @@ func (r *Runtime[Message]) TimeUntilFrameDeadline() (time.Duration, bool) {
 	return time.Duration(deadline - r.clock.Now()), true
 }
 
-// ProcessPending applies every queued message in FIFO order without rendering
-// between messages
+// ProcessPending applies at most the configured per-cycle number of messages
+// in FIFO order without rendering between messages
 func (r *Runtime[Message]) ProcessPending() (int, error) {
 	return r.ProcessPendingWith(nil)
 }
 
-// ProcessPendingWith applies queued messages and observes each immediately
-// before Update
+// ProcessPendingWith applies one bounded scheduling cycle and observes each
+// message immediately before Update
 func (r *Runtime[Message]) ProcessPendingWith(observe func(Message)) (int, error) {
 	if err := r.reconcileSubscriptions(); err != nil {
 		return 0, err
 	}
-	r.PollEffects()
-	r.PollSubscriptions()
-	return r.processQueuedWith(observe)
+	remaining := max(r.maxUpdatesPerCycle-len(r.queue), 0)
+	effects := r.pollEffectsUpTo(remaining)
+	r.pollSubscriptionsUpTo(remaining - effects)
+	return r.processQueuedWith(observe, r.maxUpdatesPerCycle)
 }
 
 // ProcessQueued applies messages already in the application queue without
@@ -491,12 +549,12 @@ func (r *Runtime[Message]) ProcessQueuedWith(observe func(Message)) (int, error)
 	if err := r.reconcileSubscriptions(); err != nil {
 		return 0, err
 	}
-	return r.processQueuedWith(observe)
+	return r.processQueuedWith(observe, 0)
 }
 
-func (r *Runtime[Message]) processQueuedWith(observe func(Message)) (int, error) {
+func (r *Runtime[Message]) processQueuedWith(observe func(Message), maximum int) (int, error) {
 	processed := 0
-	for len(r.queue) > 0 {
+	for len(r.queue) > 0 && (maximum <= 0 || processed < maximum) {
 		queued := r.queue[0]
 		var zero queuedMessage[Message]
 		r.queue[0] = zero
@@ -1490,7 +1548,7 @@ func visibleAxisOffset(current uint32, viewportStart int32, viewportSize uint32,
 	}
 }
 
-// Step processes all queued messages and produces at most one frame
+// Step processes one bounded scheduling cycle and produces at most one frame
 func (r *Runtime[Message]) Step() (*Frame, error) {
 	if _, err := r.ProcessPending(); err != nil {
 		return nil, err
